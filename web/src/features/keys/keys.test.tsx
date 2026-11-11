@@ -1,0 +1,38 @@
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { App } from '../../app';
+import { session } from '../../lib/api';
+const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/ui/'); vi.unstubAllGlobals(); });
+test('personal_keys_direct_route_requires_explicit_duration_and_clears_one_time_secret', async () => {
+  history.replaceState(null, '', '/ui/keys');
+  const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === '/gateway/me') return Promise.resolve(response(me));
+    if (String(input).startsWith('/gateway/usage')) return Promise.resolve(response({ error: { code: 'synthetic' } }, 503));
+    if (String(input) === '/gateway/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2099-01-01T00:00:00Z' }));
+    if (init?.method === 'POST') return Promise.resolve(response({ key: 'one-time-synthetic-secret', metadata: { id: 'key1' } }, 201));
+    return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
+  });
+  vi.stubGlobal('fetch', fetcher); render(<App />);
+  await screen.findByRole('heading', { name: '내 키' });
+  const duration = screen.getByLabelText('유효기간') as HTMLSelectElement;
+  expect(duration.labels?.[0].textContent).toBe('유효기간');
+  expect(duration.value).toBe('');
+  expect(screen.getByLabelText('유효기간').querySelectorAll('option')).toHaveLength(6);
+  fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '명시 키' } });
+  fireEvent.submit(screen.getByRole('form', { name: '개인 키 발급' }));
+  expect(fetcher.mock.calls.filter(c => c[1]?.method === 'POST')).toHaveLength(0);
+  fireEvent.change(screen.getByLabelText('유효기간'), { target: { value: 'unlimited' } });
+  fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
+  fireEvent.submit(screen.getByRole('form', { name: '개인 키 발급' }));
+  fireEvent.click(await screen.findByRole('button', { name: '발급 확인' }));
+  await screen.findByText('one-time-synthetic-secret');
+  const post = fetcher.mock.calls.find(c => c[1]?.method === 'POST')!;
+  expect(new Headers(post[1]?.headers).get('x-csrf-token')).toBe('synthetic-csrf');
+  expect(new Headers(post[1]?.headers).get('x-gateway-command-id')).toMatch(/^[0-9a-f-]{36}$/);
+  expect(JSON.parse(String(post[1]?.body)).validity).toBe('unlimited');
+  fireEvent.click(screen.getByRole('button', { name: '원문 닫기' }));
+  expect(screen.queryByText('one-time-synthetic-secret')).toBeNull();
+  expect(localStorage.length + sessionStorage.length).toBe(0);
+});

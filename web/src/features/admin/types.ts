@@ -1,0 +1,11 @@
+import type { BlockState, Grant, Limits } from '../../lib/types';
+export type Safety = { paused: boolean; version: string; reason: string | null; paused_at: string | null; trigger_request_id: string | null };
+export type Policy = { id: string; version: string; disabled: boolean; grants: Grant[]; limits: Limits };
+export type PrincipalSummary = { id: string; kind: 'human' | 'service'; display_name: string; email: string | null; management_owner_id: string | null; version: string; policy_version: string; disabled: boolean; inference_safety: Safety; block_state: BlockState };
+export type Principal = Omit<PrincipalSummary, 'policy_version' | 'disabled'> & { policy: Policy };
+export type PrincipalDetail = { principal: Principal; execution_ceiling: { grants: Grant[]; limits: Limits } };
+export type CommandAck = { command_id: string; operation: string; target: { kind: string; id: string }; result_version: string | null; effect: 'changed' | 'noop'; replayed: boolean };
+export type RequestSummary = { id: string; parent_request_id: string | null; purpose: string; principal_id: string; key_id: string | null; provider: string; model: string; api: string; admitted_at: string; finished_at: string | null; phase: string; outcome: string | null; accounting_state: string; cost_usd: string | null; version: string; reason_code: string | null };
+export type SelectedUsage = { source: string; actual_model: string | null; input_tokens: string | null; output_tokens: string | null; cache_read_tokens: string | null; cache_write_tokens: string | null; reasoning_tokens: string | null; counted_input_tokens: string | null };
+export type SettlementRecord = { source: 'manual_entry'; decision: string; cost_usd: string; reason: string; actor_principal_id: string; settled_at: string; executor_id: string; execution_stop_source: 'runtime' | 'admin_confirmation' };
+export type RequestDetail = RequestSummary & { provider_request_id: string | null; http_status: number | null; pricing_snapshot: unknown; execution_snapshot: unknown; budgets: unknown[]; usage: { partial: SelectedUsage | null; final: SelectedUsage | null; late_final: SelectedUsage | null }; executor_id: string; execution_stopped_at: string | null; settlement: SettlementRecord | null };

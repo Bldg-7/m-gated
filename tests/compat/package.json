@@ -1,0 +1,21 @@
+{
+  "name": "m-gated-compat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.22.2",
+    "npm": "10.9.7"
+  },
+  "scripts": {
+    "test": "node anthropic.mjs",
+    "test:responses": "node responses.mjs",
+    "test:chat-embeddings": "node chat-embeddings.mjs",
+    "test:deepseek": "node deepseek.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.63",
+    "@anthropic-ai/sdk": "0.78.0",
+    "openai": "6.22.0"
+  }
+}

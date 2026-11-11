@@ -1,0 +1,13 @@
+.git
+target
+**/node_modules
+**/*.map
+**/*.har
+**/test-results
+**/playwright-report
+**/screenshots
+**/trace*.zip
+.env*
+gateway.local.yaml
+**/.artifacts
+scripts

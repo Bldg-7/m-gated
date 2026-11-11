@@ -1,0 +1,171 @@
+# m-gated example configuration
+#
+# Copy to gateway.yaml (the default path) or pass it with --config <path>.
+# Every value below is a placeholder. Replace the example.com hosts, e-mail
+# addresses, database coordinates and, above all, the model rates.
+#
+# Parser notes:
+#   - Unknown keys anywhere are rejected at startup.
+#   - YAML anchors, aliases, tags and merge keys are rejected.
+#   - The file may be at most 256 KiB.
+#
+# Secrets are never read from this file. Provide them as environment
+# variables: DB_PASSWORD, CSRF_SIGNING_KEY (64 lowercase hex chars) and one
+# <PROVIDER>_API_KEY per configured provider (ANTHROPIC_API_KEY,
+# OPENAI_API_KEY, DEEPSEEK_API_KEY).
+
+# Public HTTPS origin of the gateway (scheme + host only, no path, no port).
+# Browser writes from the dashboard must carry exactly this Origin.
+# Env override: PUBLIC_ORIGIN
+public_origin: https://gateway.example.com
+
+# External SSO that issues RS256 access JWTs.
+auth:
+  # Must equal the JWT "iss" claim byte for byte: lowercase host, no path,
+  # no trailing slash. Env override: AUTH_ISSUER
+  issuer: https://sso.example.com
+  # JWKS used to verify token signatures. Env override: AUTH_JWKS_URI
+  jwks_uri: https://sso.example.com/.well-known/jwks.json
+  # Must equal the JWT "aud" claim (a single string, or a one-element array).
+  # Must be an https origin with no path and no trailing slash.
+  # Env override: SSO_AUDIENCE
+  audience: https://example.com
+  # Name of the cookie in which the SSO stores the access JWT for the
+  # dashboard. Env override: SSO_ACCESS_COOKIE_NAME
+  access_cookie_name: sso_access
+  # login_url, refresh_url, logout_url and jwks_uri must all share the
+  # issuer origin. Env overrides: SSO_LOGIN_URL, SSO_REFRESH_URL, SSO_LOGOUT_URL
+  login_url: https://sso.example.com/login
+  refresh_url: https://sso.example.com/refresh
+  logout_url: https://sso.example.com/logout
+
+# Exact, case-insensitive e-mail allow-list (no wildcards). Only users whose
+# verified "email" claim is listed can use the gateway.
+# Env override: ALLOWED_EMAILS (comma separated)
+allowed_emails:
+  - alice@example.com
+  - bob@example.com
+
+# Administrators. Admins are automatically allowed.
+# Env override: ADMIN_EMAILS (comma separated)
+admin_emails:
+  - admin@example.com
+
+# PostgreSQL. Connections always use TLS with full certificate verification;
+# set TLS_CA_FILE to a PEM file if the server certificate is not signed by a
+# publicly trusted CA. The password comes from DB_PASSWORD.
+# Env overrides: DB_HOST, DB_PORT, DB_NAME, DB_USER
+database:
+  host: db.example.com
+  port: 5432
+  name: m_gated
+  user: m_gated
+
+providers:
+  # base_url must be the official API origin of the provider; it cannot point
+  # anywhere else. At most one entry per provider. Requires ANTHROPIC_API_KEY.
+  - provider: anthropic
+    base_url: https://api.anthropic.com
+    profiles:
+      # A profile admits exactly one (model, api) pair. Requests for models
+      # without a profile are rejected.
+      - model: claude-opus-5-5
+        api: messages
+        # Free-form labels (max 64 bytes) recorded in every ledger snapshot.
+        # Bump pricing_version whenever you change rates.
+        profile_version: opus-messages-v1
+        pricing_version: anthropic-price-2026-01
+        fixture_version: anthropic-messages-v1
+        # Model names the provider may report in its response for this
+        # profile. Must include the profile model itself.
+        actual_models:
+          - claude-opus-5-5
+        # Request features this profile accepts.
+        # One of: client_tools, thinking, cache, json_schema, inline_png
+        features: [client_tools, thinking, cache]
+        # anthropic-beta header values a client may send. Any other value is
+        # rejected. Claude Code 2.1.322 sends these 8 with this model name.
+        approved_beta:
+          - claude-code-20250219
+          - interleaved-thinking-2025-05-14
+          - context-management-2025-06-27
+          - per-turn-control-2026-07-01
+          - mid-conversation-tool-changes-2026-07-01
+          - thinking-token-count-2026-05-13
+          - advanced-tool-use-2025-11-20
+          - effort-2025-11-24
+        # Worst-case billable input per request (including cached tokens).
+        # PLACEHOLDER: set this to the full context window of the model. If a
+        # request is billed above the worst-case bound derived from this
+        # value, the user is automatically paused for inference.
+        max_input_tokens: 200000
+        # Largest max_tokens a request may ask for. Claude Code sends 128000.
+        max_output_tokens: 128000
+        # Request body limit (at most limits.inference_body_bytes, 8 MiB).
+        max_body_bytes: 8388608
+        # Response size limit (at most 16 MiB).
+        max_response_bytes: 16777216
+        # ------------------------------------------------------------------
+        # RATES: PLACEHOLDERS - YOU MUST REPLACE THEM.
+        # m-gated ships no price table. Fill these from the provider price
+        # list for this exact model. Unit: USD per 1,000,000 tokens, as a
+        # quoted string with exactly 12 decimal places.
+        # Zero is syntactically valid, so leaving these values in place makes
+        # every request settle at 0 USD and budgets never trigger.
+        # The cache feature requires cache_read plus exactly one of
+        # cache_write or cache_write_5m (only the 5 minute cache TTL is
+        # accepted in requests).
+        # ------------------------------------------------------------------
+        rates:
+          input: '0.000000000000'
+          output: '0.000000000000'
+          cache_read: '0.000000000000'
+          cache_write_5m: '0.000000000000'
+
+  # Optional second provider. Remove this block if you do not use OpenAI;
+  # otherwise OPENAI_API_KEY is required.
+  - provider: openai
+    base_url: https://api.openai.com
+    profiles:
+      - model: example-openai-model
+        api: responses
+        profile_version: example-responses-v1
+        pricing_version: openai-price-2026-01
+        fixture_version: openai-responses-v1
+        actual_models:
+          - example-openai-model
+        features: [client_tools, json_schema]
+        # PLACEHOLDER: the model context window.
+        max_input_tokens: 128000
+        max_output_tokens: 16384
+        max_body_bytes: 8388608
+        max_response_bytes: 16777216
+        # PLACEHOLDER RATES - replace from the provider price list.
+        rates:
+          input: '0.000000000000'
+          output: '0.000000000000'
+
+# Optional. Retention selection for ledger detail, audit and command records.
+# Values: 3_months, 6_months, 1_year, 3_years, unlimited.
+# Omitted means no deletion. Selecting a period never deletes anything by
+# itself; deletion only happens through the explicit maintenance command.
+retention:
+  ledger: 1_year
+
+# Optional. Server-wide ceiling applied on top of every principal and key
+# policy (the effective limit is the smaller of the two).
+# execution_ceiling:
+#   rpm: 600
+#   tpm: 2000000
+#   count_rpm: 600
+#   budget:
+#     mode: actual
+#     limit_usd: '500.000000000000'
+#     period: {kind: calendar_month, timezone: UTC}
+
+# Optional. Process limits. Defaults are also the maximums; values may only
+# be lowered. See the README for the full list.
+# limits:
+#   per_principal: 2
+#   request_timeout_ms: 600000
+#   transport_timeout_ms: 595000
