@@ -22,6 +22,7 @@ pub struct Dependencies {
     dashboard: Option<Arc<crate::admin::DashboardApi>>,
     ui: Option<Arc<crate::dashboard::UiBundle>>,
     credentials: Option<Arc<crate::credentials::CredentialService>>,
+    catalog: Option<Arc<crate::catalog::CatalogService>>,
 }
 impl Dependencies {
     pub fn unassembled() -> Self {
@@ -36,7 +37,13 @@ impl Dependencies {
             dashboard: None,
             ui: None,
             credentials: None,
+            catalog: None,
         }
+    }
+    /// 상태 점검 주기마다 승인된 카탈로그 버전을 캐시에 반영한다. 준비 상태(ready)에는 영향을 주지 않는다.
+    pub fn with_catalog(mut self, catalog: Arc<crate::catalog::CatalogService>) -> Self {
+        self.catalog = Some(catalog);
+        self
     }
     /// 상태 점검 주기마다 DB의 회사 키 변경을 캐시에 반영한다. 준비 상태(ready)에는 영향을 주지 않는다.
     pub fn with_credentials(
@@ -80,6 +87,11 @@ impl Dependencies {
             .refresh()
             .await
             .map_err(|_| StartupError::SchemaUnavailable)?;
+        let catalog = crate::catalog::CatalogService::new(config, store.clone())?;
+        catalog
+            .refresh()
+            .await
+            .map_err(|_| StartupError::SchemaUnavailable)?;
         let inference = Arc::new(
             crate::gateway::InferenceGateway::new(
                 config,
@@ -87,17 +99,20 @@ impl Dependencies {
                 ledger,
                 credentials.cache(),
             )
-            .map_err(|_| StartupError::InvalidProfile)?,
+            .map_err(|_| StartupError::InvalidProfile)?
+            .with_catalog(catalog.cache()),
         );
         let dashboard = Arc::new(
             crate::admin::DashboardApi::new(config, auth.clone(), store)
-                .with_credentials(credentials.clone()),
+                .with_credentials(credentials.clone())
+                .with_catalog(catalog.clone()),
         );
         Ok(Self::unassembled()
             .with_dashboard(dashboard)
             .with_authentication(auth)
             .with_inference(inference)
-            .with_credentials(credentials))
+            .with_credentials(credentials)
+            .with_catalog(catalog))
     }
     pub fn with_ui(mut self, ui: Arc<crate::dashboard::UiBundle>) -> Self {
         self.ui = Some(ui);
@@ -177,6 +192,9 @@ impl RunningApp {
         };
         let credentials = async {
             if let Some(c) = &self.dependencies.credentials {
+                let _ = c.refresh().await;
+            }
+            if let Some(c) = &self.dependencies.catalog {
                 let _ = c.refresh().await;
             }
         };

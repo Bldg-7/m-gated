@@ -8,6 +8,7 @@ import { KeysScreen } from './features/keys/keys';
 import { PrincipalsScreen } from './features/admin/principals';
 import { RequestsScreen } from './features/admin/requests';
 import { CredentialsScreen } from './features/admin/credentials';
+import { ModelsScreen } from './features/admin/models';
 import { isScreen, Link, useRoute, type Screen } from './lib/router';
 import { changeLanguage, languages, msgid } from './lib/i18n';
 import { Pill, Select } from './ui/ui';
@@ -49,6 +50,7 @@ const pages: Record<Screen, { nav: string; title: string; lead?: string }> = {
   '/ui/admin/principals': { nav: msgid('주체·정책·키 관리'), title: msgid('주체 · 정책 · 키'), lead: msgid('사람·서비스 주체의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
   '/ui/admin/usage': { nav: msgid('전체 사용량'), title: msgid('전체 사용량'), lead: msgid('주체·키별 사용량을 조회합니다. 주체를 지정하지 않은 전체 합계에는 예산 잔액이 없습니다.') },
   '/ui/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
+  '/ui/admin/models': { nav: msgid('모델·가격'), title: msgid('모델 · 가격 카탈로그'), lead: msgid('공급사 모델과 가격을 공개 가격 목록(models.dev, LiteLLM, OpenRouter)에서 불러옵니다. 동기화는 변경안만 만들고, 관리자가 이전 값과 비교해 승인해야 적용됩니다. 이미 기록된 요청의 금액은 바뀌지 않습니다.') },
   '/ui/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 회사 키'), lead: msgid('회사 키는 DB에 암호화해 저장합니다. 저장 전에 Provider의 모델 목록 API로 실제 확인을 1회 거치며, 거절되거나 확인이 안 되면 저장하지 않습니다. 저장한 키는 다시 볼 수 없고 끝 4자리만 표시합니다. 다른 서버 인스턴스에는 상태 점검 주기(수 초) 안에 반영되고, 진행 중인 요청은 시작할 때의 키를 끝까지 씁니다.') },
 };
 /** 서버가 내준 경로를 화면으로. 등록되지 않은 /ui/admin/* 는 전체 사용량, 그 밖은 내 사용량(기존 동작과 같음). */
@@ -85,7 +87,7 @@ export function App() {
     title.current?.focus();
   }, [route.href]);
   const link = (path: Screen) => <Link href={path} aria-current={screen === path ? 'page' : undefined}>{t(pages[path].nav)}</Link>;
-  const content = screen.startsWith('/ui/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p> : screen === '/ui/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/ui/keys' ? <KeysScreen key={principal.current} /> : <UsageScreen key={principal.current} />;
+  const content = screen.startsWith('/ui/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p> : screen === '/ui/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/ui/keys' ? <KeysScreen key={principal.current} /> : <UsageScreen key={principal.current} />;
   return <div className="app">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark" aria-hidden="true">mg</span>m-gated</div>
@@ -96,7 +98,7 @@ export function App() {
       </section>}
       <nav aria-label={t('기본')} className="nav">
         <div className="nav-group"><span className="nav-label">{t('내 계정')}</span>{link('/ui/')}{link('/ui/keys')}</div>
-        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/ui/admin/principals')}{link('/ui/admin/usage')}{link('/ui/admin/requests')}{link('/ui/admin/credentials')}</div>}
+        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/ui/admin/principals')}{link('/ui/admin/usage')}{link('/ui/admin/requests')}{link('/ui/admin/credentials')}{link('/ui/admin/models')}</div>}
       </nav>
       <LanguageSwitch />
     </aside>

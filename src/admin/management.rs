@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 const CREDENTIALS: &str = "/gateway/admin/provider-credentials";
+const CATALOG: &str = "/gateway/admin/model-catalog";
 fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
 }
@@ -55,6 +56,8 @@ pub(super) fn error(e: ManagementError) -> Response {
         }
         CredentialRejected => (422, "provider_credential_rejected"),
         CredentialUnverified => (502, "provider_credential_unverified"),
+        CatalogSourcesUnavailable => (502, "catalog_sources_unavailable"),
+        CatalogProposalStale => (409, "catalog_proposal_stale"),
         CredentialConflict(current) => {
             return details(
                 StatusCode::CONFLICT,
@@ -80,8 +83,12 @@ pub(super) fn error(e: ManagementError) -> Response {
 }
 pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> Response {
     let path = request.uri().path();
-    let allowed = if path == "/gateway/csrf" || path == CREDENTIALS {
+    let allowed = if path == "/gateway/csrf" || path == CREDENTIALS || path == CATALOG {
         vec![Method::GET]
+    } else if path == "/gateway/admin/model-catalog/sync"
+        || path == "/gateway/admin/model-catalog/approve"
+    {
+        vec![Method::POST]
     } else if path.starts_with(CREDENTIALS) {
         vec![Method::PUT, Method::DELETE]
     } else if path == "/gateway/keys" || path == "/gateway/admin/principals" {
@@ -243,11 +250,15 @@ async fn execute(
     if path == CREDENTIALS || path.starts_with(CREDENTIALS) {
         return provider_credentials(state, &head, body, human.current.id).await;
     }
+    if path == CATALOG || path.starts_with(CATALOG) {
+        return model_catalog(state, &head, body, human.current.id).await;
+    }
+    let grants = state.api.grants();
     let ctx = QueryContext {
         actor: human.current.id,
         admin,
         settings: state.api.auth.settings(),
-        grants: &state.api.grants,
+        grants: &grants,
         digest: &state.api.digest,
         signing_key: &state.api.signing_key,
     };
@@ -488,7 +499,7 @@ async fn execute(
         method: head.method.as_str(),
         path: &normalized_path,
         settings: state.api.auth.settings(),
-        grants: &state.api.grants,
+        grants: &grants,
         digest: state.api.digest_bytes,
         ceiling: &state.api.ceiling,
         execution_running: running,
@@ -642,13 +653,14 @@ async fn provider_credentials(
         }
         CredentialCommand::Retire { provider, expected }
     };
+    let grants = state.api.grants();
     let ctx = CommandContext {
         actor,
         command_id,
         method: head.method.as_str(),
         path,
         settings: state.api.auth.settings(),
-        grants: &state.api.grants,
+        grants: &grants,
         digest: state.api.digest_bytes,
         ceiling: &state.api.ceiling,
         execution_running: false,
@@ -656,6 +668,142 @@ async fn provider_credentials(
     match service.execute(&ctx, command).await {
         Ok(result) => {
             // 이 프로세스는 즉시, 다른 프로세스는 상태 점검 주기에 맞춰 반영한다.
+            let _ = service.refresh().await;
+            let mut r = match result.body {
+                Some(v) => success(v),
+                None => StatusCode::NO_CONTENT.into_response(),
+            };
+            *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            r.headers_mut().insert(
+                "x-gateway-command-id",
+                HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
+            );
+            r.headers_mut().insert(
+                "x-gateway-command-replayed",
+                HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
+            );
+            r
+        }
+        Err(e) => error(e),
+    }
+}
+
+/// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인.
+async fn model_catalog(
+    state: &ApiState,
+    head: &axum::http::request::Parts,
+    body: axum::body::Body,
+    actor: Uuid,
+) -> Response {
+    let Some(service) = state.api.catalog.clone().filter(|c| c.enabled()) else {
+        return error(ManagementError::NotFound);
+    };
+    let path = head.uri.path();
+    if head.uri.query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    if head.method == Method::GET {
+        return match service.view().await {
+            Ok(v) => success(v),
+            Err(e) => error(e),
+        };
+    }
+    let commands: Vec<_> = head
+        .headers
+        .get_all("x-gateway-command-id")
+        .iter()
+        .collect();
+    let Some(command_id) = (commands.len() == 1)
+        .then(|| {
+            commands[0]
+                .to_str()
+                .ok()
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
+        .flatten()
+    else {
+        return error(ManagementError::Invalid);
+    };
+    if head
+        .headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .any(|v| v.as_bytes() != b"identity")
+    {
+        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+    }
+    let body_limit = state.runtime.limits().management_body_bytes;
+    let bytes = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        to_bytes(body, body_limit),
+    )
+    .await
+    {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
+        Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
+    };
+    let input: Value = if bytes.is_empty() {
+        json!({})
+    } else if !crate::providers::anthropic::json_content_type(&head.headers) {
+        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+    } else {
+        match serde_json::from_slice(&bytes) {
+            Ok(v @ Value::Object(_)) => v,
+            _ => return error(ManagementError::Invalid),
+        }
+    };
+    let grants = state.api.grants();
+    let ctx = CommandContext {
+        actor,
+        command_id,
+        method: head.method.as_str(),
+        path,
+        settings: state.api.auth.settings(),
+        grants: &grants,
+        digest: state.api.digest_bytes,
+        ceiling: &state.api.ceiling,
+        execution_running: false,
+    };
+    let result = if path == "/gateway/admin/model-catalog/sync" {
+        if input.as_object().is_some_and(|o| !o.is_empty()) {
+            return error(ManagementError::Invalid);
+        }
+        service.sync(&ctx).await
+    } else {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Item {
+            provider: String,
+            model: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Approve {
+            proposal_id: Uuid,
+            expected_version: String,
+            items: Vec<Item>,
+        }
+        let Ok(approve) = serde_json::from_value::<Approve>(input) else {
+            return error(ManagementError::Invalid);
+        };
+        let Ok(expected) = approve.expected_version.parse::<i64>() else {
+            return error(ManagementError::Invalid);
+        };
+        let selected: std::collections::BTreeSet<_> = approve
+            .items
+            .into_iter()
+            .map(|i| (i.provider, i.model))
+            .collect();
+        service
+            .approve(&ctx, approve.proposal_id, expected, selected)
+            .await
+    };
+    match result {
+        Ok(result) => {
+            // 이 프로세스는 즉시, 다른 프로세스는 상태 점검 주기에 맞춰 새 버전을 쓴다.
             let _ = service.refresh().await;
             let mut r = match result.body {
                 Some(v) => success(v),

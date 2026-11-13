@@ -1,7 +1,7 @@
 import { createElement, useSyncExternalStore, type AnchorHTMLAttributes, type MouseEvent } from 'react';
 
 /** 서버(src/dashboard.rs SCREENS)가 HTML을 내주는 경로와 같아야 한다. 여기 없는 경로로는 이동하지 않는다. */
-export const SCREENS = ['/ui/', '/ui/keys', '/ui/admin/principals', '/ui/admin/usage', '/ui/admin/requests', '/ui/admin/credentials'] as const;
+export const SCREENS = ['/ui/', '/ui/keys', '/ui/admin/principals', '/ui/admin/usage', '/ui/admin/requests', '/ui/admin/credentials', '/ui/admin/models'] as const;
 export type Screen = (typeof SCREENS)[number];
 export type Route = { path: string; search: string; href: string };
 

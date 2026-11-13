@@ -212,7 +212,97 @@ pub enum BillingClass {
 struct RawProvider {
     provider: ProviderId,
     base_url: String,
+    #[serde(default)]
     profiles: Vec<ModelProfile>,
+    catalog: Option<CatalogTemplate>,
+}
+/// 모델·가격을 DB 카탈로그에서 관리하는 공급사의 공통 정책.
+/// 모델별 값(이름·가격·토큰 한도)은 관리자가 공개 가격 목록에서 동기화한 뒤 승인한다.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogTemplate {
+    pub api: ApiKind,
+    pub fixture_version: String,
+    #[serde(default)]
+    pub features: Vec<NativeFeature>,
+    #[serde(default)]
+    pub approved_beta: Vec<String>,
+    pub chat_output_limit_field: Option<String>,
+    pub max_body_bytes: usize,
+    pub max_response_bytes: usize,
+    /// 동기화 때 새 모델 후보로 보여 줄 모델 이름 접두사(예: `claude-`).
+    pub model_prefixes: Vec<String>,
+}
+impl CatalogTemplate {
+    /// 카탈로그 항목 하나를 일반 profile 로 만든다. 검증은 설정 파일 profile 과 같은 규칙을 쓴다.
+    pub fn profile(
+        &self,
+        model: &str,
+        version: i64,
+        rates: BTreeMap<String, String>,
+        max_input_tokens: u64,
+        max_output_tokens: u64,
+    ) -> ModelProfile {
+        ModelProfile {
+            model: model.to_owned(),
+            api: self.api,
+            profile_version: format!("catalog-v{version}"),
+            pricing_version: format!("catalog-v{version}"),
+            fixture_version: self.fixture_version.clone(),
+            actual_models: vec![model.to_owned()],
+            features: self.features.clone(),
+            approved_beta: self.approved_beta.clone(),
+            billing_class: BillingClass::Chargeable,
+            internal_count: false,
+            count_billing: None,
+            billing_time_rule: None,
+            input_bound_contract: None,
+            chat_output_limit_field: self.chat_output_limit_field.clone(),
+            embedding_dimensions: None,
+            embedding_encodings: Vec::new(),
+            max_input_tokens,
+            max_output_tokens: Some(max_output_tokens),
+            max_body_bytes: self.max_body_bytes,
+            max_response_bytes: self.max_response_bytes,
+            rates,
+        }
+    }
+    /// 이 정책으로 profile 을 만들 때 필요한 가격 항목.
+    pub fn required_rates(&self, provider: ProviderId) -> Vec<&'static str> {
+        let mut keys = vec!["input", "output"];
+        if self.features.contains(&NativeFeature::Cache) {
+            keys.push("cache_read");
+            if provider == ProviderId::Anthropic {
+                keys.push("cache_write_5m");
+            }
+        }
+        keys
+    }
+    fn validate(&self, provider: ProviderId, limits: &Limits) -> Result<(), StartupError> {
+        if !matches!(
+            (provider, self.api),
+            (ProviderId::Anthropic, ApiKind::Messages)
+                | (ProviderId::Openai, ApiKind::Responses | ApiKind::OpenaiChat)
+        ) || self.model_prefixes.is_empty()
+            || self.model_prefixes.len() > 16
+            || self.model_prefixes.iter().any(|p| {
+                p.is_empty()
+                    || p.len() > 64
+                    || !p.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"-._".contains(&b)
+                    })
+            })
+        {
+            return Err(StartupError::InvalidProfile);
+        }
+        let rates = self
+            .required_rates(provider)
+            .into_iter()
+            .map(|k| (k.to_owned(), "0.000000000000".to_owned()))
+            .collect();
+        self.profile("catalog-template-check", 1, rates, 1, 1)
+            .validate(provider, limits)
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -286,6 +376,8 @@ pub struct ProviderConfig {
     pub provider: ProviderId,
     pub base_url: Url,
     pub profiles: Vec<ModelProfile>,
+    /// 있으면 이 공급사의 모델·가격은 DB 카탈로그에서 온다(`profiles` 는 비어 있어야 한다).
+    pub catalog: Option<CatalogTemplate>,
 }
 pub struct AuthConfig {
     pub ca_certificate: Option<Vec<u8>>,
@@ -604,6 +696,7 @@ fn validate(
                     provider: p.provider,
                     base_url: parse_url(&p.base_url)?,
                     profiles: p.profiles,
+                    catalog: p.catalog,
                 })
             })
             .collect::<Result<_, StartupError>>()?,
@@ -746,10 +839,13 @@ impl ValidatedConfig {
             secure_url(&provider.base_url)?;
             if provider.base_url.as_str() != format!("{}/", provider.provider.origin())
                 || !providers.insert(provider.provider)
-                || provider.profiles.is_empty()
+                || provider.profiles.is_empty() == provider.catalog.is_none()
                 || provider.profiles.len() > 64
             {
                 return Err(StartupError::InvalidProfile);
+            }
+            if let Some(template) = &provider.catalog {
+                template.validate(provider.provider, &self.limits)?;
             }
             let mut profiles = BTreeSet::new();
             for profile in &provider.profiles {
@@ -849,7 +945,11 @@ fn email_set(
     Ok(result)
 }
 impl ModelProfile {
-    fn validate(&self, provider: ProviderId, limits: &Limits) -> Result<(), StartupError> {
+    pub(crate) fn validate(
+        &self,
+        provider: ProviderId,
+        limits: &Limits,
+    ) -> Result<(), StartupError> {
         let allowed = matches!(
             (provider, self.api),
             (

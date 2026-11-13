@@ -92,7 +92,17 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
         settings.clone(),
         crate::gateway::auth_config_digest(config),
     );
-    let grants = json!(config.providers().iter().flat_map(|p|p.profiles.iter().map(|profile|json!({"provider":crate::ledger::finance::provider_name(p.provider),"model":profile.model,"capabilities":[crate::ledger::finance::api_name(profile.api)]}))).collect::<Vec<_>>());
+    // 정책에 줄 수 있는 목록은 설정 파일 profile 과 승인된 카탈로그를 합친 것이다(서버와 같은 규칙).
+    let catalog = crate::catalog::CatalogService::new(config, ledger.database().clone())?;
+    catalog
+        .refresh()
+        .await
+        .map_err(|_| StartupError::SchemaUnavailable)?;
+    let mut grants: Vec<Value> = config.providers().iter().flat_map(|p|p.profiles.iter().map(|profile|json!({"provider":crate::ledger::finance::provider_name(p.provider),"model":profile.model,"capabilities":[crate::ledger::finance::api_name(profile.api)]}))).collect();
+    for (provider, profile) in &catalog.cache().snapshot().profiles {
+        grants.push(json!({"provider":crate::ledger::finance::provider_name(*provider),"model":profile.model,"capabilities":[crate::ledger::finance::api_name(profile.api)]}));
+    }
+    let grants = Value::Array(grants);
     let path = match &envelope.command {
         Command::SetProviderCredential { .. } => "set_provider_credential",
         Command::RetireProviderCredential { .. } => "retire_provider_credential",

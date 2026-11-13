@@ -1965,7 +1965,7 @@ async fn two_migrators_serialize_and_actual_advisory30s_total120s_fail_closed() 
     let clean = db.store.migrate().await.is_ok();
     db.close().await;
     assert!(timed_out && elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(35));
-    assert!(one.is_ok() && two.is_ok() && count == 6);
+    assert!(one.is_ok() && two.is_ok() && count == 7);
     assert!(
         reached
             && total_timeout.is_err()

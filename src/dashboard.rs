@@ -20,6 +20,7 @@ pub const SCREENS: &[&str] = &[
     "/ui/admin/usage",
     "/ui/admin/requests",
     "/ui/admin/credentials",
+    "/ui/admin/models",
 ];
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

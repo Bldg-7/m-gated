@@ -24,7 +24,8 @@ use std::{
 pub struct DashboardApi {
     auth: Arc<SsoAuthenticator>,
     store: Arc<PgIdentityStore>,
-    grants: Value,
+    static_grants: Vec<Value>,
+    catalog: Option<Arc<crate::catalog::CatalogService>>,
     digest: String,
     digest_bytes: [u8; 32],
     signing_key: Vec<u8>,
@@ -38,6 +39,21 @@ pub struct DashboardApi {
 }
 impl DashboardApi {
     /// Provider 회사 키 관리 API를 붙인다. 없으면 해당 경로는 404다.
+    /// 모델·가격 카탈로그 관리 API를 붙이고, 승인된 카탈로그 모델을 권한 후보에 넣는다.
+    pub fn with_catalog(mut self, service: Arc<crate::catalog::CatalogService>) -> Self {
+        self.catalog = Some(service);
+        self
+    }
+    /// 정책에 줄 수 있는 (Provider, 모델, 기능) 목록. 설정 파일 profile 과 승인된 카탈로그를 합친다.
+    fn grants(&self) -> Value {
+        let mut grants = self.static_grants.clone();
+        if let Some(catalog) = &self.catalog {
+            for (provider, profile) in &catalog.cache().snapshot().profiles {
+                grants.push(json!({"provider":crate::ledger::finance::provider_name(*provider),"model":profile.model,"capabilities":[crate::ledger::finance::api_name(profile.api)]}));
+            }
+        }
+        Value::Array(grants)
+    }
     pub fn with_credentials(mut self, service: Arc<crate::credentials::CredentialService>) -> Self {
         self.credentials = Some(service);
         self
@@ -64,7 +80,8 @@ impl DashboardApi {
             auth,
             store,
             credentials: None,
-            grants: json!(grants),
+            static_grants: grants,
+            catalog: None,
             digest,
             digest_bytes: crate::gateway::auth_config_digest(config),
             signing_key: config.csrf_signing_key_bytes().to_vec(),
@@ -100,6 +117,12 @@ impl DashboardApi {
             .route("/gateway/admin/keys", any(management::handle))
             .route(
                 "/gateway/admin/provider-credentials",
+                any(management::handle),
+            )
+            .route("/gateway/admin/model-catalog", any(management::handle))
+            .route("/gateway/admin/model-catalog/sync", any(management::handle))
+            .route(
+                "/gateway/admin/model-catalog/approve",
                 any(management::handle),
             )
             .route(
@@ -151,7 +174,8 @@ async fn read(State(state): State<ApiState>, request: Request) -> Response {
         if login { return redirect(StatusCode::SEE_OTHER,"/ui/"); }
         if request.uri.path()=="/gateway/me" {
             if request.uri.query().is_some() { return query_error(QueryError::InvalidFilter); }
-            match state.api.store.dashboard_me(human.current.id,&state.api.grants,&state.api.digest).await {
+            let grants=state.api.grants();
+            match state.api.store.dashboard_me(human.current.id,&grants,&state.api.digest).await {
                 Ok(mut principal)=>{
                     let grants=principal.as_object_mut().expect("principal object").remove("effective_grants").unwrap_or(json!([]));
                     let Some(expires)=time::OffsetDateTime::from_unix_timestamp(human.identity.expires_at()).ok().and_then(|t|t.format(&time::format_description::well_known::Rfc3339).ok()) else { return query_error(QueryError::Invariant); };
@@ -160,7 +184,8 @@ async fn read(State(state): State<ApiState>, request: Request) -> Response {
             }
         } else {
             let query=match UsageQuery::parse(request.uri.query()) { Ok(q)=>q,Err(e)=>return query_error(e) };
-            match state.api.store.dashboard_usage_with_ceiling(human.current.id,query,&state.api.grants,&state.api.digest,&state.api.signing_key,&state.api.ceiling).await { Ok(value)=>success(value),Err(error)=>query_error(error) }
+            let grants=state.api.grants();
+            match state.api.store.dashboard_usage_with_ceiling(human.current.id,query,&grants,&state.api.digest,&state.api.signing_key,&state.api.ceiling).await { Ok(value)=>success(value),Err(error)=>query_error(error) }
         }
     }).await;
     lease.bind_response(result.unwrap_or_else(|_| query_error(QueryError::Database)))

@@ -36,6 +36,10 @@ pub enum ManagementError {
     CredentialUnverified,
     /// 지금 active인 키가 요청이 가정한 키와 다르다.
     CredentialConflict(Option<Uuid>),
+    /// 공개 가격 목록을 하나도 받지 못했다.
+    CatalogSourcesUnavailable,
+    /// 변경안을 만든 뒤 카탈로그가 이미 다른 버전으로 바뀌었다. 다시 동기화해야 한다.
+    CatalogProposalStale,
 }
 impl From<sqlx::Error> for ManagementError {
     fn from(e: sqlx::Error) -> Self {

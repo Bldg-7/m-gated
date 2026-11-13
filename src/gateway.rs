@@ -36,6 +36,7 @@ pub struct InferenceGateway {
     ledger: Arc<PgLedger>,
     clients: BTreeMap<ProviderId, NativeClient>,
     profiles: Vec<ModelProfile>,
+    catalog: Option<Arc<crate::catalog::CatalogCache>>,
 }
 #[derive(Clone)]
 struct GatewayState {
@@ -80,6 +81,7 @@ impl InferenceGateway {
             ledger,
             clients,
             profiles,
+            catalog: None,
         })
     }
     pub fn assemble(
@@ -93,7 +95,13 @@ impl InferenceGateway {
             ledger,
             clients: BTreeMap::from([(provider.provider, client)]),
             profiles: provider.profiles.clone(),
+            catalog: None,
         }
+    }
+    /// 관리자가 승인한 DB 카탈로그 모델도 받는다. 설정 파일 profile 이 먼저다.
+    pub fn with_catalog(mut self, catalog: Arc<crate::catalog::CatalogCache>) -> Self {
+        self.catalog = Some(catalog);
+        self
     }
     pub fn ledger(&self) -> &Arc<PgLedger> {
         &self.ledger
@@ -426,10 +434,18 @@ async fn execute(
         Ok(m) => m,
         Err(_) => return error(id, StatusCode::BAD_REQUEST, "invalid_request", true),
     };
+    // 승인된 카탈로그는 요청 하나 동안 같은 묶음을 쓴다(중간에 새 버전이 승인돼도 섞이지 않는다).
+    let catalog = state
+        .gateway
+        .catalog
+        .as_ref()
+        .map(|c| c.snapshot())
+        .unwrap_or_default();
     let Some(profile) = state
         .gateway
         .profiles
         .iter()
+        .chain(catalog.profiles.iter().map(|(_, p)| p))
         .find(|p| p.api == api && p.model == model)
     else {
         return error(id, StatusCode::BAD_REQUEST, "unsupported_model", true);

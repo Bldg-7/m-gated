@@ -161,6 +161,45 @@ fn sso_return_param_appends_dashboard_address_to_login_and_logout_only_when_set(
 }
 
 #[test]
+fn catalog_providers_take_a_valid_template_instead_of_profiles() {
+    let start = support::YAML.find("    profiles:").unwrap();
+    let base = &support::YAML[..start];
+    let catalog = |body: &str| format!("{base}    catalog:\n{body}");
+    let good = "      api: messages\n      fixture_version: text-v1\n      features: [cache]\n      max_body_bytes: 8388608\n      max_response_bytes: 16777216\n      model_prefixes: [claude-]\n";
+    let config = load(&catalog(good)).unwrap();
+    assert!(config.providers()[0].profiles.is_empty());
+    assert_eq!(
+        config.providers()[0]
+            .catalog
+            .as_ref()
+            .unwrap()
+            .required_rates(config::ProviderId::Anthropic),
+        ["input", "output", "cache_read", "cache_write_5m"]
+    );
+    // 설정 파일 profile 과 카탈로그를 함께 쓰거나, 둘 다 없으면 거부한다.
+    reject(
+        &format!("{}{}", support::YAML, "    catalog:\n".to_owned() + good),
+        StartupError::InvalidProfile,
+    );
+    reject(
+        &format!("{base}    profiles: []\n"),
+        StartupError::InvalidProfile,
+    );
+    for bad in [
+        good.replace("api: messages", "api: count_tokens"),
+        good.replace("model_prefixes: [claude-]", "model_prefixes: []"),
+        good.replace("model_prefixes: [claude-]", "model_prefixes: ['Claude ']"),
+        good.replace("max_body_bytes: 8388608", "max_body_bytes: 0"),
+    ] {
+        reject(&catalog(&bad), StartupError::InvalidProfile);
+    }
+    reject(
+        &catalog(&good.replace("fixture_version: text-v1\n", "")),
+        StartupError::ConfigSyntax,
+    );
+}
+
+#[test]
 fn sso_urls_share_issuer_origin_and_cookie_name_is_a_token() {
     for (from, to) in [
         (

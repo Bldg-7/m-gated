@@ -128,7 +128,7 @@ With Docker (multi-stage build, non-root user `65532`, `STOPSIGNAL SIGTERM`). Re
 docker run --rm -p 4000:4000 \
   -v "$PWD/gateway.yaml:/app/gateway.yaml:ro" \
   -e DB_PASSWORD -e CSRF_SIGNING_KEY -e CREDENTIAL_ENCRYPTION_KEY \
-  ghcr.io/bldg-7/m-gated:0.4.0
+  ghcr.io/bldg-7/m-gated:0.5.0
 ```
 
 Or build it yourself with `docker build -t m-gated .` and run `m-gated` in place of the image name.
@@ -210,6 +210,26 @@ providers:
     base_url: https://api.anthropic.com   # must be the official origin
     profiles: [ ... ]              # 1-64 profiles, (model, api) unique
 ```
+
+Instead of `profiles`, an Anthropic or OpenAI provider can take its models and prices from the
+database-backed [model catalog](#model--price-catalog). The config then holds only the policy that
+applies to every catalog model of that provider:
+
+```yaml
+  - provider: anthropic
+    base_url: https://api.anthropic.com
+    catalog:
+      api: messages                  # anthropic: messages; openai: responses | openai_chat
+      fixture_version: anthropic-messages-v1
+      features: [client_tools, thinking, cache, json_schema, inline_png]
+      approved_beta: [ ... ]         # same meaning as in a profile
+      max_body_bytes: 8388608
+      max_response_bytes: 16777216
+      model_prefixes: [claude-]      # which models a sync offers as new candidates
+```
+
+A provider has either `profiles` or `catalog`, not both. Catalog models get no
+`input_bound_contract`, so `reserved` budgets and `tpm` limits cannot be used with them.
 
 `base_url` must be exactly `https://api.anthropic.com`, `https://api.openai.com` or
 `https://api.deepseek.com`. Outbound requests ignore proxy environment variables, do not follow
@@ -457,6 +477,7 @@ It has no inline scripts and loads nothing from external CDNs.
 | Organization-wide usage | `/ui/admin/usage` | admins |
 | Requests and manual settlement | `/ui/admin/requests` | admins |
 | Provider company keys (register, rotate, retire) | `/ui/admin/credentials` | admins |
+| Model & price catalog (sync, compare, approve) | `/ui/admin/models` | admins |
 
 The JSON API behind it is under `/gateway/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
 routes). It is same-origin only, with no CORS. The UI is in Korean by default; a language switch in the header changes it to English (the choice is remembered in that browser only).
@@ -477,6 +498,42 @@ routes). It is same-origin only, with no CORS. The UI is in Korean by default; a
   request. Removing someone from `allowed_emails`/`admin_emails` takes effect only when every
   instance has restarted with the new config. If you need the change to apply at once, also
   disable the principal's policy.
+
+### Model & price catalog
+
+For providers configured with `catalog`, models and prices live in Postgres
+(`gw_model_catalog_versions`). Nothing changes automatically:
+
+1. An admin presses **Sync** on `/ui/admin/models`. The gateway downloads three public price lists
+   ([models.dev](https://models.dev/api.json), LiteLLM's
+   `model_prices_and_context_window.json`, and OpenRouter's `GET /api/v1/models`) and builds a
+   proposal. No provider publishes an official pricing API, so these community lists are the input.
+2. The proposal lists every catalog model whose prices or token limits changed, models that
+   disappeared from all sources, and new models whose name starts with one of `model_prefixes`.
+   For each one it shows the current value, the proposed value and each source's own value, and
+   flags models on which the sources disagree. When sources disagree, the first source that has
+   every required price wins, in the order models.dev, LiteLLM, OpenRouter. If a source says the
+   price rises above some input size (tiered pricing), the proposed `max_input_tokens` stays below
+   that size, because the ledger has one price per category.
+3. The admin ticks the items to apply (changed and missing models are ticked, new models are not)
+   and approves. The approval is checked against the catalog version the proposal was built from;
+   if another approval happened in between, it fails with `409 catalog_proposal_stale` and the
+   admin syncs again.
+4. The approved list becomes a new catalog version. Each model becomes a profile with
+   `pricing_version: catalog-v<N>` and is validated with the same rules as config profiles. Other
+   instances load the new version at their next health check. Requests keep the price they were
+   admitted with, so amounts already in the ledger never change.
+
+Every approval is recorded in the command and audit logs with the before and after values. Policies
+can grant catalog models like any other model.
+
+| Method and path | Body | Result |
+|---|---|---|
+| `GET /gateway/admin/model-catalog` | – | Current version, entries and the catalog policy per provider |
+| `POST /gateway/admin/model-catalog/sync` | empty or `{}` | `201` with `proposal_id` and the proposal; `502 catalog_sources_unavailable` if no source answered |
+| `POST /gateway/admin/model-catalog/approve` | `{"proposal_id": "<uuid>", "expected_version": "<n>", "items": [{"provider": "...", "model": "..."}]}` | `200` with the new `result_version` |
+
+Both writes need `X-Gateway-Command-Id` and replay like other admin commands.
 
 ### Provider keys
 
