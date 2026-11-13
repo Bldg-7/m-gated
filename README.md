@@ -114,15 +114,17 @@ cargo build --locked --release
 The dashboard bundle is loaded from `web/dist` relative to the working directory, so run the binary
 from the repository root (or a directory that contains `web/dist`).
 
-With Docker (multi-stage build, non-root user `65532`, `STOPSIGNAL SIGTERM`):
+With Docker (multi-stage build, non-root user `65532`, `STOPSIGNAL SIGTERM`). Released images for
+`linux/amd64` and `linux/arm64` are published to `ghcr.io/bldg-7/m-gated`:
 
 ```sh
-docker build -t m-gated .
 docker run --rm -p 4000:4000 \
   -v "$PWD/gateway.yaml:/app/gateway.yaml:ro" \
   -e DB_PASSWORD -e CSRF_SIGNING_KEY -e ANTHROPIC_API_KEY \
-  m-gated
+  ghcr.io/bldg-7/m-gated:0.1.0
 ```
+
+Or build it yourself with `docker build -t m-gated .` and run `m-gated` in place of the image name.
 
 The image's working directory is `/app`, so it reads `/app/gateway.yaml` by default. You can also
 pass `--config <path>`.
@@ -506,6 +508,20 @@ the real binary through `tests/process`, and browser end-to-end tests with Playw
 need Docker, `TEST_FNM_DIR` (a directory of the fnm Node version manager with Node 22.22.2 installed) and, for browser tests,
 `TEST_PLAYWRIGHT_BROWSERS_PATH`. All of these use synthetic SSO, providers and credentials. They
 never contact real services.
+
+## Releases
+
+Pushing a `vX.Y.Z` tag runs [`.github/workflows/release-image.yml`](.github/workflows/release-image.yml):
+
+1. `verify`: dashboard tests and build, `cargo fmt`, `clippy` and `cargo test` (the `#[ignore]`d
+   suites above are not run in CI).
+2. `build`: the image is built natively on amd64 and arm64 runners, pushed by digest, and checked
+   with `scripts/test-package.sh` (non-root, no Node/npm/cargo in the runtime layer, read-only root,
+   refuses to start without a valid config).
+3. `publish tags`: both digests are combined into one multi-arch manifest tagged `X.Y.Z`, `X.Y`,
+   `X` (from 1.0 on), `latest` (non-prerelease only) and `sha-<short>`.
+
+A manual run from the Actions tab publishes `<branch>` and `sha-<short>` tags instead.
 
 ## License
 
