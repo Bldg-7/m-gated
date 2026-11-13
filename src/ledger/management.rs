@@ -34,8 +34,17 @@ pub enum ManagementError {
     CredentialRejected,
     /// Provider 확인 호출이 실패해 키가 유효한지 알 수 없다. 저장하지 않는다.
     CredentialUnverified,
-    /// 지금 active인 키가 요청이 가정한 키와 다르다.
-    CredentialConflict(Option<Uuid>),
+    /// 같은 키 원문이 이미 다른 이름으로 등록돼 있다.
+    CredentialDuplicate(Uuid),
+    /// 같은 Provider에서 쓰고 있는 다른 키가 이미 이 이름을 쓴다.
+    CredentialLabelTaken,
+    /// 기본 키이거나 가상 키가 연결된 키라서 옮길 키를 정하지 않고는 해제할 수 없다.
+    CredentialInUse {
+        bound_keys: i64,
+        default: bool,
+    },
+    /// 가상 키의 지금 연결이 요청이 가정한 회사 키와 다르다.
+    BindingConflict(Option<Uuid>),
     /// 공개 가격 목록을 하나도 받지 못했다.
     CatalogSourcesUnavailable,
     /// 변경안을 만든 뒤 카탈로그가 이미 다른 버전으로 바뀌었다. 다시 동기화해야 한다.
@@ -186,6 +195,9 @@ pub struct IssueKey {
     pub grants: Vec<Grant>,
     #[serde(deserialize_with = "deserialize_api_limits")]
     pub limits: PolicyLimits,
+    /// Provider별로 연결할 회사 키(관리자만). 고르지 않은 Provider는 그 Provider의 기본 키에 연결된다.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provider_credentials: std::collections::BTreeMap<String, Uuid>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -275,6 +287,12 @@ impl Command {
         match self {
             Self::Issue(v) => {
                 text(&v.name, 100, 400)?;
+                if v.provider_credentials
+                    .keys()
+                    .any(|p| crate::config::ProviderId::from_name(p).is_none())
+                {
+                    return Err(ManagementError::Invalid);
+                }
                 v.limits.validate()?;
                 v.grants = serde_json::from_value(normalize_grants(v.grants.clone())?)
                     .map_err(|_| ManagementError::Invalid)?;
@@ -394,7 +412,8 @@ impl PgIdentityStore {
                 let owner=sqlx::query("SELECT * FROM gw_principals WHERE id=$1").bind(row.get::<Option<Uuid>,_>("owner_principal_id")).fetch_one(&mut *tx).await.map_err(|_|AuthError::DatabaseUnavailable)?;
                 if !active_human(&owner,settings){return Err(AuthError::OwnerInactive);}
             }
-            let result=AuthenticatedInference{current:CurrentHuman{id:row.get("principal_id"),version:row.get("version"),policy_id:row.get("policy_id"),policy_version:row.get("pv"),admin:false},key:Some(KeyScope{id:key.id,version:row.get("kv")})};
+            let credentials=sqlx::query("SELECT provider,credential_id FROM gw_virtual_key_credentials WHERE key_id=$1").bind(key.id).fetch_all(&mut *tx).await.map_err(|_|AuthError::DatabaseUnavailable)?.iter().filter_map(|r|Some((crate::config::ProviderId::from_name(&r.get::<String,_>("provider"))?,r.get::<Uuid,_>("credential_id")))).collect();
+            let result=AuthenticatedInference{current:CurrentHuman{id:row.get("principal_id"),version:row.get("version"),policy_id:row.get("policy_id"),policy_version:row.get("pv"),admin:false},key:Some(KeyScope{id:key.id,version:row.get("kv")}),credentials};
             tx.commit().await.map_err(|_|AuthError::DatabaseUnavailable)?;Ok(result)
         }).await.map_err(|_|AuthError::DatabaseUnavailable)?
     }

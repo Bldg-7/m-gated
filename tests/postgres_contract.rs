@@ -2178,9 +2178,9 @@ async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_
             .fetch_one(db.store.pool())
             .await
             .unwrap();
-        assert_eq!(n, 7);
+        assert_eq!(n, 8);
         if future {
-            sqlx::query("INSERT INTO gw_schema_migrations VALUES(8,decode(repeat('00',32),'hex'))")
+            sqlx::query("INSERT INTO gw_schema_migrations VALUES(9,decode(repeat('00',32),'hex'))")
                 .execute(db.store.pool())
                 .await
                 .unwrap();

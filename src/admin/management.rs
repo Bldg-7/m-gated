@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 const CREDENTIALS: &str = "/gateway/admin/provider-credentials";
+const KEYS_ADMIN: &str = "/gateway/admin/keys/";
+const KEY_BINDING: &str = "/provider-credential";
 const CATALOG: &str = "/gateway/admin/model-catalog";
 fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
@@ -58,11 +60,29 @@ pub(super) fn error(e: ManagementError) -> Response {
         CredentialUnverified => (502, "provider_credential_unverified"),
         CatalogSourcesUnavailable => (502, "catalog_sources_unavailable"),
         CatalogProposalStale => (409, "catalog_proposal_stale"),
-        CredentialConflict(current) => {
+        CredentialLabelTaken => (409, "credential_label_taken"),
+        BindingConflict(current) => {
             return details(
                 StatusCode::CONFLICT,
-                "credential_conflict",
+                "credential_binding_conflict",
                 json!({"current_credential_id":current}),
+            );
+        }
+        CredentialDuplicate(id) => {
+            return details(
+                StatusCode::CONFLICT,
+                "credential_duplicate",
+                json!({"credential_id":id}),
+            );
+        }
+        CredentialInUse {
+            bound_keys,
+            default,
+        } => {
+            return details(
+                StatusCode::CONFLICT,
+                "credential_in_use",
+                json!({"bound_keys":bound_keys.to_string(),"default":default}),
             );
         }
         SecretUnavailable(id) => {
@@ -89,8 +109,14 @@ pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> R
         || path == "/gateway/admin/model-catalog/approve"
     {
         vec![Method::POST]
-    } else if path.starts_with(CREDENTIALS) {
-        vec![Method::PUT, Method::DELETE]
+    } else if let Some(rest) = path.strip_prefix(CREDENTIALS) {
+        if rest.matches('/').count() == 1 {
+            vec![Method::POST]
+        } else {
+            vec![Method::PUT, Method::PATCH, Method::DELETE]
+        }
+    } else if path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING) {
+        vec![Method::PUT]
     } else if path == "/gateway/keys" || path == "/gateway/admin/principals" {
         vec![Method::GET, Method::POST]
     } else if path.starts_with("/gateway/keys/") {
@@ -247,7 +273,10 @@ async fn execute(
             Err(e) => crate::http::authentication_error(e),
         };
     }
-    if path == CREDENTIALS || path.starts_with(CREDENTIALS) {
+    if path == CREDENTIALS
+        || path.starts_with(CREDENTIALS)
+        || (path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING))
+    {
         return provider_credentials(state, &head, body, human.current.id).await;
     }
     if path == CATALOG || path.starts_with(CATALOG) {
@@ -563,12 +592,33 @@ async fn provider_credentials(
             Err(e) => error(e),
         };
     }
-    let Some(provider) = path
-        .strip_prefix(CREDENTIALS)
-        .and_then(|p| p.strip_prefix('/'))
-        .and_then(ProviderId::from_name)
-    else {
-        return error(ManagementError::NotFound);
+    // 경로: {CREDENTIALS}/{provider}[/{id}] 또는 /gateway/admin/keys/{key}/provider-credential
+    let (provider, id, key) = if let Some(rest) = path
+        .strip_prefix(KEYS_ADMIN)
+        .and_then(|p| p.strip_suffix(KEY_BINDING))
+    {
+        match Uuid::parse_str(rest) {
+            Ok(key) => (None, None, Some(key)),
+            Err(_) => return error(ManagementError::NotFound),
+        }
+    } else {
+        let mut parts = path
+            .strip_prefix(CREDENTIALS)
+            .and_then(|p| p.strip_prefix('/'))
+            .unwrap_or("")
+            .split('/');
+        let Some(provider) = parts.next().and_then(ProviderId::from_name) else {
+            return error(ManagementError::NotFound);
+        };
+        let id = match parts.next().map(Uuid::parse_str) {
+            None => None,
+            Some(Ok(id)) => Some(id),
+            Some(Err(_)) => return error(ManagementError::NotFound),
+        };
+        if parts.next().is_some() {
+            return error(ManagementError::NotFound);
+        }
+        (Some(provider), id, None)
     };
     let commands: Vec<_> = head
         .headers
@@ -605,7 +655,38 @@ async fn provider_credentials(
         Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
         Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
     };
-    let command = if head.method == Method::PUT {
+    let command = if head.method == Method::DELETE {
+        let (Some(provider), Some(id)) = (provider, id) else {
+            return error(ManagementError::Invalid);
+        };
+        if !bytes.is_empty() {
+            return error(ManagementError::Invalid);
+        }
+        let mut fields = match management_query::fields(head.uri.query()) {
+            Ok(f) => f,
+            Err(e) => return error(e),
+        };
+        let Some(expected) = fields
+            .remove("expected_version")
+            .and_then(|s| s.parse::<i64>().ok())
+        else {
+            return error(ManagementError::Invalid);
+        };
+        let move_to = match fields.remove("move_to").map(|s| Uuid::parse_str(&s)) {
+            None => None,
+            Some(Ok(id)) => Some(id),
+            Some(Err(_)) => return error(ManagementError::Invalid),
+        };
+        if !fields.is_empty() {
+            return error(ManagementError::Invalid);
+        }
+        CredentialCommand::Retire {
+            provider,
+            id,
+            expected,
+            move_to,
+        }
+    } else {
         if head.uri.query().is_some() {
             return error(ManagementError::Invalid);
         }
@@ -615,43 +696,88 @@ async fn provider_credentials(
         let Ok(mut input) = serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes) else {
             return error(ManagementError::Invalid);
         };
-        if input.len() != 2 {
-            return error(ManagementError::Invalid);
-        }
-        let expected = match input.remove("expected_credential_id") {
-            Some(Value::Null) => None,
-            Some(Value::String(s)) => match Uuid::parse_str(&s) {
-                Ok(id) => Some(id),
-                Err(_) => return error(ManagementError::Invalid),
-            },
+        let mut take_string = |name: &str| match input.remove(name) {
+            Some(Value::String(s)) => Some(s),
+            _ => None,
+        };
+        let version = |s: Option<String>| s.and_then(|s| s.parse::<i64>().ok());
+        let parsed = match (head.method.as_str(), provider, id, key) {
+            ("POST", Some(provider), None, None) => {
+                match (take_string("label"), take_string("secret")) {
+                    (Some(label), Some(secret)) => Some(CredentialCommand::Add {
+                        provider,
+                        label,
+                        secret: zeroize::Zeroizing::new(secret),
+                    }),
+                    _ => None,
+                }
+            }
+            ("PUT", Some(provider), Some(id), None) => {
+                match (
+                    version(take_string("expected_version")),
+                    take_string("secret"),
+                ) {
+                    (Some(expected), Some(secret)) => Some(CredentialCommand::Replace {
+                        provider,
+                        id,
+                        expected,
+                        secret: zeroize::Zeroizing::new(secret),
+                    }),
+                    _ => None,
+                }
+            }
+            ("PATCH", Some(provider), Some(id), None) => {
+                let expected = version(take_string("expected_version"));
+                let label = match input.remove("label") {
+                    None => Ok(None),
+                    Some(Value::String(s)) => Ok(Some(s)),
+                    Some(_) => Err(()),
+                };
+                let make_default = match input.remove("default") {
+                    None => Ok(false),
+                    Some(Value::Bool(true)) => Ok(true),
+                    Some(_) => Err(()),
+                };
+                match (expected, label, make_default) {
+                    (Some(expected), Ok(label), Ok(make_default)) => {
+                        Some(CredentialCommand::Update {
+                            provider,
+                            id,
+                            expected,
+                            label,
+                            make_default,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            ("PUT", None, None, Some(key)) => {
+                let provider = take_string("provider").and_then(|p| ProviderId::from_name(&p));
+                let credential =
+                    take_string("credential_id").and_then(|s| Uuid::parse_str(&s).ok());
+                let expected = match input.remove("expected_credential_id") {
+                    Some(Value::Null) => Ok(None),
+                    Some(Value::String(s)) => Uuid::parse_str(&s).map(Some).map_err(|_| ()),
+                    _ => Err(()),
+                };
+                match (provider, credential, expected) {
+                    (Some(provider), Some(credential), Ok(expected)) => {
+                        Some(CredentialCommand::BindKey {
+                            key,
+                            provider,
+                            credential,
+                            expected,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        match parsed {
+            Some(command) if input.is_empty() => command,
             _ => return error(ManagementError::Invalid),
-        };
-        let Some(Value::String(secret)) = input.remove("secret") else {
-            return error(ManagementError::Invalid);
-        };
-        CredentialCommand::Set {
-            provider,
-            secret: zeroize::Zeroizing::new(secret),
-            expected,
         }
-    } else {
-        if !bytes.is_empty() {
-            return error(ManagementError::Invalid);
-        }
-        let mut fields = match management_query::fields(head.uri.query()) {
-            Ok(f) => f,
-            Err(e) => return error(e),
-        };
-        let Some(expected) = fields
-            .remove("expected_credential_id")
-            .and_then(|s| Uuid::parse_str(&s).ok())
-        else {
-            return error(ManagementError::Invalid);
-        };
-        if !fields.is_empty() {
-            return error(ManagementError::Invalid);
-        }
-        CredentialCommand::Retire { provider, expected }
     };
     let grants = state.api.grants();
     let ctx = CommandContext {

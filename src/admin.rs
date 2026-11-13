@@ -129,6 +129,14 @@ impl DashboardApi {
                 "/gateway/admin/provider-credentials/{provider}",
                 any(management::handle),
             )
+            .route(
+                "/gateway/admin/provider-credentials/{provider}/{id}",
+                any(management::handle),
+            )
+            .route(
+                "/gateway/admin/keys/{id}/provider-credential",
+                any(management::handle),
+            )
             .route("/gateway/admin/usage", any(management::handle))
             .route("/gateway/admin/requests", any(management::handle))
             .route("/gateway/admin/requests/{id}", any(management::handle))

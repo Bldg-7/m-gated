@@ -24,14 +24,24 @@ enum Command {
     RetentionDelete(RetentionDelete),
     Handoff(Box<crate::ledger::handoff::Handoff>),
     /// 등록 전에 실제 Provider 확인을 거친다. 키는 stdin envelope로만 받는다.
-    SetProviderCredential {
+    AddProviderCredential {
         provider: String,
+        label: String,
         secret: String,
-        expected_credential_id: Option<uuid::Uuid>,
+    },
+    /// 키 원문만 바꾼다. 이름·기본 여부·가상 키 연결은 새 키로 옮겨진다.
+    ReplaceProviderCredential {
+        provider: String,
+        credential_id: uuid::Uuid,
+        expected_version: i64,
+        secret: String,
     },
     RetireProviderCredential {
         provider: String,
-        expected_credential_id: uuid::Uuid,
+        credential_id: uuid::Uuid,
+        expected_version: i64,
+        #[serde(default)]
+        move_to: Option<uuid::Uuid>,
     },
 }
 struct Syntax;
@@ -104,7 +114,8 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
     }
     let grants = Value::Array(grants);
     let path = match &envelope.command {
-        Command::SetProviderCredential { .. } => "set_provider_credential",
+        Command::AddProviderCredential { .. } => "add_provider_credential",
+        Command::ReplaceProviderCredential { .. } => "replace_provider_credential",
         Command::RetireProviderCredential { .. } => "retire_provider_credential",
         _ => "retention_delete",
     };
@@ -128,10 +139,10 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
             .handoff(&ctx, *input)
             .await
             .map_err(|_| StartupError::RuntimeFailure),
-        Command::SetProviderCredential {
+        Command::AddProviderCredential {
             provider,
+            label,
             secret,
-            expected_credential_id,
         } => {
             let provider =
                 crate::config::ProviderId::from_name(&provider).ok_or(StartupError::ConfigInput)?;
@@ -139,17 +150,40 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
                 config,
                 ledger.database().clone(),
                 &ctx,
-                CredentialCommand::Set {
+                CredentialCommand::Add {
                     provider,
+                    label,
                     secret: zeroize::Zeroizing::new(secret),
-                    expected: expected_credential_id,
+                },
+            )
+            .await
+        }
+        Command::ReplaceProviderCredential {
+            provider,
+            credential_id,
+            expected_version,
+            secret,
+        } => {
+            let provider =
+                crate::config::ProviderId::from_name(&provider).ok_or(StartupError::ConfigInput)?;
+            credential(
+                config,
+                ledger.database().clone(),
+                &ctx,
+                CredentialCommand::Replace {
+                    provider,
+                    id: credential_id,
+                    expected: expected_version,
+                    secret: zeroize::Zeroizing::new(secret),
                 },
             )
             .await
         }
         Command::RetireProviderCredential {
             provider,
-            expected_credential_id,
+            credential_id,
+            expected_version,
+            move_to,
         } => {
             let provider =
                 crate::config::ProviderId::from_name(&provider).ok_or(StartupError::ConfigInput)?;
@@ -159,7 +193,9 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
                 &ctx,
                 CredentialCommand::Retire {
                     provider,
-                    expected: expected_credential_id,
+                    id: credential_id,
+                    expected: expected_version,
+                    move_to,
                 },
             )
             .await

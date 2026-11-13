@@ -537,39 +537,73 @@ Both writes need `X-Gateway-Command-Id` and replay like other admin commands.
 
 ### Provider keys
 
-Each configured provider uses one company key, stored in `gw_provider_credentials`:
+Company keys are stored in `gw_provider_credentials`. A provider can have several keys, and each key
+has a name (label) so admins can tell them apart, for example one key per team or per billing
+account. Every virtual key is bound to one company key per provider, and the key list shows that
+binding (label and last 4 characters), so you can see which company key a virtual key uses.
 
+- **Names.** A label is 1–60 characters with no leading or trailing spaces. Two keys in use for the
+  same provider cannot share a label (case-insensitive). A retired key's label can be reused.
+- **Default key.** Each provider has one default key. The first key registered for a provider
+  becomes its default. Two kinds of requests use the default key because they have no binding:
+  requests sent with an SSO token instead of a virtual key, and requests from virtual keys issued
+  while that provider had no company key yet.
+- **Binding virtual keys.** When a virtual key is issued, it is bound to one company key per
+  provider and keeps using that key. Admins can choose the key when issuing
+  (`"provider_credentials": {"anthropic": "<credential id>"}` in `POST /gateway/keys`). Other users
+  cannot choose: their virtual keys are bound to the default key at the time of issue. An admin can
+  later move one virtual key to another company key. When upgrading from 0.5.x, the company key in
+  use is named `default` and becomes the default key, and every existing virtual key is bound to it.
 - **Encrypted at rest.** AES-256-GCM with a key derived from `CREDENTIAL_ENCRYPTION_KEY`. The provider
   name and row id are bound to the ciphertext, so a ciphertext copied to another row does not
   decrypt. The plaintext is never returned by any API, written to the command or audit log, or
   printed. The dashboard shows only the last 4 characters.
-- **Verified before saving.** Registering or rotating a key always calls the provider's model-list
-  endpoint first (`GET /v1/models` for Anthropic and OpenAI, `GET /models` for DeepSeek; no charge).
-  A `401`/`403` is rejected with `422 provider_credential_rejected`; any other failure with
-  `502 provider_credential_unverified`. Nothing is stored in either case. The key must also match the
-  provider's format (`sk-ant-…` for Anthropic, `sk-…` for OpenAI and DeepSeek).
-- **Compare-and-swap.** A registration names the key it replaces (`expected_credential_id`, `null`
-  when there is none). If another admin changed it first, the request fails with `409
-  credential_conflict`. Registering the key that is already active is a no-op.
-- **Rotation.** The new key becomes active and the old row is retired in the same transaction. Its
-  ciphertext is erased; only metadata remains as history. Requests already in progress keep the key
-  they started with. Other instances pick up the change at their next health check (every 5 s).
-- **Traceability.** Every request records the id of the company key it used
-  (`gw_requests.provider_credential_id`), so you can find what a leaked key was used for.
-- **Monitoring.** The `provider_credentials_unavailable` gauge counts configured providers without a
-  usable key (missing, or not decryptable with the current `CREDENTIAL_ENCRYPTION_KEY`). `/readyz`
-  is not affected, so an admin can still reach the dashboard to register a key.
+- **Verified before saving.** Adding a key or replacing its secret always calls the provider's
+  model-list endpoint first (`GET /v1/models` for Anthropic and OpenAI, `GET /models` for DeepSeek;
+  no charge). A `401`/`403` is rejected with `422 provider_credential_rejected`; any other failure
+  with `502 provider_credential_unverified`. Nothing is stored in either case. The key must also
+  match the provider's format (`sk-ant-…` for Anthropic, `sk-…` for OpenAI and DeepSeek). The same
+  secret cannot be registered twice (`409 credential_duplicate`).
+- **Replacing a secret.** Use this when a key leaks or expires. The new secret gets a new row; the
+  old row is retired and its ciphertext erased. The label, the default status and the bindings of
+  virtual keys still in use move to the new row, so users do not need new virtual keys. Requests
+  already in progress keep the key they started with. Other instances pick up the change at their
+  next health check (every 5 s).
+- **Retiring.** Retiring a key needs a replacement (`move_to`, another key of the same provider) in
+  two cases: the key is the default, or virtual keys still in use are bound to it. Without `move_to`
+  the request fails with `409 credential_in_use`. With it, the bound virtual keys move to the chosen
+  key, and the chosen key becomes the default if the retired key was the default.
+  The last key of a provider can be retired without `move_to`. The virtual keys bound to it lose
+  their binding and use the provider's default key once a new key is registered. Until then their
+  requests are rejected with `503 provider_credential_unavailable` before anything is sent.
+- **Compare-and-swap.** Each key has an `id` and a `version`, both returned by `GET
+  /gateway/admin/provider-credentials`. The version goes up whenever the key is renamed, made the
+  default, demoted or retired. Rename, replace and retire requests must send the version you last
+  read (`expected_version`); if another admin changed the key in between, the request fails with
+  `409 version_conflict`. Moving a virtual key must send the company key it is bound to now
+  (`expected_credential_id`, from the key list) and fails with `409 credential_binding_conflict` if
+  that changed.
+- **Traceability.** Every request records the company key it used
+  (`gw_requests.provider_credential_id`); the admin request list and detail show its label. You can
+  find what a leaked key was used for.
+- **Monitoring.** The `provider_credentials_unavailable` metric is the sum of two counts: configured
+  providers whose default key is missing or cannot be decrypted with the current
+  `CREDENTIAL_ENCRYPTION_KEY`, and other keys in use that cannot be decrypted. Zero means every
+  key works. `/readyz` is not affected, so an admin can still reach the dashboard to register a key.
 
 API (admin only; cookie writes need the usual `Origin` and `X-CSRF-Token`):
 
 | Method and path | Body / query | Result |
 |---|---|---|
-| `GET /gateway/admin/provider-credentials` | – | Status, active key metadata and recent history per configured provider |
-| `PUT /gateway/admin/provider-credentials/{provider}` | `{"secret": "...", "expected_credential_id": "<uuid>" \| null}` | `201` new key, `200` no-op |
-| `DELETE /gateway/admin/provider-credentials/{provider}` | `?expected_credential_id=<uuid>` | `200`, key retired |
+| `GET /gateway/admin/provider-credentials` | – | Per configured provider: status of the default key, keys in use (`id`, `version`, label, default, number of bound virtual keys) and the last 10 retired keys |
+| `POST /gateway/admin/provider-credentials/{provider}` | `{"label": "...", "secret": "..."}` | `201`, key added |
+| `PUT /gateway/admin/provider-credentials/{provider}/{id}` | `{"secret": "...", "expected_version": "<n>"}` | `201` secret replaced (new id), `200` no-op if it is the same secret |
+| `PATCH /gateway/admin/provider-credentials/{provider}/{id}` | `{"expected_version": "<n>", "label"?: "...", "default"?: true}` | `200`, renamed and/or made the default |
+| `DELETE /gateway/admin/provider-credentials/{provider}/{id}` | `?expected_version=<n>[&move_to=<id>]` | `200`, key retired |
+| `PUT /gateway/admin/keys/{key id}/provider-credential` | `{"provider": "...", "credential_id": "<id>", "expected_credential_id": "<id>" \| null}` | `200`, virtual key moved to another company key |
 
-Writes require an `X-Gateway-Command-Id` header and replay like other admin commands: resending the
-same command id returns the recorded result without calling the provider again.
+Writes require an `X-Gateway-Command-Id` header. As with other admin commands, resending the same
+command id returns the recorded result without running the command or calling the provider again.
 
 ### Maintenance mode
 
@@ -591,18 +625,21 @@ To continue, run the command again with `after` set to `next_after` and a **new*
 Requests that are unknown or still in progress are never deleted. If the command fails, the gateway
 prints `maintenance_failed` and exits with status 1.
 
-The same mode can register or retire a provider key without the dashboard. The key travels only in
-the stdin envelope and is verified with the provider first:
+The same mode can add, replace or retire a provider key without the dashboard. The key travels only
+in the stdin envelope and is verified with the provider first:
 
 ```sh
 printf '%s' '{"access_token":"<admin SSO JWT>","command_id":"<new UUID>",
-  "command":{"operation":"set_provider_credential","provider":"anthropic",
-  "secret":"sk-ant-...","expected_credential_id":null}}' \
+  "command":{"operation":"add_provider_credential","provider":"anthropic",
+  "label":"team-a","secret":"sk-ant-..."}}' \
   | m-gated --maintenance --config gateway.yaml | cat
 ```
 
-Use `{"operation":"retire_provider_credential","provider":"anthropic","expected_credential_id":"<uuid>"}`
-to retire one. The output is `{"status": 201|200, "ack": {...}}`.
+Other operations:
+`{"operation":"replace_provider_credential","provider":"anthropic","credential_id":"<id>","expected_version":1,"secret":"sk-ant-..."}`
+and
+`{"operation":"retire_provider_credential","provider":"anthropic","credential_id":"<id>","expected_version":1,"move_to":"<id>"}`
+(`move_to` is optional, with the same rules as the API). The output is `{"status": 201|200, "ack": {...}}`.
 
 ## Development and tests
 

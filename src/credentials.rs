@@ -147,8 +147,7 @@ pub struct ActiveCredential {
 }
 #[derive(Clone)]
 enum Entry {
-    Missing,
-    Undecryptable { id: Uuid, version: i64 },
+    Undecryptable { version: i64 },
     Active(ActiveCredential),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,11 +165,18 @@ impl CredentialStatus {
         }
     }
 }
+#[derive(Clone, Default)]
+struct Snapshot {
+    /// 사용 중인 회사 키 전체(id → Provider, 상태).
+    by_id: BTreeMap<Uuid, (ProviderId, Entry)>,
+    /// Provider별 기본 키. 연결이 없는 가상 키와 SSO 직접 요청이 쓴다.
+    defaults: BTreeMap<ProviderId, Uuid>,
+}
 
 /// 프로세스의 복호화된 회사 키. 해제되면 원문 메모리를 지운다.
 #[derive(Default)]
 pub struct CredentialCache {
-    entries: RwLock<BTreeMap<ProviderId, Entry>>,
+    entries: RwLock<Snapshot>,
 }
 impl fmt::Debug for CredentialCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -178,34 +184,46 @@ impl fmt::Debug for CredentialCache {
     }
 }
 impl CredentialCache {
-    pub fn get(&self, provider: ProviderId) -> Option<ActiveCredential> {
-        match self.entries.read().ok()?.get(&provider)? {
-            Entry::Active(active) => Some(active.clone()),
+    /// 요청 하나에 쓸 키. 가상 키에 연결된 키가 있으면 그 키, 없으면 Provider의 기본 키.
+    /// 연결된 키가 해제됐거나 풀 수 없으면 기본 키로 대신하지 않고 None을 돌려준다.
+    pub fn get(&self, provider: ProviderId, bound: Option<Uuid>) -> Option<ActiveCredential> {
+        let snapshot = self.entries.read().ok()?;
+        let id = bound.or_else(|| snapshot.defaults.get(&provider).copied())?;
+        match snapshot.by_id.get(&id)? {
+            (p, Entry::Active(active)) if *p == provider => Some(active.clone()),
             _ => None,
         }
     }
+    /// Provider 기본 키의 상태.
     pub fn status(&self, provider: ProviderId) -> CredentialStatus {
-        match self
-            .entries
-            .read()
-            .ok()
-            .and_then(|e| e.get(&provider).cloned())
+        let Ok(snapshot) = self.entries.read() else {
+            return CredentialStatus::Missing;
+        };
+        match snapshot
+            .defaults
+            .get(&provider)
+            .and_then(|id| snapshot.by_id.get(id))
         {
-            Some(Entry::Active(_)) => CredentialStatus::Active,
-            Some(Entry::Undecryptable { .. }) => CredentialStatus::Undecryptable,
-            _ => CredentialStatus::Missing,
+            Some((_, Entry::Active(_))) => CredentialStatus::Active,
+            Some((_, Entry::Undecryptable { .. })) => CredentialStatus::Undecryptable,
+            None => CredentialStatus::Missing,
         }
     }
-    /// 테스트 조립 전용: DB 없이 키를 넣는다.
+    /// 테스트 조립 전용: DB 없이 키를 넣고 그 Provider의 기본 키로 둔다.
     pub fn insert_for_test(&self, provider: ProviderId, id: Uuid, secret: &str) {
-        self.entries.write().expect("캐시 lock").insert(
-            provider,
-            Entry::Active(ActiveCredential {
-                id,
-                version: 1,
-                secret: Arc::new(Zeroizing::new(secret.to_owned())),
-            }),
+        let mut snapshot = self.entries.write().expect("캐시 lock");
+        snapshot.by_id.insert(
+            id,
+            (
+                provider,
+                Entry::Active(ActiveCredential {
+                    id,
+                    version: 1,
+                    secret: Arc::new(Zeroizing::new(secret.to_owned())),
+                }),
+            ),
         );
+        snapshot.defaults.insert(provider, id);
     }
 }
 
@@ -276,7 +294,7 @@ impl CredentialService {
     /// DB의 active 행과 캐시를 맞춘다. 바뀐 행만 다시 복호화하고 결과는 telemetry에 남긴다.
     pub async fn refresh(&self) -> Result<(), sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id,provider,version,kek_id,nonce,ciphertext FROM gw_provider_credentials WHERE state='active'",
+            "SELECT id,provider,version,is_default,kek_id,nonce,ciphertext FROM gw_provider_credentials WHERE state='active'",
         )
         .fetch_all(self.store.pool())
         .await?;
@@ -286,48 +304,58 @@ impl CredentialService {
             .read()
             .map(|e| e.clone())
             .unwrap_or_default();
-        let mut next = BTreeMap::new();
-        for provider in self.configured() {
-            let row = rows
-                .iter()
-                .find(|r| r.get::<String, _>("provider") == provider.name());
-            let entry = match row {
-                None => Entry::Missing,
-                Some(row) => {
-                    let id: Uuid = row.get("id");
-                    let version: i64 = row.get("version");
-                    match current.get(&provider) {
-                        Some(Entry::Active(a)) if a.id == id && a.version == version => {
-                            Entry::Active(a.clone())
-                        }
-                        Some(Entry::Undecryptable { id: i, version: v })
-                            if *i == id && *v == version =>
-                        {
-                            Entry::Undecryptable { id, version }
-                        }
-                        _ => match self.cipher.open(
-                            provider,
-                            id,
-                            &row.get::<Vec<u8>, _>("kek_id"),
-                            &row.get::<Vec<u8>, _>("nonce"),
-                            &row.get::<Vec<u8>, _>("ciphertext"),
-                        ) {
-                            Some(secret) => Entry::Active(ActiveCredential {
-                                id,
-                                version,
-                                secret: Arc::new(secret),
-                            }),
-                            None => Entry::Undecryptable { id, version },
-                        },
-                    }
-                }
+        let mut next = Snapshot::default();
+        for row in &rows {
+            let Some(provider) = ProviderId::from_name(&row.get::<String, _>("provider")) else {
+                continue;
             };
-            next.insert(provider, entry);
+            if !self.verifiers.contains_key(&provider) {
+                continue;
+            }
+            let id: Uuid = row.get("id");
+            let version: i64 = row.get("version");
+            let entry = match current.by_id.get(&id) {
+                Some((_, Entry::Active(a))) if a.version == version => Entry::Active(a.clone()),
+                Some((_, Entry::Undecryptable { version: v })) if *v == version => {
+                    Entry::Undecryptable { version }
+                }
+                _ => match self.cipher.open(
+                    provider,
+                    id,
+                    &row.get::<Vec<u8>, _>("kek_id"),
+                    &row.get::<Vec<u8>, _>("nonce"),
+                    &row.get::<Vec<u8>, _>("ciphertext"),
+                ) {
+                    Some(secret) => Entry::Active(ActiveCredential {
+                        id,
+                        version,
+                        secret: Arc::new(secret),
+                    }),
+                    None => Entry::Undecryptable { version },
+                },
+            };
+            if row.get::<bool, _>("is_default") {
+                next.defaults.insert(provider, id);
+            }
+            next.by_id.insert(id, (provider, entry));
         }
-        let unavailable = next
-            .values()
-            .filter(|e| !matches!(e, Entry::Active(_)))
-            .count();
+        // 설정된 Provider 중 기본 키가 없거나 풀 수 없는 수 + 풀 수 없는 나머지 키 수.
+        let unavailable = self
+            .configured()
+            .filter(|p| {
+                next.defaults
+                    .get(p)
+                    .and_then(|id| next.by_id.get(id))
+                    .is_none_or(|(_, e)| !matches!(e, Entry::Active(_)))
+            })
+            .count()
+            + next
+                .by_id
+                .iter()
+                .filter(|(id, (p, e))| {
+                    matches!(e, Entry::Undecryptable { .. }) && next.defaults.get(p) != Some(id)
+                })
+                .count();
         if let Ok(mut entries) = self.cache.entries.write() {
             *entries = next;
         }

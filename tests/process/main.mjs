@@ -127,13 +127,13 @@ try{
  console.log('DB_SSL_MODE_REQUIRE_ENCRYPTS_WITHOUT_VERIFY_AND_NEVER_PLAINTEXT_OK');
  writeFileSync(join(directory,'config.yaml'),config.replace('host: 127.0.0.1','host: localhost'));
  app=start();await waitStatus('/readyz',200);assert.equal((await get('/livez')).status,200);assert.equal((await get('/ui/')).status,200);
- const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5','6','7']);
+ const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5','6','7','8']);
  const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'key1'})).toString('base64url');const payload=Buffer.from(JSON.stringify({iss:'https://auth.example.test',aud:'https://example.test',sub:'main-human',email:'alice@example.test',email_verified:true,exp:Math.floor(Date.now()/1000)+7200,name:'Synthetic main'})).toString('base64url');const signed=`${header}.${payload}`;const signature=createSign('RSA-SHA256').update(signed).sign(keys.privateKey).toString('base64url');const cookie=`mgated_access=${signed}.${signature}`;
  assert.equal((await get('/gateway/me',{cookie})).status,200);assert.equal((await get('/gateway/usage?group_by=provider',{cookie})).status,200);
  // 회사 키 미등록: ready는 유지하고(관리자가 등록할 수 있게) 추론만 장부 행 없이 503으로 거절한다.
  const adminToken=`${signed}.${signature}`;
  async function credentialCall(method,provider,input,token=adminToken,command=randomUUID(),query=''){const headers={authorization:`Bearer ${token}`,'x-gateway-command-id':command};if(input!==undefined)headers['content-type']='application/json';const r=await fetch(`http://127.0.0.1:4000/gateway/admin/provider-credentials/${provider}${query}`,{method,headers,body:input===undefined?undefined:JSON.stringify(input),signal:AbortSignal.timeout(15000)});const text=await r.text();for(const secret of Object.values(companyKeys))assert(!text.includes(secret),'응답에 회사 키 원문');return {status:r.status,body:text?JSON.parse(text):null,headers:r.headers};}
- async function registerKey(provider,token=adminToken){const list=await fetch('http://127.0.0.1:4000/gateway/admin/provider-credentials',{headers:{authorization:`Bearer ${token}`},signal:AbortSignal.timeout(5000)}).then(r=>r.json());const current=list.providers.find(p=>p.provider===provider);assert(current,'설정된 Provider');if(current.status==='active')return current.active.id;const r=await credentialCall('PUT',provider,{secret:companyKeys[provider],expected_credential_id:current.active?.id??null},token);assert.equal(r.status,201);return r.body.target.id;}
+ async function registerKey(provider,token=adminToken){const list=await fetch('http://127.0.0.1:4000/gateway/admin/provider-credentials',{headers:{authorization:`Bearer ${token}`},signal:AbortSignal.timeout(5000)}).then(r=>r.json());const current=list.providers.find(p=>p.provider===provider);assert(current,'설정된 Provider');const usable=current.credentials.find(c=>c.default&&c.decryptable);if(usable)return usable.id;const r=await credentialCall('POST',provider,{label:'default',secret:companyKeys[provider]},token);assert.equal(r.status,201);return r.body.target.id;}
  {
   assert.equal((await get('/readyz')).status,200);
   const before=(await db.query(`SELECT count(*)::int AS n FROM ${schema}.gw_requests`)).rows[0].n;
@@ -141,36 +141,36 @@ try{
   assert.equal(missing.status,503);assert.equal(missing.headers.get('x-gateway-error-code'),'provider_credential_unavailable');assert.equal(missing.headers.get('x-gateway-dispatch-state'),'not_dispatched');
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM ${schema}.gw_requests`)).rows[0].n,before);
   const listed=await fetch('http://127.0.0.1:4000/gateway/admin/provider-credentials',{headers:{authorization:`Bearer ${adminToken}`},signal:AbortSignal.timeout(5000)}).then(r=>r.json());
-  assert.deepEqual(listed.providers.map(p=>[p.provider,p.status,p.active]),[['anthropic','missing',null]]);
+  assert.deepEqual(listed.providers.map(p=>[p.provider,p.status,p.credentials]),[['anthropic','missing',[]]]);
   // 형식이 다른 키는 Provider 호출 없이, Provider가 거절한 키는 확인 호출 1회 후 저장 없이 거절한다.
   const checks=modelChecks;
-  let r=await credentialCall('PUT','anthropic',{secret:companyKeys.openai,expected_credential_id:null});assert.equal(r.status,400);assert.equal(modelChecks,checks);
-  r=await credentialCall('PUT','anthropic',{secret:'sk-ant-synthetic-wrong-company-key',expected_credential_id:null});assert.equal(r.status,422);assert.equal(r.body.error.code,'provider_credential_rejected');assert.equal(modelChecks,checks+1);
-  r=await credentialCall('PUT','openai',{secret:companyKeys.openai,expected_credential_id:null});assert.equal(r.status,404);
+  let r=await credentialCall('POST','anthropic',{label:'default',secret:companyKeys.openai});assert.equal(r.status,400);assert.equal(modelChecks,checks);
+  r=await credentialCall('POST','anthropic',{label:'default',secret:'sk-ant-synthetic-wrong-company-key'});assert.equal(r.status,422);assert.equal(r.body.error.code,'provider_credential_rejected');assert.equal(modelChecks,checks+1);
+  r=await credentialCall('POST','openai',{label:'default',secret:companyKeys.openai});assert.equal(r.status,404);
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM ${schema}.gw_provider_credentials`)).rows[0].n,0);
   // 등록과 같은 명령 재전송: 두 번째는 Provider를 다시 부르지 않고 기록된 결과를 돌려준다.
   const command=randomUUID();
-  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:null},adminToken,command);assert.equal(r.status,201);assert.equal(r.body.replayed,false);assert.equal(r.body.credential.hint,companyKeys.anthropic.slice(-4));
+  r=await credentialCall('POST','anthropic',{label:'default',secret:companyKeys.anthropic},adminToken,command);assert.equal(r.status,201);assert.equal(r.body.replayed,false);assert.equal(r.body.credential.hint,companyKeys.anthropic.slice(-4));assert.equal(r.body.credential.label,'default');assert.equal(r.body.credential.default,true);
   const firstId=r.body.target.id;const afterChecks=modelChecks;
-  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:null},adminToken,command);assert.equal(r.status,201);assert.equal(r.body.replayed,true);assert.equal(modelChecks,afterChecks);
-  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:null});assert.equal(r.status,409);assert.equal(r.body.error.code,'credential_conflict');assert.equal(r.body.error.details.current_credential_id,firstId);
-  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:firstId});assert.equal(r.status,200);assert.equal(r.body.effect,'noop');
+  r=await credentialCall('POST','anthropic',{label:'default',secret:companyKeys.anthropic},adminToken,command);assert.equal(r.status,201);assert.equal(r.body.replayed,true);assert.equal(modelChecks,afterChecks);
+  r=await credentialCall('POST','anthropic',{label:'second',secret:companyKeys.anthropic});assert.equal(r.status,409);assert.equal(r.body.error.code,'credential_duplicate');assert.equal(r.body.error.details.credential_id,firstId);
+  r=await credentialCall('PUT',`anthropic/${firstId}`,{secret:companyKeys.anthropic,expected_version:'1'});assert.equal(r.status,200);assert.equal(r.body.effect,'noop');
   // 해제하면 암호문이 지워지고 추론은 다시 503이다. 다시 등록하면 새 id다.
-  r=await credentialCall('DELETE','anthropic',undefined,adminToken,randomUUID(),`?expected_credential_id=${firstId}`);assert.equal(r.status,200);assert.equal(r.body.credential.state,'retired');
+  r=await credentialCall('DELETE',`anthropic/${firstId}`,undefined,adminToken,randomUUID(),'?expected_version=1');assert.equal(r.status,200);assert.equal(r.body.credential.state,'retired');
   const retired=(await db.query(`SELECT state,nonce IS NULL AS shredded FROM ${schema}.gw_provider_credentials WHERE id=$1`,[firstId])).rows[0];assert.deepEqual(retired,{state:'retired',shredded:true});
   const again=await registerKey('anthropic');assert.notEqual(again,firstId);
   // DB 어디에도 원문이 없다(암호문·명령 기록·감사 기록 포함).
   const dump=(await db.query(`SELECT string_agg(t::text,'|') AS all FROM (SELECT row_to_json(c)::text AS t FROM ${schema}.gw_provider_credentials c UNION ALL SELECT row_to_json(m)::text FROM ${schema}.gw_commands m UNION ALL SELECT row_to_json(a)::text FROM ${schema}.gw_audit_events a) x`)).rows[0].all;
   for(const secret of Object.values(companyKeys))assert(!dump.includes(secret)&&!dump.includes(Buffer.from(secret).toString('hex')),'DB에 회사 키 원문');
-  const audits=(await db.query(`SELECT operation FROM ${schema}.gw_audit_events WHERE target_kind='credential' ORDER BY id`)).rows.map(r=>r.operation);assert.deepEqual(audits,['set_provider_credential','retire_provider_credential','set_provider_credential']);
+  const audits=(await db.query(`SELECT operation FROM ${schema}.gw_audit_events WHERE target_kind='credential' ORDER BY id`)).rows.map(r=>r.operation);assert.deepEqual(audits,['add_provider_credential','retire_provider_credential','add_provider_credential']);
   console.log('PROVIDER_CREDENTIAL_DB_REGISTRATION_VERIFY_REPLAY_RETIRE_AND_NO_PLAINTEXT_OK');
   // 다른 프로세스(유지보수 CLI)가 바꾼 키도 실행 중인 서버가 상태 점검 주기 안에 반영한다.
   const probe=async()=>(await fetch('http://127.0.0.1:4000/v1/messages',{method:'POST',headers:{authorization:`Bearer ${adminToken}`,'content-type':'application/json','anthropic-version':'2023-06-01'},body:JSON.stringify({model:'synthetic-text',max_tokens:10,messages:[{role:'user',content:'x'}]}),signal:AbortSignal.timeout(5000)})).headers.get('x-gateway-error-code');
   async function until(predicate,label){const deadline=Date.now()+12000;while(Date.now()<deadline){if(await predicate())return;await new Promise(r=>setTimeout(r,200));}throw new Error(label);}
   assert.notEqual(await probe(),'provider_credential_unavailable');
-  let cli=await maintenance(randomUUID(),{operation:'retire_provider_credential',provider:'anthropic',expected_credential_id:again});assert.equal(cli.code,0,cli.err);assert.equal(JSON.parse(cli.out).status,200);
+  let cli=await maintenance(randomUUID(),{operation:'retire_provider_credential',provider:'anthropic',credential_id:again,expected_version:1});assert.equal(cli.code,0,cli.err);assert.equal(JSON.parse(cli.out).status,200);
   await until(async()=>await probe()==='provider_credential_unavailable','다른 프로세스의 해제 반영');
-  cli=await maintenance(randomUUID(),{operation:'set_provider_credential',provider:'anthropic',secret:companyKeys.anthropic,expected_credential_id:null});assert.equal(cli.code,0,cli.err);assert.equal(JSON.parse(cli.out).status,201);
+  cli=await maintenance(randomUUID(),{operation:'add_provider_credential',provider:'anthropic',label:'default',secret:companyKeys.anthropic});assert.equal(cli.code,0,cli.err);assert.equal(JSON.parse(cli.out).status,201);
   for(const secret of Object.values(companyKeys))assert(!cli.out.includes(secret)&&!cli.err.includes(secret));
   await until(async()=>await probe()!=='provider_credential_unavailable','다른 프로세스의 등록 반영');
   console.log('PROVIDER_CREDENTIAL_CROSS_PROCESS_REFRESH_OK');
@@ -500,7 +500,7 @@ execution_ceiling:
  failJwks=true;readySignal=new Promise(r=>{readyResolve=r;});app=start();await bounded(readySignal,8000,'bounded initial JWKS request');await waitStatus('/readyz',503);assert.equal((await get('/livez')).status,200);assert.equal((await get('/gateway/me',{cookie})).status,503);
  failJwks=false;await waitStatus('/readyz',200,20000);assert.equal((await get('/gateway/me',{cookie})).status,200);assert(calls>=3);await stop();
  await db.query(`ALTER TABLE ${schema}.gw_usage_events RENAME TO gw_hidden_usage_events`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`ALTER TABLE ${schema}.gw_hidden_usage_events RENAME TO gw_usage_events`);
- await db.query(`INSERT INTO ${schema}.gw_schema_migrations(version,checksum) VALUES(8,decode(repeat('00',32),'hex'))`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`DELETE FROM ${schema}.gw_schema_migrations WHERE version=8`);
+ await db.query(`INSERT INTO ${schema}.gw_schema_migrations(version,checksum) VALUES(9,decode(repeat('00',32),'hex'))`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`DELETE FROM ${schema}.gw_schema_migrations WHERE version=9`);
  await db.query(`UPDATE ${schema}.gw_schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=2`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;
  console.log('U0_ACTUAL_MAIN_TLS_MIGRATION_HEALTH_OK');
 }finally{

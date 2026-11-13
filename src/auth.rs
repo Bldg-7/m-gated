@@ -478,6 +478,7 @@ impl SsoAuthenticator {
         Ok(AuthenticatedInference {
             current: human.current,
             key: None,
+            credentials: Vec::new(),
         })
     }
     pub async fn authenticate(
@@ -547,4 +548,14 @@ impl SsoAuthenticator {
 pub struct AuthenticatedInference {
     pub current: crate::ledger::CurrentHuman,
     pub key: Option<crate::ledger::finance::KeyScope>,
+    /// 가상 키에 연결된 Provider별 회사 키. SSO 직접 요청과 연결이 없는 Provider는 기본 키를 쓴다.
+    pub credentials: Vec<(crate::config::ProviderId, uuid::Uuid)>,
+}
+impl AuthenticatedInference {
+    pub fn credential_for(&self, provider: crate::config::ProviderId) -> Option<uuid::Uuid> {
+        self.credentials
+            .iter()
+            .find(|(p, _)| *p == provider)
+            .map(|(_, id)| *id)
+    }
 }

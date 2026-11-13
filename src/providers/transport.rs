@@ -193,11 +193,12 @@ impl NativeClient {
             config.provider,
         )
     }
-    /// 요청 하나에 쓸 키를 캐시에서 고정한다. 사용 가능한 키가 없으면 송신 전에 거절한다.
-    pub fn bind_credential(&self) -> Option<Self> {
+    /// 요청 하나에 쓸 키를 캐시에서 고정한다. `bound`는 가상 키에 연결된 회사 키이고, 없으면
+    /// Provider의 기본 키를 쓴다. 사용 가능한 키가 없으면 송신 전에 거절한다.
+    pub fn bind_credential(&self, bound: Option<Uuid>) -> Option<Self> {
         let key = match &self.key {
             KeySource::Store(cache) => {
-                let active = cache.get(self.provider)?;
+                let active = cache.get(self.provider, bound)?;
                 KeySource::Bound {
                     id: active.id,
                     secret: active.secret,

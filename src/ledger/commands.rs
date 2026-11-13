@@ -252,7 +252,12 @@ impl PgLedger {
                     ctx.actor,
                 )
                 .await?;
-                after = json!({"id":key.id,"principal_id":target_principal,"version":"1"});
+                // 회사 키를 직접 고르는 것은 관리자만 할 수 있다. 고르지 않으면 기본 키에 연결한다.
+                if !v.provider_credentials.is_empty() {
+                    management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
+                }
+                super::credentials::bind_new_key(&mut tx, key.id, &v.provider_credentials).await?;
+                after = json!({"id":key.id,"principal_id":target_principal,"version":"1","provider_credentials":super::credentials::key_bindings(&mut tx, key.id).await?});
                 secret = Some(key.expose_once());
                 201
             }

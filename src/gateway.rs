@@ -467,7 +467,7 @@ async fn execute(
         return error(id, StatusCode::BAD_REQUEST, "unsupported_model", true);
     };
     // 회사 키는 장부 입장 전에 요청 하나에 고정한다. 키가 없으면 장부 행 없이 거절한다.
-    let Some(client) = client.bind_credential() else {
+    let Some(client) = client.bind_credential(human.credential_for(provider)) else {
         return error(
             id,
             StatusCode::SERVICE_UNAVAILABLE,

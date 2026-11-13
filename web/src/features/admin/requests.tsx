@@ -38,7 +38,7 @@ export function RequestsScreen() {
         {page.data.items.length > 0 && <ul className="list">{page.data.items.map(r => <li key={r.id}>
           <div className="list-main">
             <span className="list-title mono">{r.id}</span>
-            <p className="meta">{r.provider} / <span className="mono">{r.model}</span> / {r.api} · {r.purpose} · version {r.version} · <span className="mono">{r.admitted_at}</span></p>
+            <p className="meta">{r.provider} / <span className="mono">{r.model}</span> / {r.api}{r.provider_credential?.label && <> · {t('회사 키')} {r.provider_credential.label}</>} · {r.purpose} · version {r.version} · <span className="mono">{r.admitted_at}</span></p>
           </div>
           <div className="list-side">{r.outcome ? <StatusBadge kind="outcome" value={r.outcome} /> : <StatusBadge kind="phase" value={r.phase} />}<StatusBadge kind="accounting" value={r.accounting_state} /><Money value={r.cost_usd} /><button className="btn-sm" aria-label={t('{{name}} 상세', { name: r.id })} onClick={() => setId(r.id)}>{t('상세')}</button></div>
         </li>)}</ul>}
@@ -66,6 +66,7 @@ function RequestEditor({ id }: { id: string }) {
         <dl className="kv">
           <dt>{t('주체')}</dt><dd><Link className="mono" href={`/ui/admin/principals?principal_id=${encodeURIComponent(r.principal_id)}`}>{r.principal_id}</Link></dd>
           <dt>{t('키')}</dt><dd className="mono">{r.key_id ?? 'SSO'}</dd>
+          <dt>{t('회사 키')}</dt><dd>{r.provider_credential ? <>{r.provider_credential.label ?? t('알 수 없음')} <span className="mono meta">(…{r.provider_credential.hint})</span></> : t('기록 없음')}</dd>
           <dt>{t('부모 요청')}</dt><dd className="mono">{r.parent_request_id ?? t('없음')}</dd>
           <dt>{t('상태')}</dt><dd>{r.phase} / {r.outcome ?? t('결과 미확인')} / {r.accounting_state}</dd>
           <dt>{t('비용')}</dt><dd><Money value={r.cost_usd} /></dd>
