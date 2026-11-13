@@ -6,6 +6,7 @@ import { UsageView } from './features/usage/usage';
 import { KeysScreen } from './features/keys/keys';
 import { PrincipalsScreen } from './features/admin/principals';
 import { RequestsScreen } from './features/admin/requests';
+import { CredentialsScreen } from './features/admin/credentials';
 export function UsageScreen({ admin = false }: { admin?: boolean }) {
   const auth = useSyncExternalStore(session.subscribe, session.snapshot);
   const [usage, setUsage] = useState<Usage | null>(null), [error, setError] = useState<string | null>(null), [loading, setLoading] = useState(true);
@@ -39,7 +40,7 @@ export function App() {
     void session.validate();
     return () => { window.removeEventListener('pagehide', pagehide); detach(); };
   }, []);
-  return <><header><h1>m-gated</h1><nav aria-label="기본"><a href="/ui/">내 사용량</a> <a href="/ui/keys">내 키</a>{auth.me?.role === 'admin' && <> <a href="/ui/admin/principals">주체·정책·키 관리</a> <a href="/ui/admin/usage">전체 사용량</a> <a href="/ui/admin/requests">미정산·처리 내역</a></>}</nav></header><main>
-    {auth.status === 'checking' ? <p role="status">인증 확인 중…</p> : auth.status === 'error' ? <><p role="alert">{auth.error}</p><a href="/auth/login">SSO 로그인</a><button onClick={() => void session.validate()}>다시 확인</button></> : auth.me && <><p>{auth.me.principal.display_name} ({auth.me.principal.email}) · {auth.me.role === 'admin' ? '관리자' : '사용자'}</p><button onClick={() => session.logout()}>로그아웃</button></>}{(auth.status === 'ready' || auth.refreshing) && (location.pathname.startsWith('/ui/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">현재 관리자 권한이 없습니다.</p> : location.pathname === '/ui/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : location.pathname === '/ui/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : location.pathname === '/ui/keys' ? <KeysScreen key={principal.current} /> : <UsageScreen key={principal.current} />)}
+  return <><header><h1>m-gated</h1><nav aria-label="기본"><a href="/ui/">내 사용량</a> <a href="/ui/keys">내 키</a>{auth.me?.role === 'admin' && <> <a href="/ui/admin/principals">주체·정책·키 관리</a> <a href="/ui/admin/usage">전체 사용량</a> <a href="/ui/admin/requests">미정산·처리 내역</a> <a href="/ui/admin/credentials">Provider 키</a></>}</nav></header><main>
+    {auth.status === 'checking' ? <p role="status">인증 확인 중…</p> : auth.status === 'error' ? <><p role="alert">{auth.error}</p><a href="/auth/login">SSO 로그인</a><button onClick={() => void session.validate()}>다시 확인</button></> : auth.me && <><p>{auth.me.principal.display_name} ({auth.me.principal.email}) · {auth.me.role === 'admin' ? '관리자' : '사용자'}</p><button onClick={() => session.logout()}>로그아웃</button></>}{(auth.status === 'ready' || auth.refreshing) && (location.pathname.startsWith('/ui/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">현재 관리자 권한이 없습니다.</p> : location.pathname === '/ui/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : location.pathname === '/ui/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : location.pathname === '/ui/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : location.pathname === '/ui/keys' ? <KeysScreen key={principal.current} /> : <UsageScreen key={principal.current} />)}
   </main></>;
 }

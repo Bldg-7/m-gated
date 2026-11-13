@@ -37,7 +37,8 @@ metrics! {
     Rss => "process_rss_bytes", Anon => "process_anon_bytes", CgroupAnon => "cgroup_anon_bytes", MemoryCurrent => "cgroup_memory_current_bytes", MemoryPeak => "cgroup_memory_peak_bytes",
     CpuUsage => "cgroup_cpu_usage_microseconds", CpuUser => "cgroup_cpu_user_microseconds", CpuSystem => "cgroup_cpu_system_microseconds",
     SinkDropped => "telemetry_dropped_total",
-    AlarmUnknown => "alarm_new_unknown_total", AlarmLatch => "alarm_finalization_latch_total", AlarmCompanyKey => "alarm_company_key_error_total", AlarmReady => "alarm_ready_degraded_total", AlarmBound => "alarm_pricing_bound_total"
+    AlarmUnknown => "alarm_new_unknown_total", AlarmLatch => "alarm_finalization_latch_total", AlarmCompanyKey => "alarm_company_key_error_total", AlarmReady => "alarm_ready_degraded_total", AlarmBound => "alarm_pricing_bound_total",
+    ProviderCredentialsUnavailable => "provider_credentials_unavailable"
 }
 static VALUES: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
 pub fn add(metric: Metric, value: u64) {

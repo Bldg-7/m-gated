@@ -61,6 +61,7 @@ impl InferenceGateway {
         config: &ValidatedConfig,
         auth: Arc<SsoAuthenticator>,
         ledger: Arc<PgLedger>,
+        credentials: Arc<crate::credentials::CredentialCache>,
     ) -> Result<Self, ApiError> {
         let mut clients = BTreeMap::new();
         let mut profiles = Vec::new();
@@ -69,6 +70,7 @@ impl InferenceGateway {
                 provider,
                 config.auth().ca_certificate.as_deref(),
                 clients.values().next(),
+                credentials.clone(),
             )?;
             clients.insert(provider.provider, client);
             profiles.extend(provider.profiles.clone());
@@ -448,6 +450,16 @@ async fn execute(
     let Some(client) = state.gateway.clients.get(&provider) else {
         return error(id, StatusCode::BAD_REQUEST, "unsupported_model", true);
     };
+    // 회사 키는 장부 입장 전에 요청 하나에 고정한다. 키가 없으면 장부 행 없이 거절한다.
+    let Some(client) = client.bind_credential() else {
+        return error(
+            id,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_credential_unavailable",
+            true,
+        );
+    };
+    let client = &client;
     let validation = if api == ApiKind::DeepseekChat {
         crate::providers::deepseek::validate(&body, profile).await
     } else if matches!(
@@ -491,6 +503,7 @@ async fn execute(
     };
     let mut spec = RequestSpec::from_profile(provider, profile, validated.output_limit);
     spec.id = id;
+    spec.provider_credential_id = client.credential_id();
     spec.stream = validated.stream;
     spec.deadline = crate::runtime::RequestDeadline::new(
         control.transport_deadline,
@@ -534,6 +547,7 @@ async fn execute(
             &outbound,
             control,
             progress,
+            client,
         )
         .await
     {
@@ -727,6 +741,7 @@ async fn internal_count(
     headers: &axum::http::HeaderMap,
     control: &Arc<crate::runtime::RequestControl>,
     progress: &mut ExecutionProgress,
+    client: &NativeClient,
 ) -> Result<(), InternalCountError> {
     let profile = state
         .gateway
@@ -741,6 +756,7 @@ async fn internal_count(
         .await
         .map_err(|_| InternalCountError::Count("unsupported_strict_policy"))?;
     let mut child = RequestSpec::from_profile(ProviderId::Anthropic, profile, None);
+    child.provider_credential_id = root.provider_credential_id;
     child.deadline = root.deadline;
     child.api_version = root.api_version.clone();
     child.approved_beta = root.approved_beta.clone();
@@ -772,7 +788,7 @@ async fn internal_count(
     };
     let result = tokio::time::timeout_at(
         control.transport_deadline,
-        state.gateway.clients[&ProviderId::Anthropic].send(
+        client.send(
             permit,
             projection,
             anthropic::SendOptions {

@@ -49,7 +49,10 @@ pub fn environment() -> BTreeMap<String, String> {
             "CSRF_SIGNING_KEY",
             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         ),
-        ("ANTHROPIC_API_KEY", "synthetic-provider-secret"),
+        (
+            "CREDENTIAL_ENCRYPTION_KEY",
+            "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))

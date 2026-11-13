@@ -8,13 +8,34 @@ use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderValue, StatusCode, header},
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use url::Url;
+use uuid::Uuid;
+#[derive(Clone)]
 pub struct NativeClient {
     client: reqwest::Client,
     base: Url,
-    key: String,
+    key: KeySource,
     provider: ProviderId,
+}
+/// 송신에 쓰는 회사 키의 출처. 제품은 DB 캐시에서 요청마다 고정(bind)한 키만 보낸다.
+#[derive(Clone)]
+enum KeySource {
+    /// 테스트 조립 전용 고정 키.
+    Fixed(String),
+    /// 아직 고정하지 않은 제품 client. 이 상태로는 송신하지 않는다.
+    Store(Arc<crate::credentials::CredentialCache>),
+    /// 요청 시작 시 캐시에서 고정한 키. 교체되어도 진행 중 요청은 이 키를 끝까지 쓴다.
+    Bound {
+        id: Uuid,
+        secret: Arc<zeroize::Zeroizing<String>>,
+    },
+}
+/// 등록 확인 결과. 원문 응답은 보관하지 않는다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifyError {
+    Rejected,
+    Unavailable,
 }
 /// 감독자가 relay future를 폐기해도 완전 검증한 작은 관측만 남긴다. 원문/부분 usage는 없다.
 #[derive(Default)]
@@ -41,6 +62,7 @@ pub enum UpstreamError {
     StreamLimit,
     TooLarge,
     Cancelled,
+    Credential,
 }
 impl UpstreamError {
     pub fn code(self) -> &'static str {
@@ -55,12 +77,13 @@ impl UpstreamError {
             Self::StreamLimit => "stream_limit",
             Self::TooLarge => "upstream_response_too_large",
             Self::Cancelled => "shutdown_cancelled",
+            Self::Credential => "provider_credential_unavailable",
         }
     }
     pub fn status(self) -> StatusCode {
         if self == Self::Timeout {
             StatusCode::GATEWAY_TIMEOUT
-        } else if self == Self::Cancelled {
+        } else if matches!(self, Self::Cancelled | Self::Credential) {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
             StatusCode::BAD_GATEWAY
@@ -149,6 +172,7 @@ impl NativeClient {
         config: &ProviderConfig,
         ca: Option<&[u8]>,
         shared: Option<&Self>,
+        cache: Arc<crate::credentials::CredentialCache>,
     ) -> Result<Self, ApiError> {
         if config.base_url.as_str() != format!("{}/", config.provider.origin()) {
             return Err(ApiError::InvalidRequest);
@@ -157,25 +181,94 @@ impl NativeClient {
             return Ok(Self {
                 client: shared.client.clone(),
                 base: config.base_url.clone(),
-                key: config.api_key.expose().to_owned(),
+                key: KeySource::Store(cache),
                 provider: config.provider,
             });
         }
         Self::build(
             config.base_url.clone(),
-            config.api_key.expose().to_owned(),
+            KeySource::Store(cache),
             true,
             ca,
             config.provider,
         )
     }
+    /// 요청 하나에 쓸 키를 캐시에서 고정한다. 사용 가능한 키가 없으면 송신 전에 거절한다.
+    pub fn bind_credential(&self) -> Option<Self> {
+        let key = match &self.key {
+            KeySource::Store(cache) => {
+                let active = cache.get(self.provider)?;
+                KeySource::Bound {
+                    id: active.id,
+                    secret: active.secret,
+                }
+            }
+            other => other.clone(),
+        };
+        Some(Self {
+            client: self.client.clone(),
+            base: self.base.clone(),
+            key,
+            provider: self.provider,
+        })
+    }
+    /// 고정한 회사 키의 DB id. 테스트 고정 키는 None이다.
+    pub fn credential_id(&self) -> Option<Uuid> {
+        match &self.key {
+            KeySource::Bound { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+    pub fn provider(&self) -> ProviderId {
+        self.provider
+    }
+    fn secret(&self) -> Option<&str> {
+        match &self.key {
+            KeySource::Fixed(s) => Some(s),
+            KeySource::Bound { secret, .. } => Some(secret.as_str()),
+            KeySource::Store(_) => None,
+        }
+    }
+    fn authorize(&self, request: reqwest::RequestBuilder, secret: &str) -> reqwest::RequestBuilder {
+        if matches!(self.provider, ProviderId::Openai | ProviderId::Deepseek) {
+            request.bearer_auth(secret)
+        } else {
+            request.header("x-api-key", secret)
+        }
+    }
+    /// 등록 직전 후보 키를 과금 없는 모델 목록 API로 확인한다. 응답 본문은 읽지 않는다.
+    pub async fn verify_credential(&self, secret: &str) -> Result<(), VerifyError> {
+        let path = match self.provider {
+            ProviderId::Anthropic => "v1/models?limit=1",
+            ProviderId::Openai => "v1/models",
+            ProviderId::Deepseek => "models",
+        };
+        let url = self.base.join(path).map_err(|_| VerifyError::Unavailable)?;
+        let mut request = self.authorize(self.client.get(url), secret);
+        if self.provider == ProviderId::Anthropic {
+            request = request.header("anthropic-version", "2023-06-01");
+        }
+        let response = tokio::time::timeout(Duration::from_secs(10), request.send())
+            .await
+            .map_err(|_| VerifyError::Unavailable)?
+            .map_err(|_| VerifyError::Unavailable)?;
+        match response.status().as_u16() {
+            200..=299 => Ok(()),
+            401 | 403 => Err(VerifyError::Rejected),
+            _ => Err(VerifyError::Unavailable),
+        }
+    }
 
-    pub fn new(config: &ProviderConfig) -> Result<Self, ApiError> {
-        Self::new_with_ca(config, None)
+    pub fn new(
+        config: &ProviderConfig,
+        cache: Arc<crate::credentials::CredentialCache>,
+    ) -> Result<Self, ApiError> {
+        Self::new_with_ca(config, None, cache)
     }
     pub(crate) fn new_with_ca(
         config: &ProviderConfig,
         ca: Option<&[u8]>,
+        cache: Arc<crate::credentials::CredentialCache>,
     ) -> Result<Self, ApiError> {
         if config.provider != ProviderId::Anthropic
             || config.base_url.as_str() != "https://api.anthropic.com/"
@@ -184,7 +277,7 @@ impl NativeClient {
         }
         Self::build(
             config.base_url.clone(),
-            config.api_key.expose().to_owned(),
+            KeySource::Store(cache),
             true,
             ca,
             ProviderId::Anthropic,
@@ -202,11 +295,28 @@ impl NativeClient {
         {
             return Err(ApiError::InvalidRequest);
         }
-        Self::build(base, key, false, None, ProviderId::Anthropic)
+        Self::build(
+            base,
+            KeySource::Fixed(key),
+            false,
+            None,
+            ProviderId::Anthropic,
+        )
+    }
+    /// 테스트 조립 전용: loopback 주소에 DB 캐시 키를 쓰는 client(등록 확인·회전 시험용).
+    pub fn loopback_store_for_test(
+        base: Url,
+        provider: ProviderId,
+        cache: Arc<crate::credentials::CredentialCache>,
+    ) -> Result<Self, ApiError> {
+        let mut client = Self::loopback_for_test(base, String::new())?;
+        client.key = KeySource::Store(cache);
+        client.provider = provider;
+        Ok(client)
     }
     fn build(
         base: Url,
-        key: String,
+        key: KeySource,
         https_only: bool,
         ca: Option<&[u8]>,
         provider: ProviderId,
@@ -268,11 +378,11 @@ impl NativeClient {
                     .unwrap_or(HeaderValue::from_static("application/json")),
             )
             .body(body);
-        if matches!(self.provider, ProviderId::Openai | ProviderId::Deepseek) {
-            outbound = outbound.bearer_auth(&self.key);
-        } else {
-            outbound = outbound.header("x-api-key", &self.key);
-        }
+        // 고정되지 않은 제품 client는 키 없이 송신하지 않는다(permit 소비 전 거절).
+        let Some(secret) = self.secret() else {
+            return Err(UpstreamError::Credential);
+        };
+        outbound = self.authorize(outbound, secret);
         for name in ["anthropic-version", "anthropic-beta"]
             .into_iter()
             .filter(|_| self.provider == ProviderId::Anthropic)
@@ -313,7 +423,11 @@ impl NativeClient {
     }
 }
 impl NativeClient {
-    pub fn openai(config: &ProviderConfig, ca: Option<&[u8]>) -> Result<Self, ApiError> {
+    pub fn openai(
+        config: &ProviderConfig,
+        ca: Option<&[u8]>,
+        cache: Arc<crate::credentials::CredentialCache>,
+    ) -> Result<Self, ApiError> {
         if config.provider != ProviderId::Openai
             || config.base_url.as_str() != "https://api.openai.com/"
         {
@@ -321,7 +435,7 @@ impl NativeClient {
         }
         Self::build(
             config.base_url.clone(),
-            config.api_key.expose().to_owned(),
+            KeySource::Store(cache),
             true,
             ca,
             ProviderId::Openai,

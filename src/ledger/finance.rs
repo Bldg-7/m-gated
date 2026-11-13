@@ -457,6 +457,8 @@ pub struct RequestSpec {
     pub cost_bound: Option<Amount>,
     pub input_bound_tokens: Option<u64>,
     pub deadline: crate::runtime::RequestDeadline,
+    /// 이 요청이 고정한 회사 키의 DB id. 테스트 고정 키·이관 요청은 None이다.
+    pub provider_credential_id: Option<Uuid>,
     internal_count: bool,
 }
 impl RequestSpec {
@@ -511,6 +513,7 @@ impl RequestSpec {
                 ProviderId::Openai => crate::providers::openai::verified_input_bound(profile),
                 ProviderId::Deepseek => crate::providers::deepseek::verified_input_bound(profile),
             },
+            provider_credential_id: None,
             internal_count: profile.internal_count,
             deadline: crate::runtime::RequestDeadline::new(
                 observed + Duration::from_secs(895),
@@ -823,8 +826,8 @@ impl PgLedger {
         }
         let execution = json!({"schema_version":1,"profile_version":spec.profile_version,"billing_class":if spec.billing_class==BillingClass::GuaranteedFree {"guaranteed_free"}else{"chargeable"},"capability":api_name(spec.api),"stream":spec.stream,"output_limit":spec.output_limit,"input_bound_tokens":spec.input_bound_tokens,"output_bound_tokens":spec.output_limit,"cost_bound_usd":spec.cost_bound.map(|n|n.to_string()),"auth_dependency_versions":{"principals":dependencies,"target_inference_safety_version":principal.get::<i64,_>("inference_safety_version").to_string(),"key":key.map(|k|json!({"id":k.id.to_string(),"version":k.version.to_string()})),"policies":policies.iter().map(|p|json!({"id":p.get::<Uuid,_>("id").to_string(),"version":p.get::<i64,_>("version").to_string()})).collect::<Vec<_>>()},"api_version":spec.api_version,"approved_beta":spec.approved_beta});
         let execution = read_execution_snapshot(execution)?;
-        sqlx::query("INSERT INTO gw_requests(id,principal_id,key_id,parent_request_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest) VALUES($1,$2,$13,$14,$15,$3,$4,$5,$6::timestamptz,least($6::timestamptz+interval '60 seconds',$6::timestamptz+$11::bigint*interval '1 millisecond',coalesce((SELECT admit_expires_at FROM gw_requests WHERE id=$14),$6::timestamptz+interval '60 seconds')),least($6::timestamptz+$11::bigint*interval '1 millisecond',coalesce((SELECT transport_deadline FROM gw_requests WHERE id=$14),$6::timestamptz+$11::bigint*interval '1 millisecond')),least($6::timestamptz+$12::bigint*interval '1 millisecond',coalesce((SELECT execution_deadline FROM gw_requests WHERE id=$14),$6::timestamptz+$12::bigint*interval '1 millisecond')),$7,'admitted','pending',$8,$9,$10)")
-            .bind(spec.id).bind(human.id).bind(provider_name(spec.provider)).bind(&spec.pricing.requested_model).bind(api_name(spec.api)).bind(&anchor).bind(self.executor_id).bind(serde_json::to_value(&spec.pricing).map_err(|_|LedgerError::InvalidSnapshot)?).bind(execution).bind(self.auth_digest.as_slice()).bind(transport_ms as i64).bind(execution_ms as i64).bind(key.map(|k|k.id)).bind(parent).bind(if parent.is_some(){"internal_count"}else{"root"}).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO gw_requests(id,principal_id,key_id,parent_request_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest,provider_credential_id) VALUES($1,$2,$13,$14,$15,$3,$4,$5,$6::timestamptz,least($6::timestamptz+interval '60 seconds',$6::timestamptz+$11::bigint*interval '1 millisecond',coalesce((SELECT admit_expires_at FROM gw_requests WHERE id=$14),$6::timestamptz+interval '60 seconds')),least($6::timestamptz+$11::bigint*interval '1 millisecond',coalesce((SELECT transport_deadline FROM gw_requests WHERE id=$14),$6::timestamptz+$11::bigint*interval '1 millisecond')),least($6::timestamptz+$12::bigint*interval '1 millisecond',coalesce((SELECT execution_deadline FROM gw_requests WHERE id=$14),$6::timestamptz+$12::bigint*interval '1 millisecond')),$7,'admitted','pending',$8,$9,$10,$16)")
+            .bind(spec.id).bind(human.id).bind(provider_name(spec.provider)).bind(&spec.pricing.requested_model).bind(api_name(spec.api)).bind(&anchor).bind(self.executor_id).bind(serde_json::to_value(&spec.pricing).map_err(|_|LedgerError::InvalidSnapshot)?).bind(execution).bind(self.auth_digest.as_slice()).bind(transport_ms as i64).bind(execution_ms as i64).bind(key.map(|k|k.id)).bind(parent).bind(if parent.is_some(){"internal_count"}else{"root"}).bind(spec.provider_credential_id).execute(&mut *tx).await?;
         for (scope, timezone, start, end, rate, stored, _) in attributions {
             let policy = policies
                 .iter()

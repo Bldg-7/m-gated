@@ -48,10 +48,6 @@ fn configuration_features(
     );
     yaml.push_str(options);
     let mut env = support::environment();
-    env.insert(
-        "DEEPSEEK_API_KEY".into(),
-        "synthetic-deepseek-company-key".into(),
-    );
     env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
     env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
     config::load(ConfigInputs {

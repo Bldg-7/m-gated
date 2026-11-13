@@ -34,8 +34,14 @@ pub struct DashboardApi {
     logout: String,
     origin: String,
     ledger: Arc<crate::ledger::PgLedger>,
+    credentials: Option<Arc<crate::credentials::CredentialService>>,
 }
 impl DashboardApi {
+    /// Provider 회사 키 관리 API를 붙인다. 없으면 해당 경로는 404다.
+    pub fn with_credentials(mut self, service: Arc<crate::credentials::CredentialService>) -> Self {
+        self.credentials = Some(service);
+        self
+    }
     pub fn new(
         config: &ValidatedConfig,
         auth: Arc<SsoAuthenticator>,
@@ -57,6 +63,7 @@ impl DashboardApi {
             ),
             auth,
             store,
+            credentials: None,
             grants: json!(grants),
             digest,
             digest_bytes: crate::gateway::auth_config_digest(config),
@@ -91,6 +98,14 @@ impl DashboardApi {
                 any(management::handle),
             )
             .route("/gateway/admin/keys", any(management::handle))
+            .route(
+                "/gateway/admin/provider-credentials",
+                any(management::handle),
+            )
+            .route(
+                "/gateway/admin/provider-credentials/{provider}",
+                any(management::handle),
+            )
             .route("/gateway/admin/usage", any(management::handle))
             .route("/gateway/admin/requests", any(management::handle))
             .route("/gateway/admin/requests/{id}", any(management::handle))

@@ -2,7 +2,10 @@
 use crate::{
     auth::{AccessSettings, AuthRoute, SsoAuthenticator},
     config::{StartupError, ValidatedConfig},
-    ledger::{PgIdentityStore, PgLedger, commands::CommandContext, retention::RetentionDelete},
+    ledger::{
+        PgIdentityStore, PgLedger, commands::CommandContext, credentials::CredentialCommand,
+        retention::RetentionDelete,
+    },
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,6 +23,16 @@ struct Envelope {
 enum Command {
     RetentionDelete(RetentionDelete),
     Handoff(Box<crate::ledger::handoff::Handoff>),
+    /// 등록 전에 실제 Provider 확인을 거친다. 키는 stdin envelope로만 받는다.
+    SetProviderCredential {
+        provider: String,
+        secret: String,
+        expected_credential_id: Option<uuid::Uuid>,
+    },
+    RetireProviderCredential {
+        provider: String,
+        expected_credential_id: uuid::Uuid,
+    },
 }
 struct Syntax;
 impl crate::json::Visitor for Syntax {
@@ -80,11 +93,16 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
         crate::gateway::auth_config_digest(config),
     );
     let grants = json!(config.providers().iter().flat_map(|p|p.profiles.iter().map(|profile|json!({"provider":crate::ledger::finance::provider_name(p.provider),"model":profile.model,"capabilities":[crate::ledger::finance::api_name(profile.api)]}))).collect::<Vec<_>>());
+    let path = match &envelope.command {
+        Command::SetProviderCredential { .. } => "set_provider_credential",
+        Command::RetireProviderCredential { .. } => "retire_provider_credential",
+        _ => "retention_delete",
+    };
     let ctx = CommandContext {
         actor: human.current.id,
         command_id: envelope.command_id,
         method: "MAINTENANCE",
-        path: "retention_delete",
+        path,
         settings: &settings,
         grants: &grants,
         digest: crate::gateway::auth_config_digest(config),
@@ -100,5 +118,54 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
             .handoff(&ctx, *input)
             .await
             .map_err(|_| StartupError::RuntimeFailure),
+        Command::SetProviderCredential {
+            provider,
+            secret,
+            expected_credential_id,
+        } => {
+            let provider =
+                crate::config::ProviderId::from_name(&provider).ok_or(StartupError::ConfigInput)?;
+            credential(
+                config,
+                ledger.database().clone(),
+                &ctx,
+                CredentialCommand::Set {
+                    provider,
+                    secret: zeroize::Zeroizing::new(secret),
+                    expected: expected_credential_id,
+                },
+            )
+            .await
+        }
+        Command::RetireProviderCredential {
+            provider,
+            expected_credential_id,
+        } => {
+            let provider =
+                crate::config::ProviderId::from_name(&provider).ok_or(StartupError::ConfigInput)?;
+            credential(
+                config,
+                ledger.database().clone(),
+                &ctx,
+                CredentialCommand::Retire {
+                    provider,
+                    expected: expected_credential_id,
+                },
+            )
+            .await
+        }
     }
+}
+async fn credential(
+    config: &ValidatedConfig,
+    store: Arc<PgIdentityStore>,
+    ctx: &CommandContext<'_>,
+    command: CredentialCommand,
+) -> Result<Value, StartupError> {
+    let service = crate::credentials::CredentialService::new(config, store)?;
+    let result = service
+        .execute(ctx, command)
+        .await
+        .map_err(|_| StartupError::MaintenanceFailure)?;
+    Ok(json!({"status":result.status,"ack":result.body}))
 }

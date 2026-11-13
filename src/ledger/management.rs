@@ -30,6 +30,12 @@ pub enum ManagementError {
     SettlementConflict,
     ExecutionNotFinal,
     Query(super::dashboard::QueryError),
+    /// Provider가 후보 키를 401/403으로 거절했다.
+    CredentialRejected,
+    /// Provider 확인 호출이 실패해 키가 유효한지 알 수 없다. 저장하지 않는다.
+    CredentialUnverified,
+    /// 지금 active인 키가 요청이 가정한 키와 다르다.
+    CredentialConflict(Option<Uuid>),
 }
 impl From<sqlx::Error> for ManagementError {
     fn from(e: sqlx::Error) -> Self {

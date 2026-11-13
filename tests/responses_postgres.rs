@@ -26,7 +26,6 @@ fn configuration() -> config::ValidatedConfig {
 }
 fn configuration_yaml(yaml: &str) -> config::ValidatedConfig {
     let mut env = support::environment();
-    env.insert("OPENAI_API_KEY".into(), "synthetic-company-key".into());
     env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
     env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
     config::load(ConfigInputs {

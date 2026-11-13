@@ -34,7 +34,15 @@ async fn running_app_reaps_expiry_and_confirms_family_latch_without_claiming_sto
         Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
     );
     let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
-    let gateway = Arc::new(InferenceGateway::new(&cfg, auth.clone(), ledger.clone()).unwrap());
+    let gateway = Arc::new(
+        InferenceGateway::new(
+            &cfg,
+            auth.clone(),
+            ledger.clone(),
+            Arc::new(m_gated::credentials::CredentialCache::default()),
+        )
+        .unwrap(),
+    );
     let ui = Arc::new(
         m_gated::dashboard::UiBundle::load(
             std::path::Path::new("web/dist"),
@@ -1957,7 +1965,7 @@ async fn two_migrators_serialize_and_actual_advisory30s_total120s_fail_closed() 
     let clean = db.store.migrate().await.is_ok();
     db.close().await;
     assert!(timed_out && elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(35));
-    assert!(one.is_ok() && two.is_ok() && count == 5);
+    assert!(one.is_ok() && two.is_ok() && count == 6);
     assert!(
         reached
             && total_timeout.is_err()

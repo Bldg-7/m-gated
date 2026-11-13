@@ -26,6 +26,7 @@ pub enum StartupError {
     HttpBind,
     RuntimeFailure,
     MaintenanceFailure,
+    RemovedProviderKeyEnv,
 }
 impl StartupError {
     pub fn code(self) -> &'static str {
@@ -47,6 +48,7 @@ impl StartupError {
             Self::HttpBind => "http_bind_failed",
             Self::RuntimeFailure => "runtime_failed",
             Self::MaintenanceFailure => "maintenance_failed",
+            Self::RemovedProviderKeyEnv => "config_provider_key_env_removed",
         }
     }
 }
@@ -168,12 +170,16 @@ pub enum ProviderId {
     Deepseek,
 }
 impl ProviderId {
-    fn secret_name(self) -> &'static str {
+    pub const ALL: [Self; 3] = [Self::Anthropic, Self::Openai, Self::Deepseek];
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::Openai => "OPENAI_API_KEY",
-            Self::Deepseek => "DEEPSEEK_API_KEY",
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Deepseek => "deepseek",
         }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
     }
     pub fn origin(self) -> &'static str {
         match self {
@@ -279,7 +285,6 @@ pub struct ProviderConfig {
     pub provider: ProviderId,
     pub base_url: Url,
     pub profiles: Vec<ModelProfile>,
-    pub api_key: Secret,
 }
 pub struct AuthConfig {
     pub ca_certificate: Option<Vec<u8>>,
@@ -330,6 +335,7 @@ pub struct ValidatedConfig {
     pub(crate) admin_emails: BTreeSet<String>,
     pub(crate) database: DatabaseConfig,
     pub(crate) csrf_signing_key: Secret,
+    pub(crate) credential_encryption_key: Secret,
     pub(crate) providers: Vec<ProviderConfig>,
     pub(crate) limits: Limits,
     pub(crate) retention: Retention,
@@ -355,10 +361,11 @@ impl ValidatedConfig {
         &self.csrf_signing_key
     }
     pub fn csrf_signing_key_bytes(&self) -> [u8; 32] {
-        let encoded = self.csrf_signing_key.expose();
-        std::array::from_fn(|i| {
-            u8::from_str_radix(&encoded[i * 2..i * 2 + 2], 16).expect("검증된 64자리 lowercase hex")
-        })
+        hex32(self.csrf_signing_key.expose())
+    }
+    /// Provider 키를 DB에 암호화해 두는 root key. 이 값에서 용도별 key를 파생한다.
+    pub fn credential_encryption_key_bytes(&self) -> [u8; 32] {
+        hex32(self.credential_encryption_key.expose())
     }
     pub fn providers(&self) -> &[ProviderConfig] {
         &self.providers
@@ -482,6 +489,12 @@ pub fn load(inputs: ConfigInputs<'_>) -> Result<ValidatedConfig, StartupError> {
         serde_yaml_ng::from_str(inputs.yaml).map_err(|_| StartupError::ConfigSyntax)?;
     let raw: RawConfig =
         serde_yaml_ng::from_value(value).map_err(|_| StartupError::ConfigSyntax)?;
+    if REMOVED_ENV_KEYS
+        .iter()
+        .any(|k| inputs.environment.contains_key(*k))
+    {
+        return Err(StartupError::RemovedProviderKeyEnv);
+    }
     let mut values = parse_non_secret_env(inputs.file_environment.unwrap_or(""))?;
     values.extend(
         inputs
@@ -553,6 +566,7 @@ fn validate(
             password: secret(env, "DB_PASSWORD")?,
         },
         csrf_signing_key: secret(env, "CSRF_SIGNING_KEY")?,
+        credential_encryption_key: secret(env, "CREDENTIAL_ENCRYPTION_KEY")?,
         providers: raw
             .providers
             .into_iter()
@@ -561,7 +575,6 @@ fn validate(
                     provider: p.provider,
                     base_url: parse_url(&p.base_url)?,
                     profiles: p.profiles,
-                    api_key: secret(env, p.provider.secret_name())?,
                 })
             })
             .collect::<Result<_, StartupError>>()?,
@@ -580,7 +593,7 @@ fn secret(env: &BTreeMap<String, String>, name: &str) -> Result<Secret, StartupE
     if value.len() > 8192 || value.chars().any(char::is_control) {
         return Err(StartupError::InvalidSecret);
     }
-    if name == "CSRF_SIGNING_KEY"
+    if ["CSRF_SIGNING_KEY", "CREDENTIAL_ENCRYPTION_KEY"].contains(&name)
         && (value.len() != 64
             || !value
                 .bytes()
@@ -588,7 +601,16 @@ fn secret(env: &BTreeMap<String, String>, name: &str) -> Result<Secret, StartupE
     {
         return Err(StartupError::InvalidSecret);
     }
+    // 두 key의 수명이 섞이지 않게 같은 값을 거부한다(CSRF key 교체가 저장 키를 잃게 하지 않도록).
+    if name == "CREDENTIAL_ENCRYPTION_KEY" && env.get("CSRF_SIGNING_KEY") == Some(value) {
+        return Err(StartupError::InvalidSecret);
+    }
     Ok(Secret(value.clone()))
+}
+fn hex32(encoded: &str) -> [u8; 32] {
+    std::array::from_fn(|i| {
+        u8::from_str_radix(&encoded[i * 2..i * 2 + 2], 16).expect("검증된 64자리 lowercase hex")
+    })
 }
 
 /// 환경 전체나 .env 파일을 읽지 않는다. 비밀도 이 목록의 주입값만 받는다.
@@ -611,10 +633,10 @@ pub const ENV_KEYS: &[&str] = &[
     "DB_SSL_MODE",
     "DB_PASSWORD",
     "CSRF_SIGNING_KEY",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "DEEPSEEK_API_KEY",
+    "CREDENTIAL_ENCRYPTION_KEY",
 ];
+/// Provider 키는 DB에서만 관리한다. 예전 환경변수가 남아 있으면 조용히 무시하지 않고 기동을 거부한다.
+pub const REMOVED_ENV_KEYS: &[&str] = &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"];
 
 impl ValidatedConfig {
     fn validate(&mut self, env: &BTreeMap<String, String>) -> Result<(), StartupError> {

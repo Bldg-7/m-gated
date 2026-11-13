@@ -42,7 +42,6 @@ fn configuration_options(verified: bool, output: &str, options: &str) -> config:
     yaml.push_str(&profile);
     yaml.push_str(options);
     let mut env = support::environment();
-    env.insert("OPENAI_API_KEY".into(), "synthetic-company-key".into());
     env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
     env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
     config::load(ConfigInputs {

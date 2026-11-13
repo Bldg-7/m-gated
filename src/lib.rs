@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod config;
+pub mod credentials;
 pub mod http;
 pub mod runtime;
 pub mod server;

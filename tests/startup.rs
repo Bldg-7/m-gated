@@ -103,15 +103,21 @@ async fn actual_binary_rejects_each_config_failure_and_missing_bundle_safely() {
         );
     }
     let mut env = support::environment();
-    env.remove("ANTHROPIC_API_KEY");
+    env.remove("CREDENTIAL_ENCRYPTION_KEY");
     assert_eq!(
         run(&fixture, Some(support::YAML), &env).await,
         "config_secret_missing: 기동 검증에 실패했습니다.\n"
     );
-    env.insert(
+    let mut removed = support::environment();
+    removed.insert(
         "ANTHROPIC_API_KEY".into(),
         "synthetic-provider-secret".into(),
     );
+    assert_eq!(
+        run(&fixture, Some(support::YAML), &removed).await,
+        "config_provider_key_env_removed: 기동 검증에 실패했습니다.\n"
+    );
+    env = support::environment();
     env.insert("CSRF_SIGNING_KEY".into(), "short-secret-sentinel".into());
     assert_eq!(
         run(&fixture, Some(support::YAML), &env).await,

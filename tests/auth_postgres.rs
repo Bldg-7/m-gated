@@ -543,7 +543,7 @@ async fn principal_policy_constraints_and_migration_are_real_sql() {
         .fetch_one(db.store.pool())
         .await
         .unwrap();
-    assert_eq!(count, 5);
+    assert_eq!(count, 6);
     sqlx::query("UPDATE gw_schema_migrations SET checksum=decode(repeat('00',32),'hex')")
         .execute(db.store.pool())
         .await

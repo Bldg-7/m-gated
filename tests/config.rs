@@ -153,12 +153,13 @@ fn secret_presence_redaction_and_inactive_provider() {
     assert!(!debug.contains("synthetic-provider-secret"));
     assert!(!debug.contains("synthetic-db-secret"));
     assert!(!debug.contains(&env["CSRF_SIGNING_KEY"]));
-    assert_eq!(
-        config.providers().len(),
-        1,
-        "비활성 Provider secret은 요구하지 않는다"
-    );
-    for key in ["DB_PASSWORD", "CSRF_SIGNING_KEY", "ANTHROPIC_API_KEY"] {
+    assert!(!debug.contains(&env["CREDENTIAL_ENCRYPTION_KEY"]));
+    assert_eq!(config.providers().len(), 1);
+    for key in [
+        "DB_PASSWORD",
+        "CSRF_SIGNING_KEY",
+        "CREDENTIAL_ENCRYPTION_KEY",
+    ] {
         let mut missing = env.clone();
         missing.remove(key);
         assert_eq!(
@@ -171,7 +172,11 @@ fn secret_presence_redaction_and_inactive_provider() {
             StartupError::MissingSecret
         );
     }
-    for key in ["DB_PASSWORD", "CSRF_SIGNING_KEY", "ANTHROPIC_API_KEY"] {
+    for key in [
+        "DB_PASSWORD",
+        "CSRF_SIGNING_KEY",
+        "CREDENTIAL_ENCRYPTION_KEY",
+    ] {
         let mut bad = env.clone();
         bad.insert(key.into(), "\nsecret-sentinel".into());
         let error = config::load(ConfigInputs {
@@ -183,16 +188,64 @@ fn secret_presence_redaction_and_inactive_provider() {
         assert_eq!(error, StartupError::InvalidSecret);
         assert!(!format!("{error:?} {error}").contains("sentinel"));
     }
-    let mut short = env;
-    short.insert("CSRF_SIGNING_KEY".into(), "01234567".into());
+    for key in ["CSRF_SIGNING_KEY", "CREDENTIAL_ENCRYPTION_KEY"] {
+        let mut short = env.clone();
+        short.insert(key.into(), "01234567".into());
+        assert_eq!(
+            config::load(ConfigInputs {
+                yaml: support::YAML,
+                file_environment: None,
+                environment: &short
+            })
+            .unwrap_err(),
+            StartupError::InvalidSecret
+        );
+    }
+    // 두 key의 수명이 섞이지 않게 같은 값을 거부한다.
+    let mut same = env.clone();
+    same.insert(
+        "CREDENTIAL_ENCRYPTION_KEY".into(),
+        env["CSRF_SIGNING_KEY"].clone(),
+    );
     assert_eq!(
         config::load(ConfigInputs {
             yaml: support::YAML,
             file_environment: None,
-            environment: &short
+            environment: &same
         })
         .unwrap_err(),
         StartupError::InvalidSecret
+    );
+    let key = config::load(ConfigInputs {
+        yaml: support::YAML,
+        file_environment: None,
+        environment: &env,
+    })
+    .unwrap()
+    .credential_encryption_key_bytes();
+    assert_eq!(key[0], 0x20);
+    assert_eq!(key[31], 0x3f);
+}
+
+#[test]
+fn provider_key_environment_variables_are_removed_not_ignored() {
+    for key in config::REMOVED_ENV_KEYS {
+        let mut env = support::environment();
+        env.insert((*key).into(), "sk-ant-synthetic-company-key-0001".into());
+        assert_eq!(
+            config::load(ConfigInputs {
+                yaml: support::YAML,
+                file_environment: None,
+                environment: &env
+            })
+            .unwrap_err(),
+            StartupError::RemovedProviderKeyEnv
+        );
+        assert!(config::parse_non_secret_env(&format!("{key}=x")).is_err());
+    }
+    assert_eq!(
+        StartupError::RemovedProviderKeyEnv.code(),
+        "config_provider_key_env_removed"
     );
 }
 
@@ -494,7 +547,7 @@ fn database_and_email_inputs_are_not_connection_strings_or_wildcards() {
 
 #[test]
 fn only_declared_provider_api_profiles_are_configurable_and_free_count_is_explicit() {
-    for (provider, origin, key, api, no_output) in [
+    for (provider, origin, _key, api, no_output) in [
         (
             "anthropic",
             "https://api.anthropic.com",
@@ -580,9 +633,7 @@ fn only_declared_provider_api_profiles_are_configurable_and_free_count_is_explic
                     "api: count_tokens\n        count_billing: counted_input_tokens",
                 );
         }
-        let mut env = support::environment();
-        env.remove("ANTHROPIC_API_KEY");
-        env.insert(key.into(), "synthetic-provider-secret".into());
+        let env = support::environment();
         assert!(
             config::load(ConfigInputs {
                 yaml: &yaml,
@@ -730,7 +781,10 @@ fn anthropic_native_features_prices_and_access_digest_are_explicit() {
         StartupError::InvalidPrice,
     );
     let mut secrets = support::environment();
-    secrets.insert("ANTHROPIC_API_KEY".into(), "other-synthetic-secret".into());
+    secrets.insert(
+        "CREDENTIAL_ENCRYPTION_KEY".into(),
+        "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f".into(),
+    );
     let changed = config::load(ConfigInputs {
         yaml: support::YAML,
         file_environment: None,
@@ -789,8 +843,7 @@ fn responses_context_contract_is_api_specific_and_typed() {
         .replace("api: messages", "api: responses")
         .replace("anthropic_context_v1", "openai_responses_context_v1")
         .replace("[input, cache_read, cache_write]", "[input]");
-    let mut environment = support::environment();
-    environment.insert("OPENAI_API_KEY".into(), "synthetic-company-key".into());
+    let environment = support::environment();
     let result = config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
@@ -819,8 +872,7 @@ fn responses_context_contract_is_api_specific_and_typed() {
 #[test]
 fn chat_and_embeddings_profiles_require_api_specific_output_dimensions_and_encodings() {
     let base = support::YAML.replace("provider: anthropic", "provider: openai").replace("https://api.anthropic.com", "https://api.openai.com").replace("        input_bound_contract:\n          kind: anthropic_context_v1\n          context_tokens: 4096\n          input_categories: [input, cache_read, cache_write]\n", "");
-    let mut env = support::environment();
-    env.insert("OPENAI_API_KEY".into(), "synthetic-company-key".into());
+    let env = support::environment();
     let valid = |yaml: &str| {
         config::load(ConfigInputs {
             yaml,
@@ -883,8 +935,7 @@ fn deepseek_requires_explicit_time_and_own_context_contract() {
         "          input: '1.000000000000'",
         "          input: '1.000000000000'\n          cache_read: '0.500000000000'",
     );
-    let mut env = support::environment();
-    env.insert("DEEPSEEK_API_KEY".into(), "synthetic-deepseek-key".into());
+    let env = support::environment();
     let load = |yaml: &str| {
         config::load(ConfigInputs {
             yaml,
@@ -915,8 +966,7 @@ fn deepseek_price_categories_are_not_anthropic_rates() {
             "api: messages",
             "api: deepseek_chat\n        billing_time_rule: fixed_admission_v1",
         );
-    let mut env = support::environment();
-    env.insert("DEEPSEEK_API_KEY".into(), "synthetic-deepseek".into());
+    let env = support::environment();
     assert!(
         config::load(ConfigInputs {
             yaml: &base,

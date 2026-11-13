@@ -17,6 +17,7 @@ use axum::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+const CREDENTIALS: &str = "/gateway/admin/provider-credentials";
 fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
 }
@@ -52,6 +53,15 @@ pub(super) fn error(e: ManagementError) -> Response {
                 json!({"current_version":v.to_string()}),
             );
         }
+        CredentialRejected => (422, "provider_credential_rejected"),
+        CredentialUnverified => (502, "provider_credential_unverified"),
+        CredentialConflict(current) => {
+            return details(
+                StatusCode::CONFLICT,
+                "credential_conflict",
+                json!({"current_credential_id":current}),
+            );
+        }
         SecretUnavailable(id) => {
             return details(
                 StatusCode::CONFLICT,
@@ -70,8 +80,10 @@ pub(super) fn error(e: ManagementError) -> Response {
 }
 pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> Response {
     let path = request.uri().path();
-    let allowed = if path == "/gateway/csrf" {
+    let allowed = if path == "/gateway/csrf" || path == CREDENTIALS {
         vec![Method::GET]
+    } else if path.starts_with(CREDENTIALS) {
+        vec![Method::PUT, Method::DELETE]
     } else if path == "/gateway/keys" || path == "/gateway/admin/principals" {
         vec![Method::GET, Method::POST]
     } else if path.starts_with("/gateway/keys/") {
@@ -227,6 +239,9 @@ async fn execute(
             }
             Err(e) => crate::http::authentication_error(e),
         };
+    }
+    if path == CREDENTIALS || path.starts_with(CREDENTIALS) {
+        return provider_credentials(state, &head, body, human.current.id).await;
     }
     let ctx = QueryContext {
         actor: human.current.id,
@@ -513,6 +528,153 @@ async fn execute(
             }
             response
         }
+    }
+}
+
+/// Provider 회사 키 조회·등록·해제. 원문은 요청 본문에서만 받고 어떤 응답에도 담지 않는다.
+async fn provider_credentials(
+    state: &ApiState,
+    head: &axum::http::request::Parts,
+    body: axum::body::Body,
+    actor: Uuid,
+) -> Response {
+    use crate::{config::ProviderId, ledger::credentials::CredentialCommand};
+    let Some(service) = state.api.credentials.clone() else {
+        return error(ManagementError::NotFound);
+    };
+    let path = head.uri.path();
+    if head.method == Method::GET {
+        if path != CREDENTIALS || head.uri.query().is_some() {
+            return error(ManagementError::Invalid);
+        }
+        return match service.list().await {
+            Ok(v) => success(v),
+            Err(e) => error(e),
+        };
+    }
+    let Some(provider) = path
+        .strip_prefix(CREDENTIALS)
+        .and_then(|p| p.strip_prefix('/'))
+        .and_then(ProviderId::from_name)
+    else {
+        return error(ManagementError::NotFound);
+    };
+    let commands: Vec<_> = head
+        .headers
+        .get_all("x-gateway-command-id")
+        .iter()
+        .collect();
+    let Some(command_id) = (commands.len() == 1)
+        .then(|| {
+            commands[0]
+                .to_str()
+                .ok()
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
+        .flatten()
+    else {
+        return error(ManagementError::Invalid);
+    };
+    if head
+        .headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .any(|v| v.as_bytes() != b"identity")
+    {
+        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+    }
+    let body_limit = state.runtime.limits().management_body_bytes;
+    let bytes = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        to_bytes(body, body_limit),
+    )
+    .await
+    {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
+        Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
+    };
+    let command = if head.method == Method::PUT {
+        if head.uri.query().is_some() {
+            return error(ManagementError::Invalid);
+        }
+        if !crate::providers::anthropic::json_content_type(&head.headers) {
+            return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+        }
+        let Ok(mut input) = serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes) else {
+            return error(ManagementError::Invalid);
+        };
+        if input.len() != 2 {
+            return error(ManagementError::Invalid);
+        }
+        let expected = match input.remove("expected_credential_id") {
+            Some(Value::Null) => None,
+            Some(Value::String(s)) => match Uuid::parse_str(&s) {
+                Ok(id) => Some(id),
+                Err(_) => return error(ManagementError::Invalid),
+            },
+            _ => return error(ManagementError::Invalid),
+        };
+        let Some(Value::String(secret)) = input.remove("secret") else {
+            return error(ManagementError::Invalid);
+        };
+        CredentialCommand::Set {
+            provider,
+            secret: zeroize::Zeroizing::new(secret),
+            expected,
+        }
+    } else {
+        if !bytes.is_empty() {
+            return error(ManagementError::Invalid);
+        }
+        let mut fields = match management_query::fields(head.uri.query()) {
+            Ok(f) => f,
+            Err(e) => return error(e),
+        };
+        let Some(expected) = fields
+            .remove("expected_credential_id")
+            .and_then(|s| Uuid::parse_str(&s).ok())
+        else {
+            return error(ManagementError::Invalid);
+        };
+        if !fields.is_empty() {
+            return error(ManagementError::Invalid);
+        }
+        CredentialCommand::Retire { provider, expected }
+    };
+    let ctx = CommandContext {
+        actor,
+        command_id,
+        method: head.method.as_str(),
+        path,
+        settings: state.api.auth.settings(),
+        grants: &state.api.grants,
+        digest: state.api.digest_bytes,
+        ceiling: &state.api.ceiling,
+        execution_running: false,
+    };
+    match service.execute(&ctx, command).await {
+        Ok(result) => {
+            // 이 프로세스는 즉시, 다른 프로세스는 상태 점검 주기에 맞춰 반영한다.
+            let _ = service.refresh().await;
+            let mut r = match result.body {
+                Some(v) => success(v),
+                None => StatusCode::NO_CONTENT.into_response(),
+            };
+            *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            r.headers_mut().insert(
+                "x-gateway-command-id",
+                HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
+            );
+            r.headers_mut().insert(
+                "x-gateway-command-replayed",
+                HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
+            );
+            r
+        }
+        Err(e) => error(e),
     }
 }
 

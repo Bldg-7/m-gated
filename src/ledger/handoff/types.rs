@@ -116,6 +116,9 @@ pub struct Request {
     pub result_digest: Option<String>,
     pub settlement_digest: Option<String>,
     pub version: String,
+    /// 원본 DB의 회사 키 id. 대상 DB에는 그 행이 없으므로 받기만 하고 가져오지 않는다(NULL로 이관).
+    #[serde(default, skip_serializing)]
+    pub provider_credential_id: Option<Uuid>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

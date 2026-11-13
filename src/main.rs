@@ -43,7 +43,7 @@ fn load() -> Result<(config::ValidatedConfig, bool), StartupError> {
         .map(|path| read_bounded(path, 64 * 1024))
         .transpose()?;
     let mut environment = BTreeMap::new();
-    for key in config::ENV_KEYS {
+    for key in config::ENV_KEYS.iter().chain(config::REMOVED_ENV_KEYS) {
         if let Some(value) = std::env::var_os(key) {
             environment.insert(
                 (*key).to_owned(),

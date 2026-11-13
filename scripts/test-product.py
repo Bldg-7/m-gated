@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory(prefix='product-', dir=ROOT/'target') as tempor
         state = {'count': 0, 'latest': None, 'diagnostics': [], 'failure': None, 'condition': threading.Condition(), 'ipc_count':0, 'done':False, 'pending':None, 'barrier_generation':0, 'rpc_peak_ms':0, 'queue_age_peak_ms':0}
         epoch=str(uuid.uuid4())
         numeric_post('/metrics-epoch', {'epoch':epoch})
-        env = {'DB_PASSWORD': 'synthetic-db-secret', 'CSRF_SIGNING_KEY': '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f', 'ANTHROPIC_API_KEY': 'synthetic-provider-secret', 'OPENAI_API_KEY': 'synthetic-openai-company-key', 'DEEPSEEK_API_KEY': 'synthetic-deepseek-company-key', 'TLS_CA_FILE': '/fixture-data/ca.pem'}
+        env = {'DB_PASSWORD': 'synthetic-db-secret', 'CSRF_SIGNING_KEY': '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f', 'CREDENTIAL_ENCRYPTION_KEY': '202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f', 'TLS_CA_FILE': '/fixture-data/ca.pem'}
         env.update(extra or {})
         command = ['docker', 'create', '--name', product_name, '--label', 'app=m-gated', '--label', 'purpose=S10-product-runtime', '--network', 'container:'+support_id, '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--cpus=2', '--memory=1g', '--pids-limit=128', '--stop-timeout=35', '-v', str(directory)+':/fixture-data:ro']
         for key, value in env.items():

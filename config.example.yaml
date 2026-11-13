@@ -10,9 +10,10 @@
 #   - The file may be at most 256 KiB.
 #
 # Secrets are never read from this file. Provide them as environment
-# variables: DB_PASSWORD, CSRF_SIGNING_KEY (64 lowercase hex chars) and one
-# <PROVIDER>_API_KEY per configured provider (ANTHROPIC_API_KEY,
-# OPENAI_API_KEY, DEEPSEEK_API_KEY).
+# variables: DB_PASSWORD, CSRF_SIGNING_KEY and CREDENTIAL_ENCRYPTION_KEY
+# (each of the last two: 64 lowercase hex chars, different values).
+# Provider API keys are registered by an admin in the dashboard
+# (/ui/admin/credentials) and stored encrypted in Postgres.
 
 # Public HTTPS origin of the gateway (scheme + host only, no path, no port).
 # Browser writes from the dashboard must carry exactly this Origin.
@@ -66,7 +67,8 @@ database:
 
 providers:
   # base_url must be the official API origin of the provider; it cannot point
-  # anywhere else. At most one entry per provider. Requires ANTHROPIC_API_KEY.
+  # anywhere else. At most one entry per provider. Register its key in the
+  # dashboard after the first start.
   - provider: anthropic
     base_url: https://api.anthropic.com
     profiles:
@@ -126,7 +128,7 @@ providers:
           cache_write_5m: '0.000000000000'
 
   # Optional second provider. Remove this block if you do not use OpenAI;
-  # otherwise OPENAI_API_KEY is required.
+  # otherwise register an OpenAI key in the dashboard.
   - provider: openai
     base_url: https://api.openai.com
     profiles:

@@ -2,7 +2,8 @@
 
 m-gated is a self-hosted LLM API gateway with a strict cost ledger. Clients use the official
 Anthropic, OpenAI and DeepSeek SDKs against the gateway, and the gateway forwards their requests
-to the real provider with a provider key that only the server holds. Before a request is sent, the
+to the real provider with a company key that only the server holds (stored encrypted in Postgres
+and managed from the admin dashboard). Before a request is sent, the
 gateway checks it against the caller's policies. Afterwards it prices the request and records the
 cost in a Postgres ledger.
 
@@ -98,10 +99,14 @@ $EDITOR gateway.yaml        # hosts, e-mails, database, profiles and, above all,
 
 ```sh
 export DB_PASSWORD='...'
-export CSRF_SIGNING_KEY="$(openssl rand -hex 32)"   # exactly 64 lowercase hex characters
-export ANTHROPIC_API_KEY='...'                       # one key per configured provider
-# export OPENAI_API_KEY='...'  DEEPSEEK_API_KEY='...'
+export CSRF_SIGNING_KEY="$(openssl rand -hex 32)"           # exactly 64 lowercase hex characters
+export CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"  # different value; keep it stable
 ```
+
+Provider API keys are **not** environment variables. An admin registers them in the dashboard after
+the first start (see [Provider keys](#provider-keys)). If `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+`DEEPSEEK_API_KEY` is set, the gateway refuses to start with `config_provider_key_env_removed`, so
+that a key you meant to use is not silently ignored.
 
 ### 4. Run
 
@@ -122,8 +127,8 @@ With Docker (multi-stage build, non-root user `65532`, `STOPSIGNAL SIGTERM`). Re
 ```sh
 docker run --rm -p 4000:4000 \
   -v "$PWD/gateway.yaml:/app/gateway.yaml:ro" \
-  -e DB_PASSWORD -e CSRF_SIGNING_KEY -e ANTHROPIC_API_KEY \
-  ghcr.io/bldg-7/m-gated:0.1.0
+  -e DB_PASSWORD -e CSRF_SIGNING_KEY -e CREDENTIAL_ENCRYPTION_KEY \
+  ghcr.io/bldg-7/m-gated:0.3.0
 ```
 
 Or build it yourself with `docker build -t m-gated .` and run `m-gated` in place of the image name.
@@ -134,6 +139,9 @@ pass `--config <path>`.
 ### 5. First use
 
 1. An admin (listed in `admin_emails`) opens `https://<gateway>/ui/` and signs in through the SSO.
+   Under *Admin → Provider keys* (`/ui/admin/credentials`), the admin registers a company key for
+   each configured provider. Until then, requests to that provider are rejected with `503
+   provider_credential_unavailable` (the gateway itself stays ready).
 2. New principals start **deny-all**. Under *Admin → Principals*, the admin sets a policy for each
    user, including the admin's own account. A policy has grants (provider, model, capabilities) and
    optional limits: a monthly budget, `rpm`, `tpm` and `count_rpm`.
@@ -156,7 +164,8 @@ If startup validation fails, the gateway writes a fixed error code to stderr and
 before binding the port. The codes include `config_input_invalid`, `config_syntax_invalid`,
 `config_auth_invalid`, `config_url_invalid`, `config_identity_invalid`, `config_secret_missing`,
 `config_secret_invalid`, `config_database_invalid`, `config_profile_invalid`, `config_price_invalid`,
-`config_limits_invalid`, `ui_bundle_unavailable` and `schema_unavailable`.
+`config_limits_invalid`, `config_provider_key_env_removed`, `ui_bundle_unavailable` and
+`schema_unavailable`.
 
 ## Configuration reference
 
@@ -258,7 +267,7 @@ The gateway reads only the variables in this table.
 | `TLS_CA_FILE` | – | Path to an extra PEM trust anchor (≤ 64 KiB) for Postgres, the JWKS and provider connections. |
 | `DB_PASSWORD` | – | **Secret, environment only.** |
 | `CSRF_SIGNING_KEY` | – | **Secret, environment only.** 64 lowercase hex characters (32 bytes). It signs CSRF tokens and pagination cursors. |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY` | – | **Secret, environment only.** Required for each configured provider. |
+| `CREDENTIAL_ENCRYPTION_KEY` | – | **Secret, environment only.** 64 lowercase hex characters (32 bytes), different from `CSRF_SIGNING_KEY`. It encrypts the provider keys stored in Postgres. If it changes, stored keys can no longer be decrypted and must be registered again. |
 
 ### `limits`
 
@@ -445,6 +454,7 @@ It has no inline scripts and loads nothing from external CDNs.
 | Principals, policies, service principals, safety-pause release | `/ui/admin/principals` | admins |
 | Organization-wide usage | `/ui/admin/usage` | admins |
 | Requests and manual settlement | `/ui/admin/requests` | admins |
+| Provider company keys (register, rotate, retire) | `/ui/admin/credentials` | admins |
 
 The JSON API behind it is under `/gateway/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
 routes). It is same-origin only, with no CORS. The UI text is currently in Korean.
@@ -466,6 +476,42 @@ routes). It is same-origin only, with no CORS. The UI text is currently in Korea
   instance has restarted with the new config. If you need the change to apply at once, also
   disable the principal's policy.
 
+### Provider keys
+
+Each configured provider uses one company key, stored in `gw_provider_credentials`:
+
+- **Encrypted at rest.** AES-256-GCM with a key derived from `CREDENTIAL_ENCRYPTION_KEY`. The provider
+  name and row id are bound to the ciphertext, so a ciphertext copied to another row does not
+  decrypt. The plaintext is never returned by any API, written to the command or audit log, or
+  printed. The dashboard shows only the last 4 characters.
+- **Verified before saving.** Registering or rotating a key always calls the provider's model-list
+  endpoint first (`GET /v1/models` for Anthropic and OpenAI, `GET /models` for DeepSeek; no charge).
+  A `401`/`403` is rejected with `422 provider_credential_rejected`; any other failure with
+  `502 provider_credential_unverified`. Nothing is stored in either case. The key must also match the
+  provider's format (`sk-ant-…` for Anthropic, `sk-…` for OpenAI and DeepSeek).
+- **Compare-and-swap.** A registration names the key it replaces (`expected_credential_id`, `null`
+  when there is none). If another admin changed it first, the request fails with `409
+  credential_conflict`. Registering the key that is already active is a no-op.
+- **Rotation.** The new key becomes active and the old row is retired in the same transaction. Its
+  ciphertext is erased; only metadata remains as history. Requests already in progress keep the key
+  they started with. Other instances pick up the change at their next health check (every 5 s).
+- **Traceability.** Every request records the id of the company key it used
+  (`gw_requests.provider_credential_id`), so you can find what a leaked key was used for.
+- **Monitoring.** The `provider_credentials_unavailable` gauge counts configured providers without a
+  usable key (missing, or not decryptable with the current `CREDENTIAL_ENCRYPTION_KEY`). `/readyz`
+  is not affected, so an admin can still reach the dashboard to register a key.
+
+API (admin only; cookie writes need the usual `Origin` and `X-CSRF-Token`):
+
+| Method and path | Body / query | Result |
+|---|---|---|
+| `GET /gateway/admin/provider-credentials` | – | Status, active key metadata and recent history per configured provider |
+| `PUT /gateway/admin/provider-credentials/{provider}` | `{"secret": "...", "expected_credential_id": "<uuid>" \| null}` | `201` new key, `200` no-op |
+| `DELETE /gateway/admin/provider-credentials/{provider}` | `?expected_credential_id=<uuid>` | `200`, key retired |
+
+Writes require an `X-Gateway-Command-Id` header and replay like other admin commands: resending the
+same command id returns the recorded result without calling the provider again.
+
 ### Maintenance mode
 
 `m-gated --maintenance --config gateway.yaml` validates the configuration, connects to the
@@ -485,6 +531,19 @@ The output is `{"ack": {...}, "result": {"deleted_requests": N, "next_after": <u
 To continue, run the command again with `after` set to `next_after` and a **new** `command_id`.
 Requests that are unknown or still in progress are never deleted. If the command fails, the gateway
 prints `maintenance_failed` and exits with status 1.
+
+The same mode can register or retire a provider key without the dashboard. The key travels only in
+the stdin envelope and is verified with the provider first:
+
+```sh
+printf '%s' '{"access_token":"<admin SSO JWT>","command_id":"<new UUID>",
+  "command":{"operation":"set_provider_credential","provider":"anthropic",
+  "secret":"sk-ant-...","expected_credential_id":null}}' \
+  | m-gated --maintenance --config gateway.yaml | cat
+```
+
+Use `{"operation":"retire_provider_credential","provider":"anthropic","expected_credential_id":"<uuid>"}`
+to retire one. The output is `{"status": 201|200, "ack": {...}}`.
 
 ## Development and tests
 

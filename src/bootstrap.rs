@@ -21,6 +21,7 @@ pub struct Dependencies {
     inference: Option<Arc<crate::gateway::InferenceGateway>>,
     dashboard: Option<Arc<crate::admin::DashboardApi>>,
     ui: Option<Arc<crate::dashboard::UiBundle>>,
+    credentials: Option<Arc<crate::credentials::CredentialService>>,
 }
 impl Dependencies {
     pub fn unassembled() -> Self {
@@ -34,7 +35,16 @@ impl Dependencies {
             inference: None,
             dashboard: None,
             ui: None,
+            credentials: None,
         }
+    }
+    /// 상태 점검 주기마다 DB의 회사 키 변경을 캐시에 반영한다. 준비 상태(ready)에는 영향을 주지 않는다.
+    pub fn with_credentials(
+        mut self,
+        credentials: Arc<crate::credentials::CredentialService>,
+    ) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
     pub fn with_inference(mut self, inference: Arc<crate::gateway::InferenceGateway>) -> Self {
         self.inference = Some(inference);
@@ -64,15 +74,30 @@ impl Dependencies {
             )
             .with_ceiling(config.execution_ceiling().clone()),
         );
+        let credentials = crate::credentials::CredentialService::new(config, store.clone())?;
+        // 키가 하나도 없어도 기동한다(관리자가 대시보드에서 등록해야 하므로). DB 조회 실패만 기동 실패다.
+        credentials
+            .refresh()
+            .await
+            .map_err(|_| StartupError::SchemaUnavailable)?;
         let inference = Arc::new(
-            crate::gateway::InferenceGateway::new(config, auth.clone(), ledger)
-                .map_err(|_| StartupError::InvalidProfile)?,
+            crate::gateway::InferenceGateway::new(
+                config,
+                auth.clone(),
+                ledger,
+                credentials.cache(),
+            )
+            .map_err(|_| StartupError::InvalidProfile)?,
         );
-        let dashboard = Arc::new(crate::admin::DashboardApi::new(config, auth.clone(), store));
+        let dashboard = Arc::new(
+            crate::admin::DashboardApi::new(config, auth.clone(), store)
+                .with_credentials(credentials.clone()),
+        );
         Ok(Self::unassembled()
             .with_dashboard(dashboard)
             .with_authentication(auth)
-            .with_inference(inference))
+            .with_inference(inference)
+            .with_credentials(credentials))
     }
     pub fn with_ui(mut self, ui: Arc<crate::dashboard::UiBundle>) -> Self {
         self.ui = Some(ui);
@@ -150,7 +175,12 @@ impl RunningApp {
                 false
             }
         };
-        let ((database, schema), jwks) = tokio::join!(database, jwks);
+        let credentials = async {
+            if let Some(c) = &self.dependencies.credentials {
+                let _ = c.refresh().await;
+            }
+        };
+        let ((database, schema), jwks, ()) = tokio::join!(database, jwks, credentials);
         crate::runtime::HealthReport {
             database,
             schema,

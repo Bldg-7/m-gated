@@ -24,9 +24,11 @@ let expired=false;
 const overall=setTimeout(()=>{expired=true;app?.child.kill('SIGKILL');for(const socket of sockets)socket.destroy();},loadCase?4200000:120000);
 function bounded(promise,ms,label){let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(label)),ms);})]).finally(()=>clearTimeout(timer));}
 function openssl(args){const r=spawnSync('/usr/bin/openssl',args,{env:{},stdio:'pipe',timeout:10000});assert.equal(r.status,0,'합성 TLS 생성');}
-const env={DB_PASSWORD:'synthetic-db-secret',CSRF_SIGNING_KEY:'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',ANTHROPIC_API_KEY:'synthetic-provider-secret',OPENAI_API_KEY:'synthetic-openai-company-key',DEEPSEEK_API_KEY:'synthetic-deepseek-company-key',TLS_CA_FILE:join(directory,'ca.pem')};
+const env={DB_PASSWORD:'synthetic-db-secret',CSRF_SIGNING_KEY:'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',CREDENTIAL_ENCRYPTION_KEY:'202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f',TLS_CA_FILE:join(directory,'ca.pem')};
+// 회사 키는 환경변수가 아니라 관리 API로 DB에 등록한다. 출력·DB 어디에도 원문이 남지 않아야 한다.
+const companyKeys={anthropic:'sk-ant-synthetic-provider-secret',openai:'sk-synthetic-openai-company-key',deepseek:'sk-synthetic-deepseek-company-key'};let modelChecks=0;
 let readyResolve;let readySignal=new Promise(r=>{readyResolve=r;});
-const metricNames=Object.freeze(["admission_authentication_total", "admission_principal_total", "admission_nonstream_total", "queue_waiters", "cgroup_cpu_usage_microseconds", "cgroup_cpu_user_microseconds", "cgroup_cpu_system_microseconds", "admission_rejected_total", "admission_not_ready_total", "admission_draining_total", "admission_capacity_total", "admission_invalid_total", "http_429_total", "http_413_total", "http_503_total", "authentication_total", "authentication_failed_total", "authentication_microseconds_total", "jwks_fetch_total", "jwks_failed_total", "jwks_fetch_microseconds_total", "jwks_cache_age_seconds", "db_acquire_total", "db_acquire_failed_total", "db_acquire_microseconds_total", "db_lock_total", "db_lock_failed_total", "db_lock_microseconds_total", "finalization_total", "finalization_failed_total", "finalization_microseconds_total", "active_tasks", "active_permits", "body_bytes", "queue_bytes", "queue_peak_bytes", "parser_peak_bytes", "parser_bytes", "input_bytes", "ttft_count", "ttft_microseconds_total", "stream_count", "stream_microseconds_total", "stream_cancelled_total", "upstream_2xx_total", "upstream_4xx_total", "upstream_5xx_total", "upstream_other_total", "unknown_requests", "unknown_blocked_principals", "oldest_unknown_seconds", "price_unresolved_total", "pricing_bound_violation_total", "reaper_transitions_total", "deleted_requests_total", "reaper_failed_total", "panic_total", "shutdown_remaining_milliseconds", "ready", "process_rss_bytes", "process_anon_bytes", "cgroup_anon_bytes", "cgroup_memory_current_bytes", "cgroup_memory_peak_bytes", "telemetry_dropped_total", "alarm_new_unknown_total", "alarm_finalization_latch_total", "alarm_company_key_error_total", "alarm_ready_degraded_total", "alarm_pricing_bound_total"]);
+const metricNames=Object.freeze(["admission_authentication_total", "admission_principal_total", "admission_nonstream_total", "queue_waiters", "cgroup_cpu_usage_microseconds", "cgroup_cpu_user_microseconds", "cgroup_cpu_system_microseconds", "admission_rejected_total", "admission_not_ready_total", "admission_draining_total", "admission_capacity_total", "admission_invalid_total", "http_429_total", "http_413_total", "http_503_total", "authentication_total", "authentication_failed_total", "authentication_microseconds_total", "jwks_fetch_total", "jwks_failed_total", "jwks_fetch_microseconds_total", "jwks_cache_age_seconds", "db_acquire_total", "db_acquire_failed_total", "db_acquire_microseconds_total", "db_lock_total", "db_lock_failed_total", "db_lock_microseconds_total", "finalization_total", "finalization_failed_total", "finalization_microseconds_total", "active_tasks", "active_permits", "body_bytes", "queue_bytes", "queue_peak_bytes", "parser_peak_bytes", "parser_bytes", "input_bytes", "ttft_count", "ttft_microseconds_total", "stream_count", "stream_microseconds_total", "stream_cancelled_total", "upstream_2xx_total", "upstream_4xx_total", "upstream_5xx_total", "upstream_other_total", "unknown_requests", "unknown_blocked_principals", "oldest_unknown_seconds", "price_unresolved_total", "pricing_bound_violation_total", "reaper_transitions_total", "deleted_requests_total", "reaper_failed_total", "panic_total", "shutdown_remaining_milliseconds", "ready", "process_rss_bytes", "process_anon_bytes", "cgroup_anon_bytes", "cgroup_memory_current_bytes", "cgroup_memory_peak_bytes", "telemetry_dropped_total", "alarm_new_unknown_total", "alarm_finalization_latch_total", "alarm_company_key_error_total", "alarm_ready_degraded_total", "alarm_pricing_bound_total", "provider_credentials_unavailable"]);
 function start(extra={}){
  assert(!expired,'전체 프로세스 시험 기한');
  const child=spawn('/fixture/m-gated',['--config',join(directory,'config.yaml')],{cwd:'/fixture',env:{...env,...extra},stdio:['ignore','pipe','pipe']});
@@ -35,7 +37,7 @@ function start(extra={}){
   if(name==='out'){out+=data;assert(out.length<=4096,'bounded main stdout');return;}
   pending+=data;let newline;
   while((newline=pending.indexOf('\n'))>=0){const line=pending.slice(0,newline);pending=pending.slice(newline+1);assert(line.length<=8192,'bounded telemetry line');
-   for(const secret of Object.values(env))assert(!line.includes(secret),'운영 출력에 합성 인증값 노출');
+   for(const secret of [...Object.values(env),...Object.values(companyKeys)])assert(!line.includes(secret),'운영 출력에 합성 인증값 노출');
    assert(!line.includes('synthetic prompt sentinel'),'운영 출력에 대화본문 노출');
    if(line.startsWith('{"telemetry":')){const parsed=JSON.parse(line);assert.deepEqual(Object.keys(parsed),['telemetry']);assert.deepEqual(Object.keys(parsed.telemetry).sort(),[...metricNames].sort());for(const [key,value]of Object.entries(parsed.telemetry)){assert(Number.isSafeInteger(value)&&value>=0);telemetry.peaks[key]=Math.max(telemetry.peaks[key]??0,value);}telemetry.count++;telemetry.latest=parsed.telemetry;
    }else{err+=line+'\n';assert(err.length<=4096,'bounded main diagnostics');}
@@ -69,14 +71,14 @@ try{
  const startWire='event: message_start\ndata: {"type":"message_start","message":{"type":"message","role":"assistant","model":"synthetic-text","usage":{"input_tokens":100,"output_tokens":0}}}\n\n';
  const endWire='event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n';
  function sampleMemory(){const stats=readFileSync(`/proc/${app.child.pid}/smaps_rollup`,'utf8');return {rssKiB:Number(stats.match(/^Rss:\s+(\d+)/m)[1]),anonKiB:Number(stats.match(/^Anonymous:\s+(\d+)/m)[1])};}
- async function provider(req,res){providerCalls++;assert(['/v1/messages','/v1/messages/count_tokens'].includes(req.url));assert.equal(req.headers['x-api-key'],'synthetic-provider-secret');assert.equal(req.headers.authorization,undefined);let n=0;for await(const chunk of req){n+=chunk.length;assert(n<=(providerMode==='load'?8388608:65535));}if(req.url.endsWith('/count_tokens')){res.writeHead(200,{'content-type':'application/json'});res.end('{"input_tokens":321}');return;}if(providerMode==='strict'){assert(n<=4096,'합성 native context 계약');res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({type:'message',id:'msg_strict',role:'assistant',model:'synthetic-text',content:[{type:'text',text:'synthetic strict'}],stop_reason:'end_turn',usage:{input_tokens:100,output_tokens:20}}));return;}res.writeHead(200,{'content-type':'text/event-stream','request-id':'synthetic-main-provider'});res.on('close',()=>providerStoppedResolve());res.write(startWire);if(providerMode==='stalled')return;
+ async function provider(req,res){providerCalls++;assert(['/v1/messages','/v1/messages/count_tokens'].includes(req.url));assert.equal(req.headers['x-api-key'],companyKeys.anthropic);assert.equal(req.headers.authorization,undefined);let n=0;for await(const chunk of req){n+=chunk.length;assert(n<=(providerMode==='load'?8388608:65535));}if(req.url.endsWith('/count_tokens')){res.writeHead(200,{'content-type':'application/json'});res.end('{"input_tokens":321}');return;}if(providerMode==='strict'){assert(n<=4096,'합성 native context 계약');res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({type:'message',id:'msg_strict',role:'assistant',model:'synthetic-text',content:[{type:'text',text:'synthetic strict'}],stop_reason:'end_turn',usage:{input_tokens:100,output_tokens:20}}));return;}res.writeHead(200,{'content-type':'text/event-stream','request-id':'synthetic-main-provider'});res.on('close',()=>providerStoppedResolve());res.write(startWire);if(providerMode==='stalled')return;
   if(providerMode==='load'){assert(loadWave);const wave=loadWave;await wave.gate;const until=Date.now()+wave.seconds*1000;while(Date.now()<until){if(!res.write('event: future_event\ndata: '+JSON.stringify({type:'future_event',text:'x'.repeat(16384)})+'\n\n'))await once(res,'drain');await new Promise(r=>setTimeout(r,1000));}res.end(endWire);return;}
 
   res.write('event: future_event\ndata: {"type":"future_event","text":"');const chunk='x'.repeat(16384);for(let i=0;i<640;i++){if(!res.write(chunk))await once(res,'drain');}res.write('"}\n\n');res.end(endWire);
  }
 
  async function responsesProvider(req,res){
-  responsesCalls++;assert.equal(req.url,'/v1/responses');assert.equal(req.headers.authorization,'Bearer synthetic-openai-company-key');assert.equal(req.headers['x-api-key'],undefined);assert.equal(req.headers['anthropic-version'],undefined);
+  responsesCalls++;assert.equal(req.url,'/v1/responses');assert.equal(req.headers.authorization,'Bearer '+companyKeys.openai);assert.equal(req.headers['x-api-key'],undefined);assert.equal(req.headers['anthropic-version'],undefined);
   const chunks=[];let length=0;for await(const chunk of req){length+=chunk.length;assert(length<=4096,'합성 Responses context 전체 입력/overhead 계약');chunks.push(chunk);}const input=JSON.parse(Buffer.concat(chunks));assert.equal(input.store,false);assert(input.max_output_tokens>0&&input.max_output_tokens<=1024);
   if(responsesStarted){responsesStarted();await new Promise(r=>{responsesRelease=r;});}
   const native={id:'resp_main_fixture',object:'response',model:'synthetic-text',status:responseStatus,output:[],incomplete_details:responseStatus==='incomplete'?{reason:'max_output_tokens'}:null,usage:{input_tokens:100,output_tokens:20,total_tokens:120,input_tokens_details:{cached_tokens:40},output_tokens_details:{reasoning_tokens:10}}};
@@ -89,7 +91,7 @@ try{
  }
  let s7Calls=0;let s7Started;let s7Release;
  async function chatEmbeddingsProvider(req,res){
-  s7Calls++;assert(['/v1/chat/completions','/v1/embeddings'].includes(req.url));assert.equal(req.headers.authorization,'Bearer synthetic-openai-company-key');assert.equal(req.headers['x-api-key'],undefined);assert.equal(req.headers['anthropic-version'],undefined);
+  s7Calls++;assert(['/v1/chat/completions','/v1/embeddings'].includes(req.url));assert.equal(req.headers.authorization,'Bearer '+companyKeys.openai);assert.equal(req.headers['x-api-key'],undefined);assert.equal(req.headers['anthropic-version'],undefined);
   const chunks=[];let length=0;for await(const chunk of req){length+=chunk.length;assert(length<=4096,'합성 Chat context 전체 입력/overhead 계약');chunks.push(chunk);}const input=JSON.parse(Buffer.concat(chunks));
   if(s7Started){s7Started();await new Promise(r=>{s7Release=r;});}
   if(req.url==='/v1/embeddings'){const encoded=input.encoding_format==='base64';const vector=encoded?Buffer.from(new Float32Array([0.5,0.5,0.5]).buffer).toString('base64'):[0.5,0.5,0.5];res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({object:'list',model:'synthetic-text',data:[{object:'embedding',index:0,embedding:vector}],usage:{prompt_tokens:100,total_tokens:100}}));return;}
@@ -99,7 +101,7 @@ try{
  }
  let s8Calls=0;let s8Started;let s8Release;
  async function deepseekProvider(req,res){
-  s8Calls++;assert.equal(req.url,'/chat/completions');assert.equal(req.headers.authorization,'Bearer synthetic-deepseek-company-key');assert.equal(req.headers['x-api-key'],undefined);assert.equal(req.headers['anthropic-version'],undefined);assert.equal(req.headers.cookie,undefined);
+  s8Calls++;assert.equal(req.url,'/chat/completions');assert.equal(req.headers.authorization,'Bearer '+companyKeys.deepseek);assert.equal(req.headers['x-api-key'],undefined);assert.equal(req.headers['anthropic-version'],undefined);assert.equal(req.headers.cookie,undefined);
   const chunks=[];let length=0;for await(const chunk of req){length+=chunk.length;assert(length<=4096,'합성 DeepSeek context 전체입력/overhead 계약');chunks.push(chunk);}const input=JSON.parse(Buffer.concat(chunks));assert(input.max_tokens>0&&input.max_tokens<=1024);assert.equal(input.max_completion_tokens,undefined);
   if(s8Started){s8Started();await new Promise(r=>{s8Release=r;});}
   const usage={prompt_tokens:100,completion_tokens:20,total_tokens:120,prompt_cache_hit_tokens:40,prompt_cache_miss_tokens:60,completion_tokens_details:{reasoning_tokens:10}};
@@ -107,7 +109,10 @@ try{
   if(!input.stream){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({id:'ds_main',object:'chat.completion',model:'synthetic-text',choices:[{index:0,message:{role:'assistant',content,reasoning_content:'synthetic thought'},finish_reason:'stop'}],usage}));return;}
   res.writeHead(200,{'content-type':'text/event-stream'});res.write(`data: ${JSON.stringify({id:'ds_main',object:'chat.completion.chunk',model:'synthetic-text',choices:[{index:0,delta:{role:'assistant',content},finish_reason:null}],...(input.stream_options?.include_usage?{usage:null}:{})})}\n\n`);res.write(`data: ${JSON.stringify({id:'ds_main',object:'chat.completion.chunk',model:'synthetic-text',choices:[{index:0,delta:{},finish_reason:'stop'}],usage})}\n\n`);res.end('data: [DONE]\n\n');
  }
- sso=https.createServer(tlsOptions,(req,res)=>{if(req.headers.host==='api.deepseek.com'){deepseekProvider(req,res).catch(()=>res.destroy());return;}if(req.headers.host==='api.anthropic.com'){provider(req,res).catch(()=>res.destroy());return;}if(req.headers.host==='api.openai.com'){(req.url==='/v1/responses'?responsesProvider:chatEmbeddingsProvider)(req,res).catch(()=>res.destroy());return;}if(req.url==='/.well-known/jwks.json'){calls++;if(failJwks){res.writeHead(503);res.end();}else{res.setHeader('content-type','application/json');res.end(JSON.stringify({keys:[jwk]}));}readyResolve();}else{res.writeHead(404);res.end();}});
+ sso=https.createServer(tlsOptions,(req,res)=>{const hostProvider={'api.anthropic.com':'anthropic','api.openai.com':'openai','api.deepseek.com':'deepseek'}[req.headers.host];
+  // 등록 확인: 과금 없는 모델 목록 API. 등록된 합성 키만 200이다.
+  if(hostProvider&&req.method==='GET'&&req.url==={anthropic:'/v1/models?limit=1',openai:'/v1/models',deepseek:'/models'}[hostProvider]){modelChecks++;const sent=hostProvider==='anthropic'?req.headers['x-api-key']:(req.headers.authorization??'').replace(/^Bearer /,'');if(hostProvider==='anthropic')assert.equal(req.headers['anthropic-version'],'2023-06-01');else assert.equal(req.headers['x-api-key'],undefined);res.writeHead(sent===companyKeys[hostProvider]?200:401,{'content-type':'application/json'});res.end('{"data":[]}');return;}
+  if(req.headers.host==='api.deepseek.com'){deepseekProvider(req,res).catch(()=>res.destroy());return;}if(req.headers.host==='api.anthropic.com'){provider(req,res).catch(()=>res.destroy());return;}if(req.headers.host==='api.openai.com'){(req.url==='/v1/responses'?responsesProvider:chatEmbeddingsProvider)(req,res).catch(()=>res.destroy());return;}if(req.url==='/.well-known/jwks.json'){calls++;if(failJwks){res.writeHead(503);res.end();}else{res.setHeader('content-type','application/json');res.end(JSON.stringify({keys:[jwk]}));}readyResolve();}else{res.writeHead(404);res.end();}});
  await new Promise(r=>sso.listen(443,'127.0.0.1',r));
  let config=readFileSync('/fixture/synthetic-config.yaml','utf8').replace('host: 127.0.0.1','host: localhost').replace('user@example.invalid','alice@example.test').replace('admin@example.invalid','alice@example.test');writeFileSync(join(directory,'config.yaml'),config);
  // 잘못된 CA와 hostname은 인증을 우회하지 않고 실제 main의 migration 전에 실패한다.
@@ -122,9 +127,57 @@ try{
  console.log('DB_SSL_MODE_REQUIRE_ENCRYPTS_WITHOUT_VERIFY_AND_NEVER_PLAINTEXT_OK');
  writeFileSync(join(directory,'config.yaml'),config.replace('host: 127.0.0.1','host: localhost'));
  app=start();await waitStatus('/readyz',200);assert.equal((await get('/livez')).status,200);assert.equal((await get('/ui/')).status,200);
- const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5']);
+ const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5','6']);
  const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'key1'})).toString('base64url');const payload=Buffer.from(JSON.stringify({iss:'https://auth.example.test',aud:'https://example.test',sub:'main-human',email:'alice@example.test',email_verified:true,exp:Math.floor(Date.now()/1000)+7200,name:'Synthetic main'})).toString('base64url');const signed=`${header}.${payload}`;const signature=createSign('RSA-SHA256').update(signed).sign(keys.privateKey).toString('base64url');const cookie=`mgated_access=${signed}.${signature}`;
  assert.equal((await get('/gateway/me',{cookie})).status,200);assert.equal((await get('/gateway/usage?group_by=provider',{cookie})).status,200);
+ // 회사 키 미등록: ready는 유지하고(관리자가 등록할 수 있게) 추론만 장부 행 없이 503으로 거절한다.
+ const adminToken=`${signed}.${signature}`;
+ async function credentialCall(method,provider,input,token=adminToken,command=randomUUID(),query=''){const headers={authorization:`Bearer ${token}`,'x-gateway-command-id':command};if(input!==undefined)headers['content-type']='application/json';const r=await fetch(`http://127.0.0.1:4000/gateway/admin/provider-credentials/${provider}${query}`,{method,headers,body:input===undefined?undefined:JSON.stringify(input),signal:AbortSignal.timeout(15000)});const text=await r.text();for(const secret of Object.values(companyKeys))assert(!text.includes(secret),'응답에 회사 키 원문');return {status:r.status,body:text?JSON.parse(text):null,headers:r.headers};}
+ async function registerKey(provider,token=adminToken){const list=await fetch('http://127.0.0.1:4000/gateway/admin/provider-credentials',{headers:{authorization:`Bearer ${token}`},signal:AbortSignal.timeout(5000)}).then(r=>r.json());const current=list.providers.find(p=>p.provider===provider);assert(current,'설정된 Provider');if(current.status==='active')return current.active.id;const r=await credentialCall('PUT',provider,{secret:companyKeys[provider],expected_credential_id:current.active?.id??null},token);assert.equal(r.status,201);return r.body.target.id;}
+ {
+  assert.equal((await get('/readyz')).status,200);
+  const before=(await db.query(`SELECT count(*)::int AS n FROM ${schema}.gw_requests`)).rows[0].n;
+  const missing=await fetch('http://127.0.0.1:4000/v1/messages',{method:'POST',headers:{authorization:`Bearer ${adminToken}`,'content-type':'application/json','anthropic-version':'2023-06-01'},body:JSON.stringify({model:'synthetic-text',max_tokens:10,messages:[{role:'user',content:'x'}]}),signal:AbortSignal.timeout(5000)});
+  assert.equal(missing.status,503);assert.equal(missing.headers.get('x-gateway-error-code'),'provider_credential_unavailable');assert.equal(missing.headers.get('x-gateway-dispatch-state'),'not_dispatched');
+  assert.equal((await db.query(`SELECT count(*)::int AS n FROM ${schema}.gw_requests`)).rows[0].n,before);
+  const listed=await fetch('http://127.0.0.1:4000/gateway/admin/provider-credentials',{headers:{authorization:`Bearer ${adminToken}`},signal:AbortSignal.timeout(5000)}).then(r=>r.json());
+  assert.deepEqual(listed.providers.map(p=>[p.provider,p.status,p.active]),[['anthropic','missing',null]]);
+  // 형식이 다른 키는 Provider 호출 없이, Provider가 거절한 키는 확인 호출 1회 후 저장 없이 거절한다.
+  const checks=modelChecks;
+  let r=await credentialCall('PUT','anthropic',{secret:companyKeys.openai,expected_credential_id:null});assert.equal(r.status,400);assert.equal(modelChecks,checks);
+  r=await credentialCall('PUT','anthropic',{secret:'sk-ant-synthetic-wrong-company-key',expected_credential_id:null});assert.equal(r.status,422);assert.equal(r.body.error.code,'provider_credential_rejected');assert.equal(modelChecks,checks+1);
+  r=await credentialCall('PUT','openai',{secret:companyKeys.openai,expected_credential_id:null});assert.equal(r.status,404);
+  assert.equal((await db.query(`SELECT count(*)::int AS n FROM ${schema}.gw_provider_credentials`)).rows[0].n,0);
+  // 등록과 같은 명령 재전송: 두 번째는 Provider를 다시 부르지 않고 기록된 결과를 돌려준다.
+  const command=randomUUID();
+  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:null},adminToken,command);assert.equal(r.status,201);assert.equal(r.body.replayed,false);assert.equal(r.body.credential.hint,companyKeys.anthropic.slice(-4));
+  const firstId=r.body.target.id;const afterChecks=modelChecks;
+  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:null},adminToken,command);assert.equal(r.status,201);assert.equal(r.body.replayed,true);assert.equal(modelChecks,afterChecks);
+  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:null});assert.equal(r.status,409);assert.equal(r.body.error.code,'credential_conflict');assert.equal(r.body.error.details.current_credential_id,firstId);
+  r=await credentialCall('PUT','anthropic',{secret:companyKeys.anthropic,expected_credential_id:firstId});assert.equal(r.status,200);assert.equal(r.body.effect,'noop');
+  // 해제하면 암호문이 지워지고 추론은 다시 503이다. 다시 등록하면 새 id다.
+  r=await credentialCall('DELETE','anthropic',undefined,adminToken,randomUUID(),`?expected_credential_id=${firstId}`);assert.equal(r.status,200);assert.equal(r.body.credential.state,'retired');
+  const retired=(await db.query(`SELECT state,nonce IS NULL AS shredded FROM ${schema}.gw_provider_credentials WHERE id=$1`,[firstId])).rows[0];assert.deepEqual(retired,{state:'retired',shredded:true});
+  const again=await registerKey('anthropic');assert.notEqual(again,firstId);
+  // DB 어디에도 원문이 없다(암호문·명령 기록·감사 기록 포함).
+  const dump=(await db.query(`SELECT string_agg(t::text,'|') AS all FROM (SELECT row_to_json(c)::text AS t FROM ${schema}.gw_provider_credentials c UNION ALL SELECT row_to_json(m)::text FROM ${schema}.gw_commands m UNION ALL SELECT row_to_json(a)::text FROM ${schema}.gw_audit_events a) x`)).rows[0].all;
+  for(const secret of Object.values(companyKeys))assert(!dump.includes(secret)&&!dump.includes(Buffer.from(secret).toString('hex')),'DB에 회사 키 원문');
+  const audits=(await db.query(`SELECT operation FROM ${schema}.gw_audit_events WHERE target_kind='credential' ORDER BY id`)).rows.map(r=>r.operation);assert.deepEqual(audits,['set_provider_credential','retire_provider_credential','set_provider_credential']);
+  console.log('PROVIDER_CREDENTIAL_DB_REGISTRATION_VERIFY_REPLAY_RETIRE_AND_NO_PLAINTEXT_OK');
+  // 다른 프로세스(유지보수 CLI)가 바꾼 키도 실행 중인 서버가 상태 점검 주기 안에 반영한다.
+  const probe=async()=>(await fetch('http://127.0.0.1:4000/v1/messages',{method:'POST',headers:{authorization:`Bearer ${adminToken}`,'content-type':'application/json','anthropic-version':'2023-06-01'},body:JSON.stringify({model:'synthetic-text',max_tokens:10,messages:[{role:'user',content:'x'}]}),signal:AbortSignal.timeout(5000)})).headers.get('x-gateway-error-code');
+  async function until(predicate,label){const deadline=Date.now()+12000;while(Date.now()<deadline){if(await predicate())return;await new Promise(r=>setTimeout(r,200));}throw new Error(label);}
+  assert.notEqual(await probe(),'provider_credential_unavailable');
+  let cli=await maintenance(randomUUID(),{operation:'retire_provider_credential',provider:'anthropic',expected_credential_id:again});assert.equal(cli.code,0,cli.err);assert.equal(JSON.parse(cli.out).status,200);
+  await until(async()=>await probe()==='provider_credential_unavailable','다른 프로세스의 해제 반영');
+  cli=await maintenance(randomUUID(),{operation:'set_provider_credential',provider:'anthropic',secret:companyKeys.anthropic,expected_credential_id:null});assert.equal(cli.code,0,cli.err);assert.equal(JSON.parse(cli.out).status,201);
+  for(const secret of Object.values(companyKeys))assert(!cli.out.includes(secret)&&!cli.err.includes(secret));
+  await until(async()=>await probe()!=='provider_credential_unavailable','다른 프로세스의 등록 반영');
+  console.log('PROVIDER_CREDENTIAL_CROSS_PROCESS_REFRESH_OK');
+  // 이 검증이 프로세스 수명 상한(35초)을 쓰므로 이후 단계는 새 프로세스로 시작한다. 등록한 키는 DB에서 다시 읽는다.
+  await stop();app=start();await waitStatus('/readyz',200);
+  assert.notEqual(await probe(),'provider_credential_unavailable');
+ }
  // canonical Provider도 /etc/hosts의 명시 loopback mapping 없이는 절대 호출하지 않는다.
  assert.match(readFileSync('/etc/hosts','utf8'),/127\.0\.0\.1\s+api\.anthropic\.com(?:\s|$)/m);
  const principal=(await db.query(`SELECT id FROM ${schema}.gw_principals WHERE subject='main-human'`)).rows[0].id;
@@ -149,6 +202,7 @@ try{
  providerMode='stalled';providerStopped=new Promise(r=>{providerStoppedResolve=r;});response=await inference();assert.equal(response.status,200);const cancelledId=response.headers.get('x-gateway-request-id');const reader=response.body.getReader();assert((await reader.read()).value.length>0);
  const interrupted=reader.read().then(r=>r.done).catch(()=>true);const shutdownAt=Date.now();await stop();await bounded(interrupted,1000,'stream interrupted after shutdown');await bounded(providerStopped,1000,'provider stopped before main exit');assert(Date.now()-shutdownAt<31000);assert.equal(providerCalls,2);
  const outcomes=await db.query(`SELECT id,accounting_state,cost_usd::text,execution_stopped_at IS NOT NULL AS stopped FROM ${schema}.gw_requests ORDER BY admitted_at`);assert.equal(outcomes.rows.length,2);assert.deepEqual(outcomes.rows.map(r=>[r.id,r.accounting_state,r.cost_usd,r.stopped]),[[largeId,'settled','0.000140000000',true],[cancelledId,'unknown',null,true]]);
+ const credentialRows=await db.query(`SELECT r.provider_credential_id AS used,c.state FROM ${schema}.gw_requests r LEFT JOIN ${schema}.gw_provider_credentials c ON c.id=r.provider_credential_id WHERE r.id=ANY($1)`,[[largeId,cancelledId]]);assert.equal(credentialRows.rows.length,2);for(const row of credentialRows.rows){assert(row.used,'요청이 쓴 회사 키 id');assert.equal(row.state,'active');}
  console.log(`S3_ACTUAL_MAIN_LARGE_STREAM_AND_SIGTERM_OK bytes=${received} idle_rss_kib=${idleMemory.rssKiB} idle_anon_kib=${idleMemory.anonKiB} peak_rss_kib=${peakMemory.rssKiB} peak_anon_kib=${peakMemory.anonKiB} provider_calls=${providerCalls}`);
 
 
@@ -368,7 +422,7 @@ execution_ceiling:
 `;
  const responsesConfig=strictConfig.replace('execution_ceiling:',responsesProfile+s7Profiles+s8Profile+'execution_ceiling:');writeFileSync(join(directory,'config.yaml'),responsesConfig);app=start();await waitStatus('/readyz',200);
  const rp=Buffer.from(JSON.stringify({iss:'https://auth.example.test',aud:'https://example.test',sub:'responses-main-human',email:'alice@example.test',email_verified:true,exp:Math.floor(Date.now()/1000)+7200})).toString('base64url');const rs=`${header}.${rp}`;const rt=`${rs}.${createSign('RSA-SHA256').update(rs).sign(keys.privateKey).toString('base64url')}`;
- assert.equal((await get('/gateway/me',{authorization:`Bearer ${rt}`})).status,200);const rid=(await db.query(`SELECT id FROM ${schema}.gw_principals WHERE subject='responses-main-human'`)).rows[0].id;
+ assert.equal((await get('/gateway/me',{authorization:`Bearer ${rt}`})).status,200);await registerKey('openai',rt);await registerKey('deepseek',rt);const rid=(await db.query(`SELECT id FROM ${schema}.gw_principals WHERE subject='responses-main-human'`)).rows[0].id;
  await db.query(`UPDATE ${schema}.gw_policies SET allow_rules=$2,budget_mode='reserved',budget_limit_usd=1,tpm_limit=5000 WHERE principal_id=$1`,[rid,JSON.stringify([{provider:'openai',model:'synthetic-text',capabilities:['responses']}])]);
  const finishChannel=`${schema}_s6`;
  const finished=new Set();const finishWaiters=new Map();db.on('notification',message=>{if(message.channel===finishChannel){finished.add(message.payload);finishWaiters.get(message.payload)?.();finishWaiters.delete(message.payload);}});
@@ -446,7 +500,7 @@ execution_ceiling:
  failJwks=true;readySignal=new Promise(r=>{readyResolve=r;});app=start();await bounded(readySignal,8000,'bounded initial JWKS request');await waitStatus('/readyz',503);assert.equal((await get('/livez')).status,200);assert.equal((await get('/gateway/me',{cookie})).status,503);
  failJwks=false;await waitStatus('/readyz',200,20000);assert.equal((await get('/gateway/me',{cookie})).status,200);assert(calls>=3);await stop();
  await db.query(`ALTER TABLE ${schema}.gw_usage_events RENAME TO gw_hidden_usage_events`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`ALTER TABLE ${schema}.gw_hidden_usage_events RENAME TO gw_usage_events`);
- await db.query(`INSERT INTO ${schema}.gw_schema_migrations(version,checksum) VALUES(6,decode(repeat('00',32),'hex'))`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`DELETE FROM ${schema}.gw_schema_migrations WHERE version=6`);
+ await db.query(`INSERT INTO ${schema}.gw_schema_migrations(version,checksum) VALUES(7,decode(repeat('00',32),'hex'))`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`DELETE FROM ${schema}.gw_schema_migrations WHERE version=7`);
  await db.query(`UPDATE ${schema}.gw_schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=2`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;
  console.log('U0_ACTUAL_MAIN_TLS_MIGRATION_HEALTH_OK');
 }finally{
