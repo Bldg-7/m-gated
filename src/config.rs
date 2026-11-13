@@ -137,6 +137,7 @@ struct RawDatabase {
     port: Option<u16>,
     name: Option<String>,
     user: Option<String>,
+    ssl_mode: Option<DbSslMode>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -292,8 +293,30 @@ pub struct AuthConfig {
     pub refresh_url: Url,
     pub logout_url: Url,
 }
+/// Postgres TLS 수준. 평문 연결은 선택지에 없다.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum DbSslMode {
+    /// 인증서 체인과 hostname까지 검증한다(libpq `verify-full`).
+    #[default]
+    #[serde(rename = "verify-full")]
+    VerifyFull,
+    /// 암호화만 요구하고 인증서는 검증하지 않는다(libpq `require`).
+    /// 서버가 TLS를 거부하면 연결하지 않는다.
+    #[serde(rename = "require")]
+    Require,
+}
+impl DbSslMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "verify-full" => Some(Self::VerifyFull),
+            "require" => Some(Self::Require),
+            _ => None,
+        }
+    }
+}
 pub struct DatabaseConfig {
     pub ca_certificate: Option<Vec<u8>>,
+    pub ssl_mode: DbSslMode,
     pub host: String,
     pub port: u16,
     pub name: String,
@@ -523,6 +546,10 @@ fn validate(
                 .map_err(|_| StartupError::InvalidDatabase)?,
             name: read("DB_NAME", raw.database.name)?,
             user: read("DB_USER", raw.database.user)?,
+            ssl_mode: match env.get("DB_SSL_MODE") {
+                Some(value) => DbSslMode::parse(value).ok_or(StartupError::InvalidDatabase)?,
+                None => raw.database.ssl_mode.unwrap_or_default(),
+            },
             password: secret(env, "DB_PASSWORD")?,
         },
         csrf_signing_key: secret(env, "CSRF_SIGNING_KEY")?,
@@ -581,6 +608,7 @@ pub const ENV_KEYS: &[&str] = &[
     "DB_PORT",
     "DB_NAME",
     "DB_USER",
+    "DB_SSL_MODE",
     "DB_PASSWORD",
     "CSRF_SIGNING_KEY",
     "ANTHROPIC_API_KEY",

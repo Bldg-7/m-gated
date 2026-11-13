@@ -923,6 +923,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "m-gated"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono-tz",
+ "futures-util",
+ "getrandom 0.2.17",
+ "h2",
+ "hmac",
+ "http-body",
+ "httparse",
+ "hyper",
+ "hyper-util",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "socket2",
+ "sqlx",
+ "subtle",
+ "time",
+ "tokio",
+ "tower",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -959,37 +990,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "m-gated"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "chrono-tz",
- "futures-util",
- "getrandom 0.2.17",
- "h2",
- "hmac",
- "http-body",
- "httparse",
- "hyper",
- "hyper-util",
- "jsonwebtoken",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "socket2",
- "sqlx",
- "subtle",
- "time",
- "tokio",
- "tower",
- "url",
- "uuid",
 ]
 
 [[package]]

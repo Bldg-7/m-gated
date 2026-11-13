@@ -49,6 +49,60 @@ fn nonsecret_env_file_precedes_yaml_and_injected_values_precede_both() {
 }
 
 #[test]
+fn database_ssl_mode_defaults_to_verify_full_and_only_allows_require() {
+    use config::DbSslMode;
+    assert_eq!(
+        load(support::YAML).unwrap().database().ssl_mode,
+        DbSslMode::VerifyFull
+    );
+    let with = |mode: &str| {
+        support::YAML.replacen(
+            "  user: m_gated_test\n",
+            &format!("  user: m_gated_test\n  ssl_mode: {mode}\n"),
+            1,
+        )
+    };
+    assert_eq!(
+        load(&with("require")).unwrap().database().ssl_mode,
+        DbSslMode::Require
+    );
+    assert_eq!(
+        load(&with("verify-full")).unwrap().database().ssl_mode,
+        DbSslMode::VerifyFull
+    );
+    // 평문·검증 생략 계열의 다른 libpq 값은 받지 않는다.
+    for mode in ["disable", "allow", "prefer", "verify-ca", "Require", "''"] {
+        reject(&with(mode), StartupError::ConfigSyntax);
+    }
+    let load_env = |yaml: &str, file: Option<&str>, value: Option<&str>| {
+        let mut env = support::environment();
+        if let Some(value) = value {
+            env.insert("DB_SSL_MODE".into(), value.into());
+        }
+        config::load(ConfigInputs {
+            yaml,
+            file_environment: file,
+            environment: &env,
+        })
+        .map(|c| c.database().ssl_mode)
+    };
+    assert_eq!(
+        load_env(support::YAML, Some("DB_SSL_MODE=require\n"), None),
+        Ok(DbSslMode::Require)
+    );
+    assert_eq!(
+        load_env(&with("require"), None, Some("verify-full")),
+        Ok(DbSslMode::VerifyFull)
+    );
+    for value in ["disable", "prefer", "", "REQUIRE"] {
+        assert_eq!(
+            load_env(support::YAML, None, Some(value)),
+            Err(StartupError::InvalidDatabase)
+        );
+    }
+}
+
+#[test]
 fn sso_urls_share_issuer_origin_and_cookie_name_is_a_token() {
     for (from, to) in [
         (

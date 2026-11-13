@@ -114,6 +114,12 @@ try{
  app=start({TLS_CA_FILE:join(directory,'missing.pem')});let result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/config_secret_invalid/);app=null;
  app=start({TLS_CA_FILE:join(directory,'wrong-ca.pem')});result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;
  config=config.replace('host: localhost','host: 127.0.0.1');writeFileSync(join(directory,'config.yaml'),config);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;
+ // ssl_mode: require는 암호화만 요구한다. hostname·CA가 맞지 않아도 붙지만, TLS를 거부하는 서버에 평문으로 내려가지는 않는다.
+ const requireTls=c=>c.replace('  user: m_gated_test\n','  user: m_gated_test\n  ssl_mode: require\n');assert.notEqual(requireTls(config),config);
+ writeFileSync(join(directory,'config.yaml'),requireTls(config));app=start();await waitStatus('/readyz',200);await stop();
+ writeFileSync(join(directory,'config.yaml'),requireTls(config.replace('host: 127.0.0.1','host: localhost')));app=start({TLS_CA_FILE:join(directory,'wrong-ca.pem')});await waitStatus('/livez',200);app.child.kill('SIGTERM');result=await app.exit;assert.equal(result.code,0);app=null;
+ writeFileSync(join(directory,'config.yaml'),requireTls(config.replace('host: 127.0.0.1','host: host.docker.internal')));app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;
+ console.log('DB_SSL_MODE_REQUIRE_ENCRYPTS_WITHOUT_VERIFY_AND_NEVER_PLAINTEXT_OK');
  writeFileSync(join(directory,'config.yaml'),config.replace('host: 127.0.0.1','host: localhost'));
  app=start();await waitStatus('/readyz',200);assert.equal((await get('/livez')).status,200);assert.equal((await get('/ui/')).status,200);
  const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5']);

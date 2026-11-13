@@ -60,6 +60,9 @@ database:
   port: 5432
   name: m_gated
   user: m_gated
+  # TLS is always used. verify-full (default) checks the certificate chain and host name;
+  # require encrypts without verifying the certificate. Plaintext is not an option.
+  # ssl_mode: verify-full
 
 providers:
   # base_url must be the official API origin of the provider; it cannot point

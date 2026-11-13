@@ -60,7 +60,10 @@ impl PgIdentityStore {
             &config.name,
             &config.user,
             config.password.expose(),
-            PgSslMode::VerifyFull,
+            match config.ssl_mode {
+                crate::config::DbSslMode::VerifyFull => PgSslMode::VerifyFull,
+                crate::config::DbSslMode::Require => PgSslMode::Require,
+            },
         )?;
         if let Some(pem) = &config.ca_certificate {
             options = options.ssl_root_cert_from_pem(pem.clone());

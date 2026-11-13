@@ -72,9 +72,11 @@ Any other gateway error carries `x-should-retry: false` instead. Every response 
 
 ### 1. Prerequisites
 
-- **PostgreSQL** reachable over TLS. The gateway always connects with full certificate verification
-  (`verify-full`). If the server certificate is not issued by a publicly trusted CA, point `TLS_CA_FILE`
-  at a PEM bundle. Do not set any `PG*` environment variables (`PGHOST`, `PGPASSWORD`,
+- **PostgreSQL** reachable over TLS. Plaintext connections are never made. By default the gateway
+  verifies the certificate chain and host name (`verify-full`). If the server certificate is not issued
+  by a publicly trusted CA, point `TLS_CA_FILE` at a PEM bundle, or set `database.ssl_mode: require`
+  to encrypt without verifying the certificate (for example, inside a private network where shipping
+  the CA is impractical). Do not set any `PG*` environment variables (`PGHOST`, `PGPASSWORD`,
   `PGSSLMODE`, …). If one is present, even empty, the gateway refuses to connect.
 - **An SSO** that issues RS256 access JWTs and serves a JWKS. See [Authentication](#authentication).
 - **A TLS-terminating reverse proxy.** The gateway serves plain HTTP on `0.0.0.0:4000`, but all
@@ -169,7 +171,7 @@ tags and merge keys. [`config.example.yaml`](config.example.yaml) is an annotate
 | `auth` | yes | SSO settings, see below. |
 | `allowed_emails` | – | Exact e-mail allow-list (lowercased; wildcards are rejected). |
 | `admin_emails` | – | Admins. Admins are always allowed. |
-| `database` | yes | `host`, `port`, `name`, `user`. The password comes from `DB_PASSWORD`. |
+| `database` | yes | `host`, `port`, `name`, `user`, and optional `ssl_mode` (`verify-full` by default, or `require`). The password comes from `DB_PASSWORD`. |
 | `providers` | yes | 1–3 entries, at most one per provider. |
 | `limits` | – | Process-wide concurrency, size and timeout limits. |
 | `retention` | – | Retention period for ledger, audit and command records. |
@@ -252,7 +254,7 @@ The gateway reads only the variables in this table.
 | `AUTH_ISSUER`, `AUTH_JWKS_URI`, `SSO_AUDIENCE`, `SSO_ACCESS_COOKIE_NAME` | `auth.issuer`, `auth.jwks_uri`, `auth.audience`, `auth.access_cookie_name` | |
 | `SSO_LOGIN_URL`, `SSO_REFRESH_URL`, `SSO_LOGOUT_URL` | `auth.login_url`, `auth.refresh_url`, `auth.logout_url` | |
 | `ALLOWED_EMAILS`, `ADMIN_EMAILS` | `allowed_emails`, `admin_emails` | Comma-separated. An empty value means an empty list. |
-| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` | `database.*` | |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_SSL_MODE` | `database.*` | `DB_SSL_MODE` accepts only `verify-full` or `require`. |
 | `TLS_CA_FILE` | – | Path to an extra PEM trust anchor (≤ 64 KiB) for Postgres, the JWKS and provider connections. |
 | `DB_PASSWORD` | – | **Secret, environment only.** |
 | `CSRF_SIGNING_KEY` | – | **Secret, environment only.** 64 lowercase hex characters (32 bytes). It signs CSRF tokens and pagination cursors. |
