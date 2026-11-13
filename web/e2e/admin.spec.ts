@@ -100,7 +100,7 @@ test('admin_usage_current_balances_period_totals_and_retention409_remove_old_amo
   const oldFigures = await page.locator('table').textContent(); expect(oldFigures).toContain('USD');
   await page.request.post(`${process.env.E2E_CONTROL_URL}/retention`);
   await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작:'); await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toHaveCount(0); await expect(page.locator('table')).toHaveCount(0); expect(await page.getByLabel('그룹', { exact: true }).inputValue()).toBe('provider');
-  await page.getByLabel('시작 (현지 시각)', { exact: true }).fill(from.toISOString().slice(0, 16)); await page.getByLabel('종료 (현지 시각)', { exact: true }).fill(to.toISOString().slice(0, 16)); await page.getByLabel('그룹', { exact: true }).selectOption(''); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByText('집계 모드: 보관된 기간 합계', { exact: true })).toBeVisible(); await expect(page.getByText('상세 가용 시작:', { exact: false })).toBeVisible();
+  await page.getByLabel('시작 (현지 시각)', { exact: true }).fill(from.toISOString().slice(0, 16)); await page.getByLabel('종료 (현지 시각)', { exact: true }).fill(to.toISOString().slice(0, 16)); await page.getByLabel('그룹', { exact: true }).selectOption(''); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.locator('p', { hasText: '집계 모드: 보관된 기간 합계' })).toBeVisible(); await expect(page.getByText('상세 가용 시작:', { exact: false })).toBeVisible();
 });
 
 test('admin_direct_ids_role_demotion403_purges_forms_cache_and_late_payload', async ({ page, context }) => {

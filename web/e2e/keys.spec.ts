@@ -210,7 +210,8 @@ test.describe('actual_navigation_lifecycle', () => {
         Reflect.get(window, '__keyLifecycle')({ event: 'hide', persisted: event.persisted, secret: !!document.querySelector('[aria-label="발급 원문"]'), form: !!document.querySelector('input[name="name"]') });
       });
     });
-    await page.getByRole('link', { name: '내 사용량', exact: true }).click();
+    // 대시보드 링크는 SPA 이동이라 문서를 떠나지 않는다. 실제 문서 이동(pagehide·bfcache)은 주소로 직접 연다.
+    await page.goto(`${origin}/ui/`);
     await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toBeVisible();
     await page.goBack();
     await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
@@ -220,6 +221,29 @@ test.describe('actual_navigation_lifecycle', () => {
     expect(events.every(event => !event.secret)).toBe(true);
     expect(events.filter(event => event.event === 'hide').every(event => !event.form)).toBe(true);
     for (const event of events) test.info().annotations.push({ type: 'key-navigation', description: `${event.event}:${event.persisted}:${event.secret}:${event.form}` });
+  });
+
+  test('spa_navigation_unmounts_key_and_back_never_restores_secret', async ({ page, context }) => {
+    let hides = 0;
+    await open(page, context); const secret = await issue(page, 'spa-navigation');
+    await page.getByLabel('키 이름', { exact: true }).fill('private-before-spa-link');
+    await page.evaluate(() => { window.addEventListener('pagehide', () => { Reflect.set(window, '__spaHides', (Reflect.get(window, '__spaHides') ?? 0) + 1); }); });
+    await page.getByRole('link', { name: '내 사용량', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toBeVisible();
+    expect(new URL(page.url()).pathname).toBe('/ui/');
+    hides = await page.evaluate(() => Reflect.get(window, '__spaHides') ?? 0);
+    expect(hides).toBe(0);
+    expect(await page.locator('[aria-label="발급 원문"]').count()).toBe(0);
+    expect(await page.locator('input[name="name"]').count()).toBe(0);
+    expect(await page.locator('main').textContent()).not.toContain(secret);
+    await page.goBack();
+    expect(new URL(page.url()).pathname).toBe('/ui/keys');
+    await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
+    // 다시 그려진 키 화면의 목록 조회가 끝난 뒤 확인한다. 조회 중에 시험이 끝나면 전달 중인 요청이 끊겨 실패로 잡힌다.
+    await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+    await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('');
+    expect(await page.locator('main').textContent()).not.toContain(secret);
+    expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
   });
 });
 

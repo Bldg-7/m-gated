@@ -27,6 +27,7 @@ const titles = [
   'admin_mutual_last_admin_policy_race_preserves_one_current_admin',
   's9_csp_blocks_inline_external_scripts_and_forms_have_keyboard_names',
   's9_real_origin_denial_never_refreshes_or_replays_cookie_write',
+  'spa_navigation_unmounts_key_and_back_never_restores_secret',
 ];
 export default class SafeReporter implements Reporter {
   private expected = new Set<number>();

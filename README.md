@@ -128,7 +128,7 @@ With Docker (multi-stage build, non-root user `65532`, `STOPSIGNAL SIGTERM`). Re
 docker run --rm -p 4000:4000 \
   -v "$PWD/gateway.yaml:/app/gateway.yaml:ro" \
   -e DB_PASSWORD -e CSRF_SIGNING_KEY -e CREDENTIAL_ENCRYPTION_KEY \
-  ghcr.io/bldg-7/m-gated:0.3.1
+  ghcr.io/bldg-7/m-gated:0.4.0
 ```
 
 Or build it yourself with `docker build -t m-gated .` and run `m-gated` in place of the image name.
@@ -459,7 +459,7 @@ It has no inline scripts and loads nothing from external CDNs.
 | Provider company keys (register, rotate, retire) | `/ui/admin/credentials` | admins |
 
 The JSON API behind it is under `/gateway/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
-routes). It is same-origin only, with no CORS. The UI text is currently in Korean.
+routes). It is same-origin only, with no CORS. The UI is in Korean by default; a language switch in the header changes it to English (the choice is remembered in that browser only).
 
 ## Operations
 

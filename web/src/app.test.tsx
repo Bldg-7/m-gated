@@ -3,6 +3,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { App } from './app';
 import { session } from './lib/api';
 import type { Me, Usage } from './lib/types';
+import { shownText } from './test-text';
 
 const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', sso: { refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const usage: Usage = { currency: 'USD', from: '2026-01-01T00:00:00Z', to: '2026-02-01T00:00:00Z', as_of: '2026-02-01T00:00:00Z', detail_available_from: null, aggregation: 'detail', settled_usd: '0.000000000001', held_reservation_usd: '0.000000000000', period_unknown_count: '0', global_unknown_count: '0', global_expired_dispatch_count: '0', block_state: null, balance_context: 'current_principal', budget_balances: [], buckets: { items: [], next_cursor: null, as_of: '2026-02-01T00:00:00Z' } };
@@ -27,7 +28,7 @@ test('app_refresh_retries_the_same_usage_url_once_and_preserves_explicit_queries
   fireEvent.change(screen.getByLabelText('모델'), { target: { value: 'same-human' } });
   fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   await screen.findByText('인증 확인 중…');
-  expect(screen.queryByText('Synthetic (synthetic@example.invalid) · 사용자')).toBeNull();
+  expect(screen.queryByText('Synthetic')).toBeNull();
   expect(screen.queryByRole('heading', { name: '조회 기간 사용량' })).toBeNull();
   await act(async () => { refresh.resolve(response({})); });
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
@@ -57,7 +58,7 @@ test('app_refresh_to_another_principal_discards_the_old_query_and_payload', asyn
   fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   await screen.findByText('인증 확인 중…');
   await act(async () => { refresh.resolve(response({})); });
-  await screen.findByText('Second (synthetic@example.invalid) · 사용자');
+  await screen.findByText('Second');
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
   expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('');
   expect(paths.filter(path => path.includes('old-private-filter'))).toHaveLength(1);
@@ -98,7 +99,7 @@ test.each(['validate', 'refresh'] as const)('app_discards_final_me_after_microta
     queueMicrotask(() => channel.onmessage!({ data: { type: 'logout' } }));
   });
   expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '로그아웃되었습니다.' });
-  expect(screen.queryByText('Synthetic (synthetic@example.invalid) · 사용자')).toBeNull();
+  expect(screen.queryByText('Synthetic')).toBeNull();
   expect(screen.queryByRole('heading', { name: '조회 기간 사용량' })).toBeNull();
   expect(screen.queryByText('0.000000000001')).toBeNull();
   expect(paths.filter(url => url.startsWith('/gateway/usage'))).toHaveLength(reads);
@@ -141,7 +142,7 @@ test.each(['initial', 'retry'] as const)('app_stale_401_after_logout_never_resto
     queueMicrotask(() => channel.onmessage!({ data: { type: 'logout' } }));
   });
   expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '로그아웃되었습니다.' });
-  expect(screen.queryByText('Synthetic (synthetic@example.invalid) · 사용자')).toBeNull();
+  expect(screen.queryByText('Synthetic')).toBeNull();
   expect(screen.queryByRole('heading', { name: '조회 기간 사용량' })).toBeNull();
   expect(screen.queryByText('0.000000000001')).toBeNull();
   expect(paths).toHaveLength(before);
@@ -184,9 +185,9 @@ test.each(['initial', 'retry'] as const)('app_discards_delayed_success_after_mic
     queueMicrotask(() => channel.onmessage!({ data: { type: 'logout' } }));
   });
   expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '로그아웃되었습니다.' });
-  expect(screen.queryByText('Synthetic (synthetic@example.invalid) · 사용자')).toBeNull();
+  expect(screen.queryByText('Synthetic')).toBeNull();
   expect(screen.queryByRole('heading', { name: '조회 기간 사용량' })).toBeNull();
-  expect(screen.queryByText('123.000000000001 USD')).toBeNull();
+  expect(screen.queryByText(shownText('123.000000000001 USD'))).toBeNull();
   expect(paths).toHaveLength(before);
   expect(reads).toBe(path === 'retry' ? 2 : 1);
 });
@@ -225,16 +226,16 @@ test.each(['logout', 'auth-change'] as const)('app_consumer_discards_already_com
     await act(async () => { channel.onmessage!({ data: { type: boundary } }); });
     if (boundary === 'logout') expect(screen.getByText('로그아웃되었습니다.')).toBeTruthy();
     else {
-      await screen.findByText('Second (synthetic@example.invalid) · 사용자');
+      await screen.findByText('Second');
       await screen.findByRole('heading', { name: '조회 기간 사용량' });
       expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('');
     }
     const requests = fetcher.mock.calls.length;
     await act(async () => { consume.resolve(); });
-    expect(screen.queryByText('123.000000000001 USD')).toBeNull();
-    expect(screen.queryByText('Synthetic (synthetic@example.invalid) · 사용자')).toBeNull();
+    expect(screen.queryByText(shownText('123.000000000001 USD'))).toBeNull();
+    expect(screen.queryByText('Synthetic')).toBeNull();
     expect(fetcher).toHaveBeenCalledTimes(requests);
     if (boundary === 'logout') expect(screen.queryByRole('heading', { name: '조회 기간 사용량' })).toBeNull();
-    else expect(screen.getByText('2.000000000002 USD')).toBeTruthy();
+    else expect(screen.getByText(shownText('2.000000000002 USD'))).toBeTruthy();
   } finally { consume.resolve(); delayedConsumer.mockRestore(); }
 });

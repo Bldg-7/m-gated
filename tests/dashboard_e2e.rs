@@ -286,9 +286,9 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
     let expected: Vec<usize> = if scope == "keys-one" {
         vec![8]
     } else if keys_only {
-        (8..=15).chain([27]).collect()
+        (8..=15).chain([27, 28]).collect()
     } else {
-        (1..=15).chain([26, 27]).collect()
+        (1..=15).chain([26, 27, 28]).collect()
     };
     browser_result::assert_cases(&stdout, &expected);
 
