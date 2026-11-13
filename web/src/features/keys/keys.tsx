@@ -44,7 +44,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
   const canChoose = auth.me?.role === 'admin';
   const mounted = useRef(true), lock = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  // 인증 epoch마다 폼/원문/명령 상태를 폐기한다. 같은 주체 refresh도 예외가 아니다.
+  // 인증 epoch마다 폼/원문/명령 상태를 폐기한다. 같은 사용자 refresh도 예외가 아니다.
   useLayoutEffect(() => { setSecret(null); setConfirmation(null); setRecovery(null); setPage(null); setError(null); setListError(null); setNotice(null); setBusy(false); lock.current = false; }, [auth.epoch]);
   useEffect(() => {
     if (auth.status !== 'ready') return;
@@ -61,14 +61,15 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
       }
     }).catch(e => { if (current && !(e instanceof StaleResponse)) { setLoading(false); setListError(i18n.t('키 목록을 가져올 수 없습니다. 다시 조회하세요.')); } });
     return () => { current = false; };
-    // 같은 주체 refresh의 재시도는 Session 하나만 소유한다. 다른 인증 변경은 App이 unmount한다.
+    // 같은 사용자 refresh의 재시도는 Session 하나만 소유한다. 다른 인증 변경은 App이 unmount한다.
   }, [query, revision]);
   useEffect(() => {
     if (auth.status !== 'ready' || !canChoose) return;
     let current = true;
     void session.read<CredentialList>('/gateway/admin/provider-credentials', () => current).then(data => { if (current) setCompanyKeys(data); }).catch(() => { /* 고를 수 없으면 기본 키로 발급된다 */ });
     return () => { current = false; };
-  }, [canChoose, revision]);
+    // 회사 키 목록은 키 목록을 다시 읽을 때마다 바뀌지 않으므로 화면을 열 때 한 번만 읽는다.
+  }, [canChoose]);
   const choices = (companyKeys?.providers ?? []).filter(p => p.credentials.length > 1);
   const credentialsOf = (provider: string): CredentialMeta[] => companyKeys?.providers.find(p => p.provider === provider)?.credentials ?? [];
   const reload = () => { setQuery(''); setStatus(''); setRevision(v => v + 1); };
@@ -145,7 +146,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
   if (auth.status !== 'ready') return null;
   const resolved = recovery && page?.items.find(key => recovery.kind === 'issue' ? key.created_command_id === recovery.commandId : key.id === recovery.keyId);
   return <section aria-labelledby={`${prefix}-keys-heading`} className="stack-lg">
-    <div className="stack-sm"><h2 id={`${prefix}-keys-heading`}>{isAdmin ? t('주체 키') : t('내 키')}</h2>
+    <div className="stack-sm"><h2 id={`${prefix}-keys-heading`}>{isAdmin ? t('사용자 키') : t('내 키')}</h2>
     <p className="lead">{isAdmin ? t('가상 키는 추론 전용입니다. 권한·한도는 현재 서버 정책과 발급 상한의 교집합이며 원문은 다시 조회할 수 없습니다.') : t('개인 키는 추론 전용입니다. 권한·한도는 현재 서버 정책과 발급 상한의 교집합이며 원문은 다시 조회할 수 없습니다.')}</p></div>
     {error && <p role="alert">{error}</p>}{listError && <p role="alert">{listError}</p>}{notice && <p role="status">{notice}</p>}
     {secret?.epoch === auth.epoch && <section aria-label={t('발급 원문')} className="secret"><p className="text-warning">{t('안전한 곳에 옮긴 뒤 닫으세요. 자동으로 복사·저장하지 않으며, 복사 버튼을 누를 때만 클립보드에 넣습니다.')}</p><SecretValue value={secret.value} /><div className="actions"><button autoFocus onClick={() => setSecret(null)}>{t('원문 닫기')}</button></div></section>}

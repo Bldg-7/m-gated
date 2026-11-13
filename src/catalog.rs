@@ -1,6 +1,6 @@
 //! 공급사별 모델·가격 카탈로그.
 //!
-//! - 관리자가 동기화하면 공개 가격 목록(models.dev, LiteLLM, OpenRouter)을 받아 변경안을 만든다.
+//! - 관리자가 동기화하면 공개 가격 목록 models.dev 를 받아 변경안을 만든다. 가격 출처는 이 하나만 쓴다.
 //! - 관리자가 변경안을 승인해야 새 버전으로 적용된다. 자동 적용은 없다.
 //! - 승인된 목록은 공급사별 정책(`CatalogTemplate`)과 합쳐 일반 profile 이 되고, 설정 파일 profile 과 같은 규칙으로 검증한다.
 //! - 요청마다 입장 시점의 가격이 장부에 저장되므로, 버전이 바뀌어도 이미 기록된 금액은 바뀌지 않는다.
@@ -24,52 +24,13 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-/// 공개 가격 목록. 순서가 우선순위다(값이 서로 다르면 앞의 출처 값을 제안한다).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Source {
-    ModelsDev,
-    Litellm,
-    Openrouter,
-}
-impl Source {
-    pub const ALL: [Self; 3] = [Self::ModelsDev, Self::Litellm, Self::Openrouter];
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::ModelsDev => "models_dev",
-            Self::Litellm => "litellm",
-            Self::Openrouter => "openrouter",
-        }
-    }
-}
-#[derive(Clone, Debug)]
-pub struct SourceUrls {
-    pub models_dev: Url,
-    pub litellm: Url,
-    pub openrouter: Url,
-}
-impl Default for SourceUrls {
-    fn default() -> Self {
-        Self {
-            models_dev: "https://models.dev/api.json".parse().expect("고정 주소"),
-            litellm: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-                .parse()
-                .expect("고정 주소"),
-            openrouter: "https://openrouter.ai/api/v1/models".parse().expect("고정 주소"),
-        }
-    }
-}
-impl SourceUrls {
-    fn get(&self, source: Source) -> &Url {
-        match source {
-            Source::ModelsDev => &self.models_dev,
-            Source::Litellm => &self.litellm,
-            Source::Openrouter => &self.openrouter,
-        }
-    }
+/// 가격 출처(models.dev)의 기본 주소. 시험에서만 다른 주소를 쓴다.
+pub const SOURCE: &str = "models_dev";
+pub fn default_source_url() -> Url {
+    "https://models.dev/api.json".parse().expect("고정 주소")
 }
 
-/// 한 출처가 알려 준 모델 하나의 값. 가격은 100만 토큰당 USD, 소수점 12자리 문자열.
+/// 가격 출처가 알려 준 모델 하나의 값. 가격은 100만 토큰당 USD, 소수점 12자리 문자열.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub rates: BTreeMap<String, String>,
@@ -80,20 +41,13 @@ pub struct Candidate {
 }
 type Parsed = BTreeMap<(ProviderId, String), (String, Candidate)>;
 
-/// 출처마다 모델 이름 표기가 조금 다르다(`claude-opus-5.5` / `claude-opus-5-5`). 비교에만 쓰는 키.
+/// 모델 이름 표기가 조금 다를 수 있다(`claude-opus-5.5` / `claude-opus-5-5`). 비교에만 쓰는 키.
 fn match_key(model: &str) -> String {
     model.to_ascii_lowercase().replace('.', "-")
 }
 fn per_mtok(value: &Value) -> Option<String> {
     let v = value.as_f64()?;
     (v.is_finite() && (0.0..1e9).contains(&v)).then(|| format!("{v:.12}"))
-}
-fn per_token(value: &Value) -> Option<String> {
-    let v = match value {
-        Value::String(s) => s.parse::<f64>().ok()?,
-        other => other.as_f64()?,
-    };
-    (v.is_finite() && (0.0..1e3).contains(&v)).then(|| format!("{:.12}", v * 1_000_000.0))
 }
 fn tokens(value: &Value) -> Option<u64> {
     value.as_u64().filter(|v| *v > 0 && *v <= 1_000_000_000)
@@ -157,100 +111,6 @@ pub fn parse_models_dev(body: &Value) -> Parsed {
     parsed
 }
 
-pub fn parse_litellm(body: &Value) -> Parsed {
-    let mut parsed = Parsed::new();
-    let Some(models) = body.as_object() else {
-        return parsed;
-    };
-    for (key, model) in models {
-        let Some(provider) = model["litellm_provider"].as_str().and_then(provider_of) else {
-            continue;
-        };
-        // `anthropic/claude-…` 처럼 공급사가 앞에 붙은 이름만 벗기고, 다른 경로(bedrock/… 등)는 버린다.
-        let id = match key.split_once('/') {
-            None => key.as_str(),
-            Some((prefix, rest)) if provider_of(prefix) == Some(provider) => rest,
-            Some(_) => continue,
-        };
-        if !matches!(model["mode"].as_str(), Some("chat" | "responses") | None) {
-            continue;
-        }
-        let mut rates = BTreeMap::new();
-        for (rate, field) in [
-            ("input", "input_cost_per_token"),
-            ("output", "output_cost_per_token"),
-            ("cache_read", "cache_read_input_token_cost"),
-            ("cache_write_5m", "cache_creation_input_token_cost"),
-        ] {
-            if let Some(v) = per_token(&model[field]) {
-                rates.insert(rate.to_owned(), v);
-            }
-        }
-        let tier_threshold = model
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter_map(|(field, _)| {
-                field
-                    .strip_prefix("input_cost_per_token_above_")?
-                    .strip_suffix("k_tokens")?
-                    .parse::<u64>()
-                    .ok()
-                    .map(|k| k * 1000)
-            })
-            .min();
-        insert(
-            &mut parsed,
-            provider,
-            id,
-            Candidate {
-                rates,
-                max_input_tokens: tokens(&model["max_input_tokens"]),
-                max_output_tokens: tokens(&model["max_output_tokens"]),
-                tier_threshold,
-            },
-        );
-    }
-    parsed
-}
-
-pub fn parse_openrouter(body: &Value) -> Parsed {
-    let mut parsed = Parsed::new();
-    for model in body["data"].as_array().into_iter().flatten() {
-        let Some((prefix, id)) = model["id"].as_str().and_then(|s| s.split_once('/')) else {
-            continue;
-        };
-        // `:batch`, `:free` 같은 변형은 같은 모델의 다른 상품이라 쓰지 않는다.
-        let Some(provider) = provider_of(prefix).filter(|_| !id.contains(':')) else {
-            continue;
-        };
-        let pricing = &model["pricing"];
-        let mut rates = BTreeMap::new();
-        for (rate, field) in [
-            ("input", "prompt"),
-            ("output", "completion"),
-            ("cache_read", "input_cache_read"),
-            ("cache_write_5m", "input_cache_write"),
-        ] {
-            if let Some(v) = per_token(&pricing[field]) {
-                rates.insert(rate.to_owned(), v);
-            }
-        }
-        insert(
-            &mut parsed,
-            provider,
-            id,
-            Candidate {
-                rates,
-                max_input_tokens: tokens(&model["context_length"]),
-                max_output_tokens: tokens(&model["top_provider"]["max_completion_tokens"]),
-                tier_threshold: None,
-            },
-        );
-    }
-    parsed
-}
-
 /// 승인된 카탈로그 항목.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
@@ -280,9 +140,9 @@ pub enum ItemStatus {
     Changed,
     /// 카탈로그에 없는 새 모델 후보.
     New,
-    /// 카탈로그에 있지만 어느 출처에도 없다(승인하면 제거).
+    /// 카탈로그에 있지만 가격 출처에 없다(승인하면 제거).
     Missing,
-    /// 출처 값이 모자라 profile 을 만들 수 없다.
+    /// 가격 출처의 값이 모자라 profile 을 만들 수 없다.
     Incomplete,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -292,46 +152,40 @@ pub struct ProposalItem {
     pub status: ItemStatus,
     pub current: Option<Entry>,
     pub proposed: Option<Entry>,
-    pub sources: BTreeMap<String, Candidate>,
-    /// 값을 준 출처들이 가격·한도에서 모두 일치하는지.
-    pub agree: bool,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SourceReport {
     pub source: String,
-    pub ok: bool,
     pub models: usize,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proposal {
     pub base_version: i64,
-    pub sources: Vec<SourceReport>,
+    /// 0.6 이전 변경안에는 없다(출처 여러 개를 쓰던 때). 승인에는 쓰지 않는다.
+    #[serde(default)]
+    pub source: SourceReport,
     pub items: Vec<ProposalItem>,
 }
 
-/// 출처 값들로 모델 하나의 제안 값을 만든다. 필요한 가격이 모두 있는 첫 출처를 고른다.
+/// 가격 출처의 값으로 모델 하나의 제안 값을 만든다. 필요한 가격·토큰 한도가 하나라도 없으면 None.
 fn propose(
     provider: ProviderId,
     template: &CatalogTemplate,
     model: &str,
-    found: &BTreeMap<Source, Candidate>,
+    found: &Candidate,
 ) -> Option<Entry> {
     let required = template.required_rates(provider);
-    let (source, chosen) = found
-        .iter()
-        .find(|(_, c)| required.iter().all(|k| c.rates.contains_key(*k)))?;
-    let context = chosen
-        .max_input_tokens
-        .or_else(|| found.values().find_map(|c| c.max_input_tokens))?;
-    let output = chosen
-        .max_output_tokens
-        .or_else(|| found.values().find_map(|c| c.max_output_tokens))?;
+    if !required.iter().all(|k| found.rates.contains_key(*k)) {
+        return None;
+    }
+    let context = found.max_input_tokens?;
+    let output = found.max_output_tokens?;
     // 구간 가격(일정 입력 이상은 더 비쌈)은 장부가 표현하지 않으므로 그 아래로 입력을 제한한다.
-    let tier = found.values().filter_map(|c| c.tier_threshold).min();
+    let tier = found.tier_threshold;
     let max_input = tier.map_or(context, |t| t.min(context));
     let rates = required
         .iter()
-        .map(|k| ((*k).to_owned(), chosen.rates[*k].clone()))
+        .map(|k| ((*k).to_owned(), found.rates[*k].clone()))
         .collect();
     Some(Entry {
         provider: provider.name().to_owned(),
@@ -339,7 +193,7 @@ fn propose(
         rates,
         max_input_tokens: max_input,
         max_output_tokens: output,
-        source: source.name().to_owned(),
+        source: SOURCE.to_owned(),
         note: tier.map(|t| format!("tier_input_limit:{t}")),
     })
 }
@@ -348,7 +202,7 @@ pub fn build_proposal(
     base_version: i64,
     current: &[Entry],
     templates: &BTreeMap<ProviderId, CatalogTemplate>,
-    fetched: &BTreeMap<Source, Option<Parsed>>,
+    fetched: &Parsed,
 ) -> Proposal {
     let mut keys: BTreeMap<(ProviderId, String), String> = BTreeMap::new();
     for entry in current {
@@ -356,55 +210,28 @@ pub fn build_proposal(
             keys.insert((p, match_key(&entry.model)), entry.model.clone());
         }
     }
-    // 새 후보는 공식 모델 이름을 쓰는 models.dev·LiteLLM 에서만 찾는다(OpenRouter 는 이름 표기가 달라 값 비교에만 쓴다).
-    for source in [Source::ModelsDev, Source::Litellm] {
-        for ((provider, key), (model, _)) in fetched
-            .get(&source)
-            .and_then(Option::as_ref)
-            .into_iter()
-            .flatten()
+    for ((provider, key), (model, _)) in fetched {
+        if let Some(template) = templates.get(provider)
+            && template
+                .model_prefixes
+                .iter()
+                .any(|p| model.starts_with(p.as_str()))
         {
-            if let Some(template) = templates.get(provider)
-                && template
-                    .model_prefixes
-                    .iter()
-                    .any(|p| model.starts_with(p.as_str()))
-            {
-                keys.entry((*provider, key.clone()))
-                    .or_insert_with(|| model.clone());
-            }
+            keys.entry((*provider, key.clone()))
+                .or_insert_with(|| model.clone());
         }
     }
     let mut items = Vec::new();
     for ((provider, key), model) in keys {
         let template = &templates[&provider];
-        let found: BTreeMap<Source, Candidate> = Source::ALL
-            .into_iter()
-            .filter_map(|s| {
-                let parsed = fetched.get(&s)?.as_ref()?;
-                Some((s, parsed.get(&(provider, key.clone()))?.1.clone()))
-            })
-            .collect();
+        let found = fetched.get(&(provider, key.clone())).map(|(_, c)| c);
         let current = current
             .iter()
             .find(|e| e.provider_id() == Some(provider) && match_key(&e.model) == key)
             .cloned();
-        let required = template.required_rates(provider);
-        let agree = found
-            .values()
-            .map(|c| {
-                (
-                    required.iter().map(|k| c.rates.get(*k)).collect::<Vec<_>>(),
-                    c.max_input_tokens,
-                    c.max_output_tokens,
-                )
-            })
-            .collect::<BTreeSet<_>>()
-            .len()
-            <= 1;
-        let proposed = propose(provider, template, &model, &found);
+        let proposed = found.and_then(|f| propose(provider, template, &model, f));
         let status = match (&current, &proposed) {
-            (Some(_), None) if found.is_empty() => ItemStatus::Missing,
+            (Some(_), None) if found.is_none() => ItemStatus::Missing,
             (_, None) => ItemStatus::Incomplete,
             (None, Some(_)) => ItemStatus::New,
             (Some(c), Some(p)) if c.values() == p.values() => ItemStatus::Unchanged,
@@ -416,26 +243,14 @@ pub fn build_proposal(
             status,
             current,
             proposed,
-            sources: found
-                .into_iter()
-                .map(|(s, c)| (s.name().to_owned(), c))
-                .collect(),
-            agree,
         });
     }
     Proposal {
         base_version,
-        sources: Source::ALL
-            .into_iter()
-            .map(|s| {
-                let parsed = fetched.get(&s).and_then(Option::as_ref);
-                SourceReport {
-                    source: s.name().to_owned(),
-                    ok: parsed.is_some(),
-                    models: parsed.map_or(0, BTreeMap::len),
-                }
-            })
-            .collect(),
+        source: SourceReport {
+            source: SOURCE.to_owned(),
+            models: fetched.len(),
+        },
         items,
     }
 }
@@ -461,7 +276,7 @@ pub struct CatalogService {
     limits: Limits,
     store: Arc<PgIdentityStore>,
     cache: Arc<CatalogCache>,
-    sources: SourceUrls,
+    source: Url,
     client: reqwest::Client,
 }
 impl CatalogService {
@@ -469,20 +284,20 @@ impl CatalogService {
         config: &ValidatedConfig,
         store: Arc<PgIdentityStore>,
     ) -> Result<Arc<Self>, StartupError> {
-        Self::build(config, store, SourceUrls::default(), true)
+        Self::build(config, store, default_source_url(), true)
     }
-    /// 테스트 조립 전용: 출처를 loopback 합성 서버로 바꾼다.
+    /// 테스트 조립 전용: 가격 출처를 loopback 합성 서버로 바꾼다.
     pub fn for_test(
         config: &ValidatedConfig,
         store: Arc<PgIdentityStore>,
-        sources: SourceUrls,
+        source: Url,
     ) -> Arc<Self> {
-        Self::build(config, store, sources, false).expect("테스트 조립")
+        Self::build(config, store, source, false).expect("테스트 조립")
     }
     fn build(
         config: &ValidatedConfig,
         store: Arc<PgIdentityStore>,
-        sources: SourceUrls,
+        source: Url,
         https_only: bool,
     ) -> Result<Arc<Self>, StartupError> {
         let client = reqwest::Client::builder()
@@ -502,7 +317,7 @@ impl CatalogService {
             limits: config.limits().clone(),
             store,
             cache: Arc::new(CatalogCache::default()),
-            sources,
+            source,
             client,
         }))
     }
@@ -588,10 +403,10 @@ impl CatalogService {
         })
     }
 
-    async fn fetch(&self, source: Source) -> Option<Parsed> {
+    async fn fetch(&self) -> Option<Parsed> {
         let response = self
             .client
-            .get(self.sources.get(source).clone())
+            .get(self.source.clone())
             .header("accept", "application/json")
             .send()
             .await
@@ -599,7 +414,7 @@ impl CatalogService {
         if !response.status().is_success() {
             return None;
         }
-        // 목록 크기 상한. 넘으면 이 출처는 실패로 본다.
+        // 목록 크기 상한. 넘으면 받지 못한 것으로 본다.
         let mut body = Vec::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.ok()? {
@@ -609,11 +424,7 @@ impl CatalogService {
             }
         }
         let value: Value = serde_json::from_slice(&body).ok()?;
-        Some(match source {
-            Source::ModelsDev => parse_models_dev(&value),
-            Source::Litellm => parse_litellm(&value),
-            Source::Openrouter => parse_openrouter(&value),
-        })
+        Some(parse_models_dev(&value))
     }
 
     async fn replay(
@@ -669,19 +480,10 @@ impl CatalogService {
             let mut c = self.store.pool().acquire().await?;
             management::check_actor(&mut c, ctx.actor, ctx.settings, true).await?;
         }
-        let (a, b, c) = tokio::join!(
-            self.fetch(Source::ModelsDev),
-            self.fetch(Source::Litellm),
-            self.fetch(Source::Openrouter)
-        );
-        let fetched = BTreeMap::from([
-            (Source::ModelsDev, a),
-            (Source::Litellm, b),
-            (Source::Openrouter, c),
-        ]);
-        if fetched.values().all(Option::is_none) {
-            return Err(ManagementError::CatalogSourcesUnavailable);
-        }
+        let fetched = self
+            .fetch()
+            .await
+            .ok_or(ManagementError::CatalogSourcesUnavailable)?;
         let mut tx = self.store.begin_transaction().await?;
         management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
         let (version, current) = Self::latest(&mut tx).await?;
@@ -815,51 +617,32 @@ mod tests {
     fn template(prefix: &str) -> CatalogTemplate {
         serde_json::from_value(json!({"api":"messages","fixture_version":"anthropic-messages-v1","features":["client_tools","thinking","cache"],"max_body_bytes":8388608,"max_response_bytes":16777216,"model_prefixes":[prefix]})).unwrap()
     }
-    fn sources() -> BTreeMap<Source, Option<Parsed>> {
-        let models_dev = json!({"anthropic":{"models":{
+    fn fetched() -> Parsed {
+        parse_models_dev(&json!({"anthropic":{"models":{
             "claude-opus-5-5":{"cost":{"input":4,"output":20,"cache_read":0.2,"cache_write":5},"limit":{"context":1000000,"output":128000}},
+            "claude-sonnet-5.5":{"cost":{"input":2,"output":10,"cache_read":0.1,"cache_write":2.5},"limit":{"context":1000000,"output":128000}},
             "claude-haiku-5-5":{"cost":{"input":0.1,"output":0.5,"cache_read":0.01,"cache_write":0.125,"tiers":[{"input":0.5,"tier":{"type":"context","size":100000}}]},"limit":{"context":1000000,"output":128000}},
-            "gpt-like":{"cost":{"input":1,"output":2},"limit":{"context":1000,"output":10}}}}});
-        let litellm = json!({
-            "claude-opus-5-5":{"litellm_provider":"anthropic","mode":"chat","input_cost_per_token":0.000004,"output_cost_per_token":0.00002,"cache_read_input_token_cost":2e-7,"cache_creation_input_token_cost":0.000005,"max_input_tokens":1000000,"max_output_tokens":128000},
-            "anthropic/claude-sonnet-5-5":{"litellm_provider":"anthropic","mode":"chat","input_cost_per_token":0.000002,"output_cost_per_token":0.00001,"cache_read_input_token_cost":1e-7,"cache_creation_input_token_cost":0.0000025,"max_input_tokens":1000000,"max_output_tokens":128000},
-            "bedrock/claude-opus-5-5":{"litellm_provider":"bedrock","input_cost_per_token":1},
-            "claude-haiku-5-5":{"litellm_provider":"anthropic","mode":"chat","input_cost_per_token":1e-7,"output_cost_per_token":5e-7,"cache_read_input_token_cost":1e-8,"cache_creation_input_token_cost":1.25e-7,"input_cost_per_token_above_100k_tokens":5e-7,"max_input_tokens":1000000,"max_output_tokens":128000}});
-        let openrouter = json!({"data":[
-            {"id":"anthropic/claude-opus-5.5","context_length":1000000,"top_provider":{"max_completion_tokens":128000},"pricing":{"prompt":"0.000004","completion":"0.00002","input_cache_read":"0.0000003","input_cache_write":"0.000005"}},
-            {"id":"anthropic/claude-opus-5.5:batch","pricing":{"prompt":"0.000002"}}]});
-        BTreeMap::from([
-            (Source::ModelsDev, Some(parse_models_dev(&models_dev))),
-            (Source::Litellm, Some(parse_litellm(&litellm))),
-            (Source::Openrouter, Some(parse_openrouter(&openrouter))),
-        ])
+            "gpt-like":{"cost":{"input":1,"output":2},"limit":{"context":1000,"output":10}}}},
+            "openai":{"models":{"gpt-x":{"cost":{"input":1,"output":2},"limit":{"context":1000,"output":10}}}},
+            "bedrock":{"models":{"claude-opus-5-5":{"cost":{"input":9}}}}}))
     }
     #[test]
-    fn parsers_normalize_units_names_and_variants() {
-        let s = sources();
-        let opus = &s[&Source::Openrouter].as_ref().unwrap()
-            [&(ProviderId::Anthropic, "claude-opus-5-5".into())];
-        assert_eq!(opus.0, "claude-opus-5.5");
-        assert_eq!(opus.1.rates["input"], "4.000000000000");
-        assert_eq!(opus.1.rates["cache_read"], "0.300000000000");
-        let litellm = s[&Source::Litellm].as_ref().unwrap();
-        assert!(litellm.contains_key(&(ProviderId::Anthropic, "claude-sonnet-5-5".into())));
-        assert_eq!(litellm.len(), 3, "bedrock 경로는 버린다");
+    fn parser_normalizes_units_names_and_tiers() {
+        let p = fetched();
+        let sonnet = &p[&(ProviderId::Anthropic, "claude-sonnet-5-5".into())];
         assert_eq!(
-            litellm[&(ProviderId::Anthropic, "claude-haiku-5-5".into())]
-                .1
-                .tier_threshold,
-            Some(100_000)
+            sonnet.0, "claude-sonnet-5.5",
+            "원래 표기를 유지하고 비교 키만 맞춘다"
         );
-        assert_eq!(
-            litellm[&(ProviderId::Anthropic, "claude-haiku-5-5".into())]
-                .1
-                .rates["cache_write_5m"],
-            "0.125000000000"
-        );
+        assert_eq!(sonnet.1.rates["cache_read"], "0.100000000000");
+        let haiku = &p[&(ProviderId::Anthropic, "claude-haiku-5-5".into())].1;
+        assert_eq!(haiku.tier_threshold, Some(100_000));
+        assert_eq!(haiku.rates["cache_write_5m"], "0.125000000000");
+        assert!(p.contains_key(&(ProviderId::Openai, "gpt-x".into())));
+        assert_eq!(p.len(), 5, "anthropic·openai 밖의 공급사는 버린다");
     }
     #[test]
-    fn proposal_marks_new_changed_missing_and_disagreement_without_applying() {
+    fn proposal_marks_new_changed_and_missing_without_applying() {
         let templates = BTreeMap::from([(ProviderId::Anthropic, template("claude-"))]);
         let current = vec![
             Entry {
@@ -886,7 +669,7 @@ mod tests {
                 note: None,
             },
         ];
-        let p = build_proposal(3, &current, &templates, &sources());
+        let p = build_proposal(3, &current, &templates, &fetched());
         let get = |m: &str| p.items.iter().find(|i| i.model == m).unwrap();
         let opus = get("claude-opus-5-5");
         assert_eq!(opus.status, ItemStatus::Changed);
@@ -895,8 +678,6 @@ mod tests {
             "4.000000000000"
         );
         assert_eq!(opus.proposed.as_ref().unwrap().source, "models_dev");
-        assert!(!opus.agree, "OpenRouter 캐시 읽기 값이 다르다");
-        assert_eq!(opus.sources.len(), 3);
         let haiku = get("claude-haiku-5-5");
         assert_eq!(haiku.status, ItemStatus::New);
         assert_eq!(
@@ -904,31 +685,27 @@ mod tests {
             100_000,
             "구간 가격 아래로 입력 제한"
         );
-        assert!(haiku.agree);
-        assert_eq!(get("claude-sonnet-5-5").status, ItemStatus::New);
+        assert_eq!(get("claude-sonnet-5.5").status, ItemStatus::New);
         assert_eq!(get("claude-retired-1").status, ItemStatus::Missing);
         assert!(
             p.items.iter().all(|i| i.model != "gpt-like"),
             "접두사 밖 모델은 후보가 아니다"
         );
         assert_eq!(p.base_version, 3);
-        assert!(p.sources.iter().all(|s| s.ok));
+        assert_eq!(
+            (p.source.source.as_str(), p.source.models),
+            ("models_dev", 5)
+        );
     }
     #[test]
     fn incomplete_prices_cannot_be_proposed() {
         let templates = BTreeMap::from([(ProviderId::Anthropic, template("claude-"))]);
         let only = json!({"anthropic":{"models":{"claude-x-1":{"cost":{"input":1,"output":2},"limit":{"context":1000,"output":10}}}}});
-        let fetched = BTreeMap::from([
-            (Source::ModelsDev, Some(parse_models_dev(&only))),
-            (Source::Litellm, None),
-            (Source::Openrouter, None),
-        ]);
-        let p = build_proposal(0, &[], &templates, &fetched);
+        let p = build_proposal(0, &[], &templates, &parse_models_dev(&only));
         assert_eq!(
             p.items[0].status,
             ItemStatus::Incomplete,
             "cache 기능에는 캐시 가격이 필요하다"
         );
-        assert!(!p.sources[1].ok);
     }
 }

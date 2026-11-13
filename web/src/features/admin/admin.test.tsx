@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
 import { session } from '../../lib/api';
@@ -19,7 +19,11 @@ test('admin_direct_route_uses_separate_principal_policy_safety_cas_and_ack_get',
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: 'now' }));
   }));
   render(<App />);
-  await screen.findByRole('heading', { name: '주체 상세' });
+  await screen.findByRole('heading', { name: '사용자 상세' });
+  // 예전 주소는 사용자 상세 하위 페이지로 옮겨지고, 목록으로 돌아가는 링크가 있다.
+  expect(location.pathname + location.search).toBe('/ui/admin/principals/detail?principal_id=service1');
+  expect(screen.getByRole('link', { name: '← 사용자 목록' }).getAttribute('href')).toBe('/ui/admin/principals');
+  expect(screen.getByRole('link', { name: '사용자·정책·키 관리' }).getAttribute('aria-current')).toBe('page');
   fireEvent.change(screen.getByLabelText('서비스 이름'), { target: { value: '새 서비스' } });
   fireEvent.submit(screen.getByRole('form', { name: '서비스 변경' }));
   fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
@@ -68,4 +72,58 @@ test('admin_direct_user_route_never_fetches_administrator_resources', async () =
   vi.stubGlobal('fetch', fetcher); render(<App />);
   await screen.findByRole('alert'); expect(screen.getByRole('alert').textContent).toContain('관리자 권한이 없습니다');
   expect(fetcher.mock.calls).toHaveLength(1); expect(screen.queryByRole('heading', { name: '요청 상세' })).toBeNull();
+});
+
+test('policy_form_turns_checkboxes_and_limit_fields_into_the_server_policy', async () => {
+  history.replaceState(null, '', '/ui/admin/principals/detail?principal_id=service1');
+  const ceiling = [{ provider: 'anthropic', model: 'claude-opus-5-5', capabilities: ['messages', 'count_tokens'] }, { provider: 'anthropic', model: 'claude-haiku-5-5', capabilities: ['messages'] }];
+  const current = { ...principal, policy: { ...principal.policy, grants: [{ provider: 'anthropic', model: 'claude-old-1', capabilities: ['messages'] }], limits: { budget: { mode: 'actual', limit_usd: '100.500000000000', period: { kind: 'calendar_month', timezone: 'Asia/Seoul' } }, rpm: 5, tpm: null, count_rpm: null } } };
+  const writes: Record<string, unknown>[] = [];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === '/gateway/me') return Promise.resolve(response(me));
+    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (init?.method) { writes.push(JSON.parse(String(init.body))); return Promise.resolve(response({ command_id: 'cmd', target: { id: 'service1', kind: 'principal' }, effect: 'changed', result_version: '14', replayed: false })); }
+    if (url === '/gateway/admin/principals/service1') return Promise.resolve(response({ principal: current, execution_ceiling: { grants: ceiling, limits: principal.policy.limits } }));
+    return Promise.resolve(response({ items: [], next_cursor: null, as_of: 'now' }));
+  }));
+  render(<App />);
+  const group = await screen.findByRole('group', { name: '사용할 수 있는 모델·API' });
+  // 지금 정책에만 남은 모델도 보여 주어 뺄 수 있게 한다. 현재 값은 입력칸에 짧게 보인다.
+  const old = within(group).getByLabelText(/claude-old-1/) as HTMLInputElement;
+  expect(old.checked).toBe(true);
+  expect(group.textContent).toContain('지금은 쓸 수 없는 모델');
+  expect((screen.getByLabelText('월 예산 (USD)') as HTMLInputElement).value).toBe('100.5');
+  fireEvent.click(old);
+  fireEvent.click(within(group).getByLabelText(/claude-opus-5-5.*\/ messages/));
+  fireEvent.click(within(group).getByLabelText(/claude-opus-5-5.*count_tokens/));
+  fireEvent.change(screen.getByLabelText('월 예산 (USD)'), { target: { value: '20' } });
+  fireEvent.change(screen.getByLabelText('분당 요청 수 한도 (RPM)'), { target: { value: '' } });
+  fireEvent.change(screen.getByLabelText('분당 토큰 수 한도 (TPM)'), { target: { value: '50000' } });
+  fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: '모델 추가' } });
+  fireEvent.submit(screen.getByRole('form', { name: '정책 교체' }));
+  fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
+  await screen.findByText(/서버 재조회 완료/);
+  expect(writes[0]).toEqual({ expected_version: '13', disabled: false, reason: '모델 추가', grants: [{ provider: 'anthropic', model: 'claude-opus-5-5', capabilities: ['messages', 'count_tokens'] }], limits: { budget: { mode: 'actual', limit_usd: '20.000000000000', period: { kind: 'calendar_month', timezone: 'Asia/Seoul' } }, rpm: null, tpm: 50000, count_rpm: null } });
+});
+
+test('policy_form_rejects_a_malformed_budget_without_sending', async () => {
+  history.replaceState(null, '', '/ui/admin/principals/detail?principal_id=service1');
+  let writes = 0;
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === '/gateway/me') return Promise.resolve(response(me));
+    if (init?.method) writes++;
+    if (url === '/gateway/admin/principals/service1') return Promise.resolve(response({ principal, execution_ceiling: { grants: [], limits: principal.policy.limits } }));
+    return Promise.resolve(response({ items: [], next_cursor: null, as_of: 'now' }));
+  }));
+  render(<App />);
+  expect((await screen.findByRole('group', { name: '사용할 수 있는 모델·API' })).textContent).toContain('고를 수 있는 모델이 없습니다');
+  fireEvent.change(screen.getByLabelText('월 예산 방식'), { target: { value: 'reserved' } });
+  fireEvent.change(screen.getByLabelText('월 예산 (USD)'), { target: { value: '1.5.0' } });
+  fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: 'x' } });
+  fireEvent.submit(screen.getByRole('form', { name: '정책 교체' }));
+  await screen.findByText(/월 예산은 USD 금액으로 입력하세요/);
+  expect(screen.queryByRole('button', { name: '명령 실행' })).toBeNull();
+  expect(writes).toBe(0);
 });

@@ -1,3 +1,4 @@
+import { principalHref } from './principals';
 import { Fragment, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { msgid } from '../../lib/i18n';
@@ -22,7 +23,7 @@ export function RequestsScreen() {
       <div className="field"><label htmlFor="request-provider">{t('요청 Provider')}</label><Select id="request-provider" name="provider"><option value="">{t('전체')}</option>{providers.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></div>
       <div className="field"><label htmlFor="request-phase">{t('실행 단계')}</label><Select id="request-phase" name="phase"><option value="">{t('전체')}</option>{options(phases)}</Select></div>
       <div className="field"><label htmlFor="request-outcome">{t('결과')}</label><Select id="request-outcome" name="outcome"><option value="">{t('전체')}</option>{options(outcomes)}</Select></div>
-      <label>{t('요청 주체 ID')}<input name="principal_id" className="mono" spellCheck={false} defaultValue={initial} /></label>
+      <label>{t('요청 사용자 ID')}<input name="principal_id" className="mono" spellCheck={false} defaultValue={initial} /></label>
       <label>{t('요청 키 ID')}<input name="key_id" className="mono" spellCheck={false} /></label>
       <label>{t('요청 모델')}<input name="model" maxLength={200} /></label>
       <label>{t('요청 시작 (RFC3339)')}<input name="from" className="mono" spellCheck={false} placeholder="2026-11-01T00:00:00Z" /></label>
@@ -64,7 +65,7 @@ function RequestEditor({ id }: { id: string }) {
           <p className="mono">{r.id}</p>
         </div>
         <dl className="kv">
-          <dt>{t('주체')}</dt><dd><Link className="mono" href={`/ui/admin/principals?principal_id=${encodeURIComponent(r.principal_id)}`}>{r.principal_id}</Link></dd>
+          <dt>{t('사용자')}</dt><dd><Link className="mono" href={principalHref(r.principal_id)}>{r.principal_id}</Link></dd>
           <dt>{t('키')}</dt><dd className="mono">{r.key_id ?? 'SSO'}</dd>
           <dt>{t('회사 키')}</dt><dd>{r.provider_credential ? <>{r.provider_credential.label ?? t('알 수 없음')} <span className="mono meta">(…{r.provider_credential.hint})</span></> : t('기록 없음')}</dd>
           <dt>{t('부모 요청')}</dt><dd className="mono">{r.parent_request_id ?? t('없음')}</dd>

@@ -36,10 +36,10 @@ export function UsageView({ usage }: { usage: Usage }) {
     </section>
     <section aria-labelledby="balance-heading" className="stack">
       <div className="stack-sm"><h2 id="balance-heading">{t('현재 scope별 예산 잔액')}</h2><p className="lead">{t('아래 잔액은 조회 필터와 무관한 현재 예산 기간의 서버 관측입니다. 다음 호출 허가를 보장하지 않습니다.')}</p></div>
-      {usage.balance_context === 'aggregate_no_balance' && <p className="callout callout-neutral">{t('전체 합계: 주체별 예산을 합산한 잔액은 제공하지 않습니다.')}</p>}
+      {usage.balance_context === 'aggregate_no_balance' && <p className="callout callout-neutral">{t('전체 합계: 사용자별 예산을 합산한 잔액은 제공하지 않습니다.')}</p>}
       {usage.budget_balances.length > 0 && <div className="grid-cards">{usage.budget_balances.map(b => <article key={b.scope_id} className={b.balance_state === 'unresolved' || b.blocked ? 'card card-critical' : 'card'}>
         <div className="stack-sm">
-          <div className="row row-between"><h3>{b.scope_kind === 'principal' ? t('주체') : t('선택 키 {{key}}', { key: b.key_id })}</h3><span className={b.mode === 'actual' ? 'pill tone-warning' : 'pill'}>{b.mode === 'actual' ? t('실사용량') : t('예약 기반')}</span></div>
+          <div className="row row-between"><h3>{b.scope_kind === 'principal' ? t('사용자') : t('선택 키 {{key}}', { key: b.key_id })}</h3><span className={b.mode === 'actual' ? 'pill tone-warning' : 'pill'}>{b.mode === 'actual' ? t('실사용량') : t('예약 기반')}</span></div>
           <p className="meta"><span className="mono">{b.period_start} ~ {b.period_end}</span> / {b.timezone}</p>
         </div>
         <Meter balance={b} />
@@ -52,7 +52,7 @@ export function UsageView({ usage }: { usage: Usage }) {
         <p className={b.mode === 'actual' ? 'callout callout-warning' : 'meta'}>{b.mode === 'actual' ? t('실사용량 모드: 진행 호출 때문에 초과할 수 있으며 하드캡 보장이 아닙니다.') : t('예약 모드: 확정액과 유지 예약을 뺀 잔액입니다.')}</p>
         {b.blocked && <p className="callout callout-critical">{t('차단 사유: {{reasons}}', { reasons: b.reasons.join(', ') })}</p>}
         <div className="stack-sm">
-          <p className="meta">{t('이 scope 미정산 {{scope}} · 주체 전체 미정산 {{principal}}', { scope: b.scope_unknown_count, principal: b.principal_unknown_count })}</p>
+          <p className="meta">{t('이 scope 미정산 {{scope}} · 사용자 전체 미정산 {{principal}}', { scope: b.scope_unknown_count, principal: b.principal_unknown_count })}</p>
           <p className="meta">{t('관측')}: <span className="mono">{b.as_of}</span>, {t('정책 버전')}: {b.policy_version}</p>
           <p className="meta">scope ID: <span className="mono">{b.scope_id}</span> · {t('설정 지문')}: <span className="mono">{b.config_digest}</span></p>
         </div>

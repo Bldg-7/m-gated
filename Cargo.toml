@@ -1,6 +1,6 @@
 [package]
 name = "m-gated"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.93"
 description = "LLM API gateway with SSO, per-user budgets and a strict cost ledger"

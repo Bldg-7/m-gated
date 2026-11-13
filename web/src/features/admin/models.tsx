@@ -6,6 +6,7 @@ import { Badge, type Tone } from '../../ui/ui';
 import { failure, ReadState, useResource } from './shared';
 import type { CatalogEntry, CatalogProposal, CatalogProposalItem, CatalogView } from './types';
 
+/** 0.6 이전에 승인된 항목은 다른 출처 이름을 가질 수 있어 이름표를 남겨 둔다. */
 const sourceNames: Record<string, string> = { models_dev: 'models.dev', litellm: 'LiteLLM', openrouter: 'OpenRouter' };
 const rateNames: [string, string][] = [['input', msgid('입력')], ['output', msgid('출력')], ['cache_read', msgid('캐시 읽기')], ['cache_write_5m', msgid('캐시 쓰기 (5분)')]];
 const statusLabel: Record<string, [string, Tone]> = { changed: [msgid('변경'), 'warning'], new: [msgid('새 모델'), 'info'], missing: [msgid('출처에 없음'), 'critical'], incomplete: [msgid('값 부족'), 'neutral'], unchanged: [msgid('변경 없음'), 'success'] };
@@ -15,7 +16,7 @@ const selectable = new Set(['changed', 'new', 'missing']);
 function message(error: unknown) {
   if (error instanceof ApiError) {
     const known: Record<string, string> = {
-      catalog_sources_unavailable: msgid('공개 가격 목록을 하나도 받지 못했습니다. 잠시 후 다시 동기화하세요.'),
+      catalog_sources_unavailable: msgid('가격 목록(models.dev)을 받지 못했습니다. 잠시 후 다시 동기화하세요.'),
       catalog_proposal_stale: msgid('이 변경안을 만든 뒤 카탈로그가 바뀌었습니다. 다시 동기화하세요.'),
       version_conflict: msgid('다른 관리자가 먼저 카탈로그를 바꿨습니다. 다시 동기화하세요.'),
     };
@@ -75,6 +76,8 @@ export function ModelsScreen() {
   const actionable = items.filter(i => selectable.has(i.status));
   const unchanged = items.filter(i => i.status === 'unchanged').length;
   const incomplete = items.filter(i => i.status === 'incomplete');
+  const allSelected = actionable.length > 0 && actionable.every(i => selected.has(key(i)));
+  const someSelected = actionable.some(i => selected.has(key(i)));
   return <div className="stack-lg">
     <ReadState {...view} />{status && <p role="status">{status}</p>}
     {view.data && <section aria-label={t('현재 카탈로그')} className="card stack">
@@ -86,10 +89,10 @@ export function ModelsScreen() {
     </section>}
     {proposal && <section aria-label={t('동기화 변경안')} className="card stack">
       <h3>{t('동기화 변경안')}</h3>
-      <p className="meta">{proposal.body.sources.map(s => `${sourceNames[s.source] ?? s.source}: ${s.ok ? t('{{count}}개 모델', { count: s.models }) : t('받지 못함')}`).join(' · ')}</p>
-      <p className="meta">{t('값이 출처마다 다르면 models.dev → LiteLLM → OpenRouter 순서로 가격이 모두 있는 첫 출처의 값을 제안합니다. 입력 토큰 수에 따라 가격이 올라가는 모델은 그 구간 아래로 입력을 제한합니다.')}</p>
+      <p className="meta">{t('가격 출처: models.dev ({{count}}개 모델)', { count: proposal.body.source?.models ?? 0 })}</p>
+      <p className="meta">{t('입력 토큰 수에 따라 가격이 올라가는 모델은 그 구간 아래로 입력을 제한합니다.')}</p>
       {actionable.length === 0 ? <p className="empty">{t('적용할 변경이 없습니다.')}</p> : <div className="table-wrap"><table>
-        <thead><tr><th>{t('적용')}</th><th>{t('모델')}</th><th>{t('상태')}</th><th>{t('항목')}</th><th className="num">{t('현재')}</th><th className="num">{t('변경 후')}</th><th>{t('출처별 값')}</th></tr></thead>
+        <thead><tr><th><input type="checkbox" aria-label={t('전체 선택')} checked={allSelected} ref={el => { if (el) el.indeterminate = !allSelected && someSelected; }} disabled={busy !== null} onChange={e => setSelected(e.currentTarget.checked ? new Set(actionable.map(key)) : new Set())} /></th><th>{t('모델')}</th><th>{t('상태')}</th><th>{t('항목')}</th><th className="num">{t('현재')}</th><th className="num">{t('변경 후')}</th></tr></thead>
         <tbody>{actionable.map(item => <ProposalRows key={key(item)} item={item} checked={selected.has(key(item))} onToggle={checked => setSelected(prev => { const next = new Set(prev); if (checked) next.add(key(item)); else next.delete(key(item)); return next; })} disabled={busy !== null} />)}</tbody>
       </table></div>}
       <p className="meta">{t('변경 없는 모델 {{count}}개', { count: unchanged })}{incomplete.length > 0 && <> · {t('가격 항목이 모자라 제안하지 못한 모델: {{models}}', { models: incomplete.map(i => i.model).join(', ') })}</>}</p>
@@ -106,7 +109,7 @@ function EntriesTable({ entries }: { entries: CatalogEntry[] }) {
   </table><p className="meta">{t('가격 단위: 100만 token당 USD')}</p></div>;
 }
 
-/** 변경안 항목 하나. 값이 바뀌는 칸만 강조하고, 출처별 원래 값을 같이 보여 준다. */
+/** 변경안 항목 하나. 값이 바뀌는 칸만 강조한다. */
 function ProposalRows({ item, checked, onToggle, disabled }: { item: CatalogProposalItem; checked: boolean; onToggle: (checked: boolean) => void; disabled: boolean }) {
   const { t } = useTranslation();
   const [label, tone] = statusLabel[item.status];
@@ -116,19 +119,17 @@ function ProposalRows({ item, checked, onToggle, disabled }: { item: CatalogProp
     ['max_output_tokens', t('최대 출력 token'), e => tokens(e?.max_output_tokens)],
   ];
   const after = item.status === 'missing' ? null : item.proposed;
-  const sources = Object.entries(item.sources);
   return <>{fields.map(([field, name, show], index) => {
     const before = show(item.current), next = show(after);
     return <tr key={field} className={index === 0 ? 'row-start' : undefined}>
       {index === 0 && <>
         <td rowSpan={fields.length}><input type="checkbox" aria-label={t('{{model}} 적용', { model: item.model })} checked={checked} disabled={disabled} onChange={e => onToggle(e.currentTarget.checked)} /></td>
         <th scope="rowgroup" rowSpan={fields.length}>{item.provider} / <span className="mono">{item.model}</span></th>
-        <td rowSpan={fields.length}><Badge tone={tone}>{t(label)}</Badge>{!item.agree && <><br /><Badge tone="warning">{t('출처 값 불일치')}</Badge></>}{item.proposed?.note && <p className="meta">{t('구간 가격 때문에 입력 제한')}</p>}</td>
+        <td rowSpan={fields.length}><Badge tone={tone}>{t(label)}</Badge>{item.proposed?.note && <p className="meta">{t('구간 가격 때문에 입력 제한')}</p>}</td>
       </>}
       <td>{name}</td>
       <td className="num mono">{before}</td>
       <td className={before !== next ? 'num mono text-warning' : 'num mono'}>{next}</td>
-      <td className="meta mono">{sources.map(([source, c]) => `${sourceNames[source] ?? source} ${field.startsWith('max_') ? tokens(field === 'max_input_tokens' ? c.max_input_tokens : c.max_output_tokens) : price(c.rates[field])}`).join(' · ') || t('출처 없음')}</td>
     </tr>;
   })}</>;
 }

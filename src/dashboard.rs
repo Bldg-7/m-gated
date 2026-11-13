@@ -17,6 +17,7 @@ pub const SCREENS: &[&str] = &[
     "/ui/",
     "/ui/keys",
     "/ui/admin/principals",
+    "/ui/admin/principals/detail",
     "/ui/admin/usage",
     "/ui/admin/requests",
     "/ui/admin/credentials",

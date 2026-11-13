@@ -13,7 +13,7 @@ use axum::{
 };
 use m_gated::{
     auth::{AccessSettings, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
-    catalog::{CatalogService, SourceUrls},
+    catalog::CatalogService,
     config::{self, ConfigInputs},
     http::{self, AppState},
     ledger::PgLedger,
@@ -49,71 +49,37 @@ fn config() -> config::ValidatedConfig {
     .unwrap()
 }
 
-/// 공개 가격 목록 세 곳을 흉내 내는 합성 서버. 내려주는 JSON은 시험 중에 바꿀 수 있다.
+/// 가격 출처(models.dev)를 흉내 내는 합성 서버. 내려주는 JSON은 시험 중에 바꿀 수 있다.
 #[derive(Default)]
 struct Sources {
     models_dev: Mutex<Option<Value>>,
-    litellm: Mutex<Option<Value>>,
-    openrouter: Mutex<Option<Value>>,
 }
-async fn serve(sources: Arc<Sources>) -> (SourceUrls, tokio::task::JoinHandle<()>) {
-    use axum::{extract::State, routing::get};
-    async fn answer(v: Option<Value>) -> axum::response::Response {
-        use axum::response::IntoResponse;
-        match v {
-            Some(v) => axum::Json(v).into_response(),
-            None => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        }
-    }
+async fn serve(sources: Arc<Sources>) -> (url::Url, tokio::task::JoinHandle<()>) {
+    use axum::{extract::State, response::IntoResponse, routing::get};
     let app = axum::Router::new()
         .route(
             "/models-dev",
             get(|State(s): State<Arc<Sources>>| async move {
                 let v = s.models_dev.lock().unwrap().clone();
-                answer(v).await
-            }),
-        )
-        .route(
-            "/litellm",
-            get(|State(s): State<Arc<Sources>>| async move {
-                let v = s.litellm.lock().unwrap().clone();
-                answer(v).await
-            }),
-        )
-        .route(
-            "/openrouter",
-            get(|State(s): State<Arc<Sources>>| async move {
-                let v = s.openrouter.lock().unwrap().clone();
-                answer(v).await
+                match v {
+                    Some(v) => axum::Json(v).into_response(),
+                    None => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                }
             }),
         )
         .with_state(sources);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (
-        SourceUrls {
-            models_dev: format!("{base}/models-dev").parse().unwrap(),
-            litellm: format!("{base}/litellm").parse().unwrap(),
-            openrouter: format!("{base}/openrouter").parse().unwrap(),
-        },
-        task,
-    )
+    (format!("{base}/models-dev").parse().unwrap(), task)
 }
 fn models_dev(input: f64) -> Value {
     json!({"anthropic":{"models":{
         "synthetic-text":{"cost":{"input":input,"output":2,"cache_read":0.1,"cache_write":1.25},"limit":{"context":4096,"output":1024}},
         "synthetic-tiered":{"cost":{"input":1,"output":2,"cache_read":0.1,"cache_write":1.25,"tiers":[{"tier":{"type":"context","size":2048}}]},"limit":{"context":4096,"output":1024}},
+        "synthetic-extra":{"cost":{"input":3,"output":4,"cache_read":0.3,"cache_write":3.75},"limit":{"context":4096,"output":1024}},
         "other-model":{"cost":{"input":1,"output":2,"cache_read":0.1,"cache_write":1.25},"limit":{"context":4096,"output":1024}}}}})
 }
-fn litellm() -> Value {
-    json!({"synthetic-text":{"litellm_provider":"anthropic","mode":"chat","input_cost_per_token":0.000001,"output_cost_per_token":0.000002,"cache_read_input_token_cost":1e-7,"cache_creation_input_token_cost":0.00000125,"max_input_tokens":4096,"max_output_tokens":1024},
-           "synthetic-extra":{"litellm_provider":"anthropic","mode":"chat","input_cost_per_token":0.000003,"output_cost_per_token":0.000004,"cache_read_input_token_cost":3e-7,"cache_creation_input_token_cost":0.00000375,"max_input_tokens":4096,"max_output_tokens":1024}})
-}
-fn openrouter() -> Value {
-    json!({"data":[{"id":"anthropic/synthetic-text","context_length":4096,"top_provider":{"max_completion_tokens":1024},"pricing":{"prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001","input_cache_write":"0.00000125"}}]})
-}
-
 struct Harness {
     db: postgres::TestDb,
     router: axum::Router,
@@ -142,8 +108,6 @@ impl Harness {
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
         let sources = Arc::new(Sources::default());
         *sources.models_dev.lock().unwrap() = Some(models_dev(1.0));
-        *sources.litellm.lock().unwrap() = Some(litellm());
-        *sources.openrouter.lock().unwrap() = Some(openrouter());
         let (urls, task) = serve(sources.clone()).await;
         let service = CatalogService::for_test(&cfg, db.store.clone(), urls);
         service.refresh().await.unwrap();
@@ -297,18 +261,12 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
     let proposal = &synced["proposal"];
     let proposal_id = synced["proposal_id"].as_str().unwrap().to_owned();
     assert_eq!(proposal["base_version"], 0);
-    assert!(
-        proposal["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["ok"] == true)
-    );
+    assert_eq!(proposal["source"]["source"], "models_dev");
+    assert_eq!(proposal["source"]["models"], 4);
     let text = item(proposal, "synthetic-text");
     assert_eq!(text["status"], "new");
-    assert_eq!(text["agree"], true);
     assert_eq!(text["proposed"]["rates"]["input"], "1.000000000000");
-    assert_eq!(text["sources"].as_object().unwrap().len(), 3);
+    assert_eq!(text["proposed"]["source"], "models_dev");
     assert_eq!(
         item(proposal, "synthetic-tiered")["proposed"]["max_input_tokens"],
         2048
@@ -386,14 +344,13 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
         (409, json!("catalog_proposal_stale"))
     );
 
-    // 가격이 바뀌면 이전 값과 새 값을 보여 준다. 출처 사이 불일치도 표시한다.
+    // 가격이 바뀌면 이전 값과 새 값을 보여 준다.
     *h.sources.models_dev.lock().unwrap() = Some(models_dev(1.5));
     let (_, synced) = h.sync(Uuid::new_v4()).await;
     let changed = item(&synced["proposal"], "synthetic-text");
     assert_eq!(changed["status"], "changed");
     assert_eq!(changed["current"]["rates"]["input"], "1.000000000000");
     assert_eq!(changed["proposed"]["rates"]["input"], "1.500000000000");
-    assert_eq!(changed["agree"], false);
     assert_eq!(
         item(&synced["proposal"], "synthetic-tiered")["status"],
         "unchanged"
@@ -451,10 +408,8 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
     assert_eq!(status, 200);
     assert_eq!(h.service.cache().snapshot().profiles.len(), 1);
 
-    // 출처를 하나도 받지 못하면 변경안을 만들지 않는다.
+    // 가격 출처를 받지 못하면 변경안을 만들지 않는다.
     *h.sources.models_dev.lock().unwrap() = None;
-    *h.sources.litellm.lock().unwrap() = None;
-    *h.sources.openrouter.lock().unwrap() = None;
     let (status, failed) = h.sync(Uuid::new_v4()).await;
     assert_eq!(
         (status, failed["error"]["code"].clone()),
