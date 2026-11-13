@@ -131,6 +131,7 @@ struct RawAuth {
     login_url: Option<String>,
     refresh_url: Option<String>,
     logout_url: Option<String>,
+    return_param: Option<String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +298,20 @@ pub struct AuthConfig {
     pub login_url: Url,
     pub refresh_url: Url,
     pub logout_url: Url,
+    /// 로그인·로그아웃 뒤 돌아올 주소를 SSO에 넘기는 query 이름(예: `return_to`). 없으면 붙이지 않는다.
+    pub return_param: Option<String>,
+}
+impl AuthConfig {
+    fn with_return(&self, url: &Url, origin: &Url) -> String {
+        let mut url = url.clone();
+        if let Some(param) = &self.return_param {
+            url.query_pairs_mut().append_pair(
+                param,
+                &format!("{}/ui/", origin.as_str().trim_end_matches('/')),
+            );
+        }
+        url.to_string()
+    }
 }
 /// Postgres TLS 수준. 평문 연결은 선택지에 없다.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -366,6 +381,16 @@ impl ValidatedConfig {
     /// Provider 키를 DB에 암호화해 두는 root key. 이 값에서 용도별 key를 파생한다.
     pub fn credential_encryption_key_bytes(&self) -> [u8; 32] {
         hex32(self.credential_encryption_key.expose())
+    }
+    /// SSO 로그인 화면 주소. `auth.return_param`이 있으면 대시보드로 돌아올 주소를 붙인다.
+    pub fn login_redirect(&self) -> String {
+        self.auth
+            .with_return(&self.auth.login_url, &self.public_origin)
+    }
+    /// SSO 로그아웃 주소. `auth.return_param`이 있으면 대시보드로 돌아올 주소를 붙인다.
+    pub fn logout_redirect(&self) -> String {
+        self.auth
+            .with_return(&self.auth.logout_url, &self.public_origin)
     }
     pub fn providers(&self) -> &[ProviderConfig] {
         &self.providers
@@ -547,6 +572,10 @@ fn validate(
             login_url: parse("SSO_LOGIN_URL", raw.auth.login_url)?,
             refresh_url: parse("SSO_REFRESH_URL", raw.auth.refresh_url)?,
             logout_url: parse("SSO_LOGOUT_URL", raw.auth.logout_url)?,
+            return_param: env
+                .get("SSO_RETURN_PARAM")
+                .cloned()
+                .or(raw.auth.return_param),
         },
         public_origin: parse("PUBLIC_ORIGIN", raw.public_origin)?,
         allowed_emails: raw.allowed_emails.into_iter().collect(),
@@ -623,6 +652,7 @@ pub const ENV_KEYS: &[&str] = &[
     "SSO_LOGIN_URL",
     "SSO_REFRESH_URL",
     "SSO_LOGOUT_URL",
+    "SSO_RETURN_PARAM",
     "PUBLIC_ORIGIN",
     "ALLOWED_EMAILS",
     "ADMIN_EMAILS",
@@ -663,6 +693,13 @@ impl ValidatedConfig {
         if auth.issuer_literal != auth.issuer.as_str().trim_end_matches('/')
             || auth.audience_literal != auth.audience.as_str().trim_end_matches('/')
             || !cookie_name_valid(&auth.access_cookie_name)
+            || auth.return_param.as_ref().is_some_and(|p| {
+                p.is_empty()
+                    || p.len() > 64
+                    || !p
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            })
         {
             return Err(StartupError::InvalidAuth);
         }

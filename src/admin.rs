@@ -69,9 +69,9 @@ impl DashboardApi {
             digest_bytes: crate::gateway::auth_config_digest(config),
             signing_key: config.csrf_signing_key_bytes().to_vec(),
             ceiling: config.execution_ceiling().clone(),
-            login: config.auth().login_url.to_string(),
+            login: config.login_redirect(),
             refresh: config.auth().refresh_url.to_string(),
-            logout: config.auth().logout_url.to_string(),
+            logout: config.logout_redirect(),
             origin: config
                 .public_origin()
                 .to_string()

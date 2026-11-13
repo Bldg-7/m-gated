@@ -39,6 +39,9 @@ auth:
   login_url: https://sso.example.com/login
   refresh_url: https://sso.example.com/refresh
   logout_url: https://sso.example.com/logout
+  # Optional: query parameter your SSO reads to return the user after login
+  # and logout. Without it, the SSO decides where users land after login.
+  # return_param: return_to
 
 # Exact, case-insensitive e-mail allow-list (no wildcards). Only users whose
 # verified "email" claim is listed can use the gateway.

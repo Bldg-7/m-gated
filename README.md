@@ -128,7 +128,7 @@ With Docker (multi-stage build, non-root user `65532`, `STOPSIGNAL SIGTERM`). Re
 docker run --rm -p 4000:4000 \
   -v "$PWD/gateway.yaml:/app/gateway.yaml:ro" \
   -e DB_PASSWORD -e CSRF_SIGNING_KEY -e CREDENTIAL_ENCRYPTION_KEY \
-  ghcr.io/bldg-7/m-gated:0.3.0
+  ghcr.io/bldg-7/m-gated:0.3.1
 ```
 
 Or build it yourself with `docker build -t m-gated .` and run `m-gated` in place of the image name.
@@ -195,6 +195,7 @@ tags and merge keys. [`config.example.yaml`](config.example.yaml) is an annotate
 | `jwks_uri` | JWKS endpoint. Keys are cached for 300 s. |
 | `access_cookie_name` | Name of the cookie in which the SSO stores the access JWT for the browser. |
 | `login_url`, `refresh_url`, `logout_url` | SSO endpoints used by the dashboard. |
+| `return_param` | Optional. Name of the query parameter your SSO reads to send the user back after login or logout (for example `return_to`). When set, the gateway sends users to `login_url?<return_param>=<public_origin>/ui/` and `logout_url?<return_param>=<public_origin>/ui/`. Without it, the SSO decides where users land after login. Letters, digits, `_` and `-` only. A `return_to` query sent by a client to `/auth/login` is always ignored. |
 
 `jwks_uri`, `login_url`, `refresh_url` and `logout_url` must have the **same origin as `issuer`**,
 because the dashboard's Content-Security-Policy allows exactly one SSO origin. URLs must use
@@ -262,6 +263,7 @@ The gateway reads only the variables in this table.
 | `PUBLIC_ORIGIN` | `public_origin` | |
 | `AUTH_ISSUER`, `AUTH_JWKS_URI`, `SSO_AUDIENCE`, `SSO_ACCESS_COOKIE_NAME` | `auth.issuer`, `auth.jwks_uri`, `auth.audience`, `auth.access_cookie_name` | |
 | `SSO_LOGIN_URL`, `SSO_REFRESH_URL`, `SSO_LOGOUT_URL` | `auth.login_url`, `auth.refresh_url`, `auth.logout_url` | |
+| `SSO_RETURN_PARAM` | `auth.return_param` | |
 | `ALLOWED_EMAILS`, `ADMIN_EMAILS` | `allowed_emails`, `admin_emails` | Comma-separated. An empty value means an empty list. |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_SSL_MODE` | `database.*` | `DB_SSL_MODE` accepts only `verify-full` or `require`. |
 | `TLS_CA_FILE` | – | Path to an extra PEM trust anchor (≤ 64 KiB) for Postgres, the JWKS and provider connections. |

@@ -103,6 +103,64 @@ fn database_ssl_mode_defaults_to_verify_full_and_only_allows_require() {
 }
 
 #[test]
+fn sso_return_param_appends_dashboard_address_to_login_and_logout_only_when_set() {
+    let plain = load(support::YAML).unwrap();
+    assert_eq!(
+        plain.login_redirect(),
+        "https://auth.example.test/sso/login"
+    );
+    assert_eq!(
+        plain.logout_redirect(),
+        "https://auth.example.test/sso/logout"
+    );
+    let yaml = support::YAML.replacen(
+        "  logout_url:",
+        "  return_param: return_to\n  logout_url:",
+        1,
+    );
+    assert_ne!(yaml, support::YAML);
+    let set = load(&yaml).unwrap();
+    assert_eq!(
+        set.login_redirect(),
+        "https://auth.example.test/sso/login?return_to=https%3A%2F%2Fm-gated.example.test%2Fui%2F"
+    );
+    assert_eq!(
+        set.logout_redirect(),
+        "https://auth.example.test/sso/logout?return_to=https%3A%2F%2Fm-gated.example.test%2Fui%2F"
+    );
+    let mut env = support::environment();
+    env.insert("SSO_RETURN_PARAM".into(), "next".into());
+    let from_env = config::load(ConfigInputs {
+        yaml: support::YAML,
+        file_environment: Some("SSO_RETURN_PARAM=redirect_uri\n"),
+        environment: &env,
+    })
+    .unwrap();
+    assert!(
+        from_env
+            .login_redirect()
+            .ends_with("?next=https%3A%2F%2Fm-gated.example.test%2Fui%2F")
+    );
+    for bad in [
+        "''",
+        "'a b'",
+        "'a&b'",
+        "'a=b'",
+        "'한글'",
+        &format!("'{}'", "x".repeat(65)),
+    ] {
+        reject(
+            &support::YAML.replacen(
+                "  logout_url:",
+                &format!("  return_param: {bad}\n  logout_url:"),
+                1,
+            ),
+            StartupError::InvalidAuth,
+        );
+    }
+}
+
+#[test]
 fn sso_urls_share_issuer_origin_and_cookie_name_is_a_token() {
     for (from, to) in [
         (
