@@ -261,6 +261,8 @@ type ObservedGatewayErrors = Arc<tokio::sync::Mutex<Vec<(u16, Option<String>)>>>
 struct Harness {
     db: postgres::TestDb,
     database: Arc<m_gated::ledger::PgIdentityStore>,
+    // 읽는 시험이 macOS 전용이라 다른 OS에서는 dead code가 된다.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     wire: ObservedGatewayErrors,
     provider: Arc<provider::Provider>,
     _provider_server: provider::Server,
