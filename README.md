@@ -579,9 +579,13 @@ binding (label and last 4 characters), so you can see which company key a virtua
 - **Names.** A label is 1–60 characters with no leading or trailing spaces. Two keys in use for the
   same provider cannot share a label (case-insensitive). A retired key's label can be reused.
 - **Default key.** Each provider has one default key. The first key registered for a provider
-  becomes its default. Two kinds of requests use the default key because they have no binding:
-  requests sent with an SSO token instead of a virtual key, and requests from virtual keys issued
-  while that provider had no company key yet.
+  becomes its default. Two kinds of requests have no binding: requests sent with an SSO token
+  instead of a virtual key, and requests from virtual keys issued while that provider had no company
+  key yet. They use the user's default key (see **Per-user access** below), or the provider's
+  default key if the user has none. Virtual keys issued without a choice are bound the same way.
+  So changing the provider's default key affects only users without their own default key, and
+  only their new virtual keys and their requests that have no binding. Virtual keys that are
+  already bound keep their company key.
 - **Binding virtual keys.** When a virtual key is issued, it is bound to one company key per
   provider and keeps using that key. The key is chosen with
   `"provider_credentials": {"anthropic": "<credential id>"}` in `POST /api/keys`. Users choose among
