@@ -49,6 +49,8 @@ struct Harness {
     task: tokio::task::JoinHandle<std::io::Result<()>>,
     base: String,
     token: String,
+    /// 관리 API용 SSO 토큰. 추론은 `token`(가상 키)으로만 한다.
+    sso: String,
     principal: uuid::Uuid,
     runtime: Arc<m_gated::runtime::Runtime>,
 }
@@ -87,6 +89,7 @@ impl Harness {
             .unwrap();
         let principal = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"openai","model":"synthetic-text","capabilities":["responses"]}])).execute(db.store.pool()).await.unwrap();
+        let key = finance::virtual_key(&db.store, &cfg, principal).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
         let ledger = Arc::new(
             PgLedger::new(
@@ -152,7 +155,8 @@ impl Harness {
             _jwks: jwks,
             task,
             base: format!("http://{address}"),
-            token,
+            token: key,
+            sso: token,
             principal,
             runtime,
         }
@@ -257,11 +261,11 @@ async fn idle(h: &Harness) {
     assert_eq!(h.runtime.active_principals(), 0);
 }
 async fn strict(h: &Harness) {
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     h.provider.responses_contract(4096, 1024).await;
 }
 async fn reservation(h: &Harness) {
-    let r=sqlx::query("SELECT r.phase,b.reservation_usd::text AS amount,b.remaining_reservation_usd::text AS held,b.reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id ORDER BY admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
+    let r=sqlx::query("SELECT r.phase,b.reservation_usd::text AS amount,b.remaining_reservation_usd::text AS held,b.reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) ORDER BY admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(r.get::<String, _>("phase"), "dispatching");
     assert_eq!(r.get::<String, _>("amount"), "0.004296000000");
     assert_eq!(r.get::<String, _>("held"), "0.004296000000");
@@ -337,7 +341,7 @@ async fn responses_completed_and_output_limit_incomplete_release_nonzero_reserva
                 .unwrap();
             assert_eq!(r.bytes().await.unwrap(), wire);
             idle(&h).await;
-            let r=sqlx::query("SELECT r.outcome,r.accounting_state,r.cost_usd::text AS cost,b.remaining_reservation_usd::text AS held,b.remaining_reserved_tokens,w.reserved_tokens,w.settled_tokens,t.unknown_count,t.input_tokens,t.output_tokens,e.normalized_usage AS usage,e.provider_usage AS native,e.pricing_resolution FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) JOIN gw_rate_windows w ON (w.scope_id,w.lane,w.window_start)=(b.scope_id,b.rate_lane,b.rate_start) JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+            let r=sqlx::query("SELECT r.outcome,r.accounting_state,r.cost_usd::text AS cost,b.remaining_reservation_usd::text AS held,b.remaining_reserved_tokens,w.reserved_tokens,w.settled_tokens,t.unknown_count,t.input_tokens,t.output_tokens,e.normalized_usage AS usage,e.provider_usage AS native,e.pricing_resolution FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) JOIN test_user_rate_windows w ON (w.scope_id,w.lane,w.window_start)=(b.scope_id,b.rate_lane,b.rate_start) JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(r.get::<String, _>("outcome"), "completed");
             assert_eq!(r.get::<String, _>("accounting_state"), "settled");
             assert_eq!(r.get::<String, _>("cost"), "0.000120000000");
@@ -400,7 +404,7 @@ async fn responses_completed_and_output_limit_incomplete_release_nonzero_reserva
                 .unwrap(),
                 2
             );
-            let totals=sqlx::query("SELECT cost_usd::text AS cost, reserved_usd::text AS reserved,settled_count,unknown_count,input_tokens,output_tokens FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+            let totals=sqlx::query("SELECT cost_usd::text AS cost, reserved_usd::text AS reserved,settled_count,unknown_count,input_tokens,output_tokens FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(totals.get::<String, _>("cost"), "0.000240000000");
             assert_eq!(totals.get::<String, _>("reserved"), "0.000000000000");
             assert_eq!(totals.get::<i64, _>("settled_count"), 2);
@@ -413,7 +417,7 @@ async fn responses_completed_and_output_limit_incomplete_release_nonzero_reserva
 }
 
 async fn unknown(h: &Harness) {
-    let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,b.remaining_reservation_usd::text AS held,b.remaining_reserved_tokens,t.unknown_count,t.reserved_usd::text AS reserved FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) ORDER BY r.admitted_at LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
+    let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,b.remaining_reservation_usd::text AS held,b.remaining_reserved_tokens,t.unknown_count,t.reserved_usd::text AS reserved FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) ORDER BY r.admitted_at LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
     assert!(row.get::<Option<String>, _>("cost").is_none());
     assert_eq!(row.get::<String, _>("held"), "0.004296000000");
@@ -748,13 +752,13 @@ async fn responses_fixed_sdk_observes_native_completed_incomplete_and_one_send_p
     for status in [400, 401, 403, 429, 502, 503] {
         let h = Harness::with_config(verified_configuration()).await;
         if status == 403 {
-            sqlx::query("UPDATE gw_policies SET allow_rules='[]'")
+            sqlx::query("UPDATE gw_policies SET allow_rules='[]' WHERE key_id IS NULL")
                 .execute(h.db.store.pool())
                 .await
                 .unwrap();
         }
         if status == 429 {
-            sqlx::query("UPDATE gw_policies SET budget_limit_usd=0")
+            sqlx::query("UPDATE gw_policies SET budget_limit_usd=0 WHERE key_id IS NULL")
                 .execute(h.db.store.pool())
                 .await
                 .unwrap();
@@ -1122,7 +1126,7 @@ async fn api(
         .unwrap();
     let mut r = client
         .request(method, format!("{}{path}", h.base))
-        .bearer_auth(&h.token)
+        .bearer_auth(&h.sso)
         .header("x-gateway-command-id", uuid::Uuid::new_v4().to_string());
     if let Some(input) = input {
         r = r
@@ -1145,7 +1149,9 @@ fn limits() -> serde_json::Value {
     serde_json::json!({"budget":null,"rpm":null,"tpm":null,"count_rpm":null})
 }
 async fn key(h: &Harness, service: Option<uuid::Uuid>) -> (String, uuid::Uuid) {
-    let mut input = serde_json::json!({"name":"합성 Responses key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":100000,"count_rpm":null}});
+    let mut input = finance::with_credentials(
+        serde_json::json!({"name":"합성 Responses key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":100000,"count_rpm":null}}),
+    );
     if let Some(service) = service {
         input["service_principal_id"] = service.to_string().into();
     }
@@ -1191,6 +1197,7 @@ async fn responses_personal_and_service_keys_apply_both_scopes_owner_and_revoke(
     let(status,v)=api(&h,reqwest::Method::POST,"/api/admin/principals",Some(serde_json::json!({"display_name":"합성 Responses service","management_owner_id":h.principal}))).await;
     assert_eq!(status, 201);
     let service: uuid::Uuid = v["target"]["id"].as_str().unwrap().parse().unwrap();
+    finance::allow(h.db.store.pool(), service).await;
     let service_path = format!("/api/admin/principals/{service}");
     let(status,_)=api(&h,reqwest::Method::PUT,&format!("{service_path}/policy"),Some(serde_json::json!({"expected_version":"1","disabled":false,"grants":grants(),"limits":limits(),"reason":"합성 허용"}))).await;
     assert_eq!(status, 200);
@@ -1419,6 +1426,7 @@ async fn responses_token_only_bound_violation_and_amount_overflow_pause_atomical
     }
 }
 #[path = "support/finance.rs"]
+#[allow(dead_code)]
 mod finance;
 #[path = "support/pg_proxy.rs"]
 mod pg_proxy;
@@ -1433,7 +1441,7 @@ async fn responses_uncertain_dispatch_original_id_expires_unknown_without_reissu
     use std::sync::atomic::Ordering;
     let db = postgres::TestDb::new().await;
     let principal = finance::human(db.store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode='reserved',budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode='reserved',budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
     let current = finance::current(db.store.pool(), principal).await;
     let proxy = pg_proxy::CommitProxy::new().await;
     let store = db.clock_store(Some(proxy.port)).await;
@@ -1494,7 +1502,7 @@ async fn responses_uncertain_dispatch_original_id_expires_unknown_without_reissu
         Some(Finalized::Unknown)
     );
     assert_eq!(second.recover_expired(spec.id).await.unwrap(), None);
-    let row=sqlx::query("SELECT r.accounting_state,b.remaining_reservation_usd::text AS held,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
+    let row=sqlx::query("SELECT r.accounting_state,b.remaining_reservation_usd::text AS held,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
     assert_eq!(row.get::<String, _>("held"), "0.004296000000");
     assert!(row.get::<String, _>("period").starts_with("2025-03-01"));
@@ -1611,7 +1619,7 @@ async fn responses_nonterminal_contradictions_hold_reservation_despite_later_val
             assert!([200, 502].contains(&r.status().as_u16()));
             let _ = r.bytes().await;
             idle(&h).await;
-            let held = sqlx::query_scalar::<_, bool>("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND b.remaining_reservation_usd=0.004296 AND b.remaining_reserved_tokens=4196 AND t.reserved_usd=0.004296 AND t.unknown_count=1 AND w.reserved_tokens=4196 AND w.settled_tokens=0 FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) JOIN gw_rate_windows w ON (w.scope_id,w.lane,w.window_start)=(b.scope_id,b.rate_lane,b.rate_start)").fetch_one(h.db.store.pool()).await.unwrap();
+            let held = sqlx::query_scalar::<_, bool>("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND b.remaining_reservation_usd=0.004296 AND b.remaining_reserved_tokens=4196 AND t.reserved_usd=0.004296 AND t.unknown_count=1 AND w.reserved_tokens=4196 AND w.settled_tokens=0 FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) JOIN test_user_rate_windows w ON (w.scope_id,w.lane,w.window_start)=(b.scope_id,b.rate_lane,b.rate_start)").fetch_one(h.db.store.pool()).await.unwrap();
             let next = h
                 .request("/openai/v1/responses", BODY)
                 .send()
@@ -1776,7 +1784,7 @@ async fn s9_responses_native_failure_sdk_abort_preserves_observed_failed() {
             )
         );
         assert_eq!(h.provider.calls.lock().await.len(), 1);
-        let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM gw_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+        let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
         assert_eq!(
             held,
             ("0.004296000000".into(), "0.004296000000".into(), 4196, 4196)
@@ -1854,7 +1862,7 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
                 row,
                 ("finished".into(), code.into(), "unknown".into(), true)
             );
-            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM gw_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(
                 held,
                 ("0.004296000000".into(), "0.004296000000".into(), 4196, 4196)
@@ -1926,12 +1934,12 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
             Some("0.000120000000".into())
         )
     );
-    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM gw_request_budgets b JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(
         budget,
         ("0.000000000000".into(), 0, 0, "0.000120000000".into(), 1)
     );
-    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(final_state, ("failed".into(), "provider".into(), 120));
     h.provider
         .set(
@@ -2000,7 +2008,7 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
     stopped.await.unwrap();
     drop(tx);
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(
         row,
         (
@@ -2165,7 +2173,7 @@ async fn s9_terminal_at_cr_wire_limit_before_cancel_has_no_supervisor_final() {
         stopped.await.unwrap();
         drop(tx);
         h.runtime.wait_requests().await;
-        let row:(String,bool,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id").fetch_one(h.db.store.pool()).await.unwrap();
+        let row:(String,bool,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").fetch_one(h.db.store.pool()).await.unwrap();
         let resources = h.runtime.request_resources();
         h.close().await;
         assert_eq!(

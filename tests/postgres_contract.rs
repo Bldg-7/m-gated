@@ -234,7 +234,7 @@ async fn allowed_anthropic_request_is_recorded_once() {
             .unwrap_err(),
         LedgerError::Conflict
     );
-    let row=sqlx::query("SELECT r.phase,r.accounting_state,r.cost_usd::text AS cost,t.cost_usd::text AS total,t.settled_count,t.unknown_count,t.input_tokens,t.output_tokens,(SELECT count(*) FROM gw_usage_events) AS events FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE r.id=$1").bind(spec.id).fetch_one(db.store.pool()).await.unwrap();
+    let row=sqlx::query("SELECT r.phase,r.accounting_state,r.cost_usd::text AS cost,t.cost_usd::text AS total,t.settled_count,t.unknown_count,t.input_tokens,t.output_tokens,(SELECT count(*) FROM gw_usage_events) AS events FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE r.id=$1").bind(spec.id).fetch_one(db.store.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("cost"), "0.000140000000");
     assert_eq!(row.get::<String, _>("total"), "0.000140000000");
     assert_eq!(row.get::<String, _>("accounting_state"), "settled");
@@ -322,6 +322,8 @@ impl Harness {
             .unwrap();
         let principal = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).execute(database.pool()).await.unwrap();
+        // 추론은 가상 키로만 받는다. 시험 요청은 이 키로 보낸다.
+        let token = finance::virtual_key(&database, &cfg, principal).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
             PgLedger::new(
@@ -508,7 +510,7 @@ async fn native_anthropic_and_alias_preserve_bytes_credentials_and_accounting() 
     }
     drop(calls);
     let row = sqlx::query(
-        "SELECT sum(cost_usd)::text AS cost,sum(settled_count)::bigint AS n FROM gw_usage_totals",
+        "SELECT sum(cost_usd)::text AS cost,sum(settled_count)::bigint AS n FROM test_user_usage_totals",
     )
     .fetch_one(h.db.store.pool())
     .await
@@ -753,7 +755,7 @@ async fn free_count_result_and_lost_result_are_not_paid_usage_or_missing_tokens(
         assert_eq!(usage["counted_input_tokens"].as_str(), expected);
         assert_first_usage_event_kind(h.db.store.pool(), id, "final").await;
     }
-    let row=sqlx::query("SELECT unknown_count,settled_count,settled_unknown_tokens_count,input_tokens,output_tokens FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+    let row=sqlx::query("SELECT unknown_count,settled_count,settled_unknown_tokens_count,input_tokens,output_tokens FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(row.get::<i64, _>("unknown_count"), 1);
     assert_eq!(row.get::<i64, _>("settled_count"), 2);
     assert_eq!(row.get::<i64, _>("settled_unknown_tokens_count"), 0);
@@ -824,7 +826,7 @@ async fn fixed_price_and_no_dispatch_fact_do_not_rewrite_prior_usage() {
     assert_eq!(e["input_tokens"], "0");
     assert_eq!(e["output_tokens"], "0");
     assert!(e["actual_model"].is_null());
-    let row=sqlx::query("SELECT cost_usd::text AS cost,settled_count,settled_unknown_tokens_count,input_tokens,output_tokens FROM gw_usage_totals").fetch_one(db.store.pool()).await.unwrap();
+    let row=sqlx::query("SELECT cost_usd::text AS cost,settled_count,settled_unknown_tokens_count,input_tokens,output_tokens FROM test_user_usage_totals").fetch_one(db.store.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("cost"), "0.000140000000");
     assert_eq!(row.get::<i64, _>("settled_count"), 2);
     assert_eq!(row.get::<i64, _>("settled_unknown_tokens_count"), 0);
@@ -873,7 +875,7 @@ async fn two_finalizers_apply_one_cost_and_conflicting_final_rolls_back() {
             .unwrap_err(),
         LedgerError::Conflict
     );
-    let row=sqlx::query("SELECT cost_usd::text AS cost,settled_count,(SELECT count(*) FROM gw_usage_events) AS events FROM gw_usage_totals").fetch_one(db.store.pool()).await.unwrap();
+    let row=sqlx::query("SELECT cost_usd::text AS cost,settled_count,(SELECT count(*) FROM gw_usage_events) AS events FROM test_user_usage_totals").fetch_one(db.store.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("cost"), "0.000140000000");
     assert_eq!(row.get::<i64, _>("settled_count"), 1);
     assert_eq!(row.get::<i64, _>("events"), 1);
@@ -1101,7 +1103,7 @@ async fn system_text_and_message_tool_data_preserve_original_bytes_and_attributi
                 .parse()
                 .unwrap();
             response.bytes().await.unwrap();
-            let row = sqlx::query("SELECT r.cost_usd::text AS cost,r.accounting_state,e.kind,e.normalized_usage,b.applied_input_tokens,b.applied_output_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id JOIN gw_request_budgets b ON b.request_id=r.id WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+            let row = sqlx::query("SELECT r.cost_usd::text AS cost,r.accounting_state,e.kind,e.normalized_usage,b.applied_input_tokens,b.applied_output_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(row.get::<String, _>("accounting_state"), "settled");
             assert_eq!(row.get::<String, _>("kind"), "final");
             assert_eq!(
@@ -1153,7 +1155,7 @@ async fn system_text_and_message_tool_data_preserve_original_bytes_and_attributi
     }
     drop(calls);
     let totals = sqlx::query(
-        "SELECT cost_usd::text AS cost,settled_count,unknown_count FROM gw_usage_totals",
+        "SELECT cost_usd::text AS cost,settled_count,unknown_count FROM test_user_usage_totals",
     )
     .fetch_one(h.db.store.pool())
     .await
@@ -1562,7 +1564,7 @@ async fn fixed_anthropic_sdk_nonstream_alias_count_and_errors_have_one_attempt()
     sdk(&h, "", "count_tokens", 200, &h.token).await;
     assert_eq!(h.provider.calls.lock().await.len(), 4);
     let row = sqlx::query(
-        "SELECT cost_usd::text AS cost,settled_count,unknown_count FROM gw_usage_totals",
+        "SELECT cost_usd::text AS cost,settled_count,unknown_count FROM test_user_usage_totals",
     )
     .fetch_one(h.db.store.pool())
     .await
@@ -1587,7 +1589,7 @@ async fn fixed_anthropic_sdk_nonstream_alias_count_and_errors_have_one_attempt()
         )
         .await;
         assert_eq!(h.provider.calls.lock().await.len(), 1);
-        let unknown: i64 = sqlx::query_scalar("SELECT unknown_count FROM gw_usage_totals")
+        let unknown: i64 = sqlx::query_scalar("SELECT unknown_count FROM test_user_usage_totals")
             .fetch_one(h.db.store.pool())
             .await
             .unwrap();
@@ -1724,7 +1726,7 @@ async fn expired_chargeable_and_free_dispatch_have_different_facts_and_one_effec
         } else {
             Finalized::Unknown
         }));
-        let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.execution_stopped_at IS NULL AS no_stop,e.normalized_usage,t.cost_usd::text AS total,t.settled_count,t.unknown_count,b.state FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN gw_usage_events e ON e.request_id=r.id WHERE r.id=$1").bind(expired).fetch_one(db.store.pool()).await.unwrap();
+        let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.execution_stopped_at IS NULL AS no_stop,e.normalized_usage,t.cost_usd::text AS total,t.settled_count,t.unknown_count,b.state FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN gw_usage_events e ON e.request_id=r.id WHERE r.id=$1").bind(expired).fetch_one(db.store.pool()).await.unwrap();
         assert!(row.get::<bool, _>("no_stop"));
         let usage: serde_json::Value = row.get("normalized_usage");
         if free {
@@ -1812,7 +1814,7 @@ async fn expired_first_final_is_final_observation_but_unknown_accounting() {
             .unwrap_err(),
         LedgerError::Conflict
     );
-    let row = sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.reason_code,r.version,r.result_digest,r.execution_stopped_at IS NULL AS no_stop,r.pricing_snapshot,r.execution_snapshot,r.admitted_at::text AS admitted_at,e.actual_model,e.provider_usage,e.normalized_usage,e.pricing_resolution,e.content_digest,b.state,b.remaining_reservation_usd=b.reservation_usd AS held_money,b.remaining_reserved_tokens=b.reserved_tokens AS held_tokens,t.cost_usd::text AS total,t.unknown_count,t.settled_count,w.settled_tokens,p.inference_safety_version FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN gw_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(expired).fetch_one(db.store.pool()).await.unwrap();
+    let row = sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.reason_code,r.version,r.result_digest,r.execution_stopped_at IS NULL AS no_stop,r.pricing_snapshot,r.execution_snapshot,r.admitted_at::text AS admitted_at,e.actual_model,e.provider_usage,e.normalized_usage,e.pricing_resolution,e.content_digest,b.state,b.remaining_reservation_usd=b.reservation_usd AS held_money,b.remaining_reserved_tokens=b.reserved_tokens AS held_tokens,t.cost_usd::text AS total,t.unknown_count,t.settled_count,w.settled_tokens,p.inference_safety_version FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(expired).fetch_one(db.store.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
     assert!(row.get::<Option<String>, _>("cost").is_none());
     assert_eq!(row.get::<String, _>("reason_code"), "lease_expired");
@@ -1991,7 +1993,7 @@ async fn single_send_rechecks_deadline_and_shutdown_without_claiming_free_cost()
             Err(LedgerError::Conflict)
         ));
     }
-    let n: i64 = sqlx::query_scalar("SELECT unknown_count FROM gw_usage_totals")
+    let n: i64 = sqlx::query_scalar("SELECT unknown_count FROM test_user_usage_totals")
         .fetch_one(db.store.pool())
         .await
         .unwrap();
@@ -2060,7 +2062,7 @@ async fn immutable_snapshots_dispatch_facts_and_pause_owner_fk_are_real_sql() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn actual_budget_and_rate_denials_are_not_dispatch_and_free_count_is_independent() {
     let h = Harness::new().await;
-    sqlx::query("UPDATE gw_policies SET budget_limit_usd=gw_amount('0.000000000000'),count_rpm_limit=1 WHERE principal_id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_limit_usd=gw_amount('0.000000000000'),count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     let r = h.request("/v1/messages", BODY).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.headers()["x-gateway-error-code"], "budget_exhausted");
@@ -2178,10 +2180,10 @@ async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_
             .fetch_one(db.store.pool())
             .await
             .unwrap();
-        assert_eq!(n, 9);
+        assert_eq!(n, 10);
         if future {
             sqlx::query(
-                "INSERT INTO gw_schema_migrations VALUES(10,decode(repeat('00',32),'hex'))",
+                "INSERT INTO gw_schema_migrations VALUES(11,decode(repeat('00',32),'hex'))",
             )
             .execute(db.store.pool())
             .await
@@ -2282,7 +2284,7 @@ async fn free_count_ignores_generation_tpm_reserved_budget_unknown_and_safety_on
             .status(),
         StatusCode::OK
     );
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('0.000000000000'),tpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('0.000000000000'),tpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     sqlx::query("UPDATE gw_principals SET inference_paused_at=clock_timestamp(),inference_pause_reason='amount_overflow',inference_pause_request_id=(SELECT id FROM gw_requests WHERE principal_id=$1 LIMIT 1),inference_safety_version=inference_safety_version+1 WHERE id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     h.provider
         .set(
@@ -2311,7 +2313,7 @@ async fn free_count_ignores_generation_tpm_reserved_budget_unknown_and_safety_on
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.headers()["x-gateway-error-code"], "rate_limited");
     assert_eq!(h.provider.calls.lock().await.len(), 2);
-    let b=sqlx::query("SELECT b.budget_mode,b.reservation_usd::text AS reserved,b.policy_snapshot FROM gw_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='count_tokens'").fetch_one(h.db.store.pool()).await.unwrap();
+    let b=sqlx::query("SELECT b.budget_mode,b.reservation_usd::text AS reserved,b.policy_snapshot FROM test_user_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='count_tokens'").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(b.get::<String, _>("budget_mode"), "reserved");
     assert_eq!(b.get::<String, _>("reserved"), "0.000000000000");
     let p: serde_json::Value = b.get("policy_snapshot");
@@ -2436,7 +2438,7 @@ async fn native_actual_model_alias_is_explicit_not_a_provider_route() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn malformed_nonstream_and_response_limit_do_not_promote_early_usage() {
     for (body,code) in [(Bytes::from_static(br#"{"type":"message","role":"assistant","model":"synthetic-text","content":[],"usage":{"input_tokens":100,"output_tokens":20}"#),"upstream_protocol_error"),(Bytes::from_static(br#"{"usage":{"input_tokens":100,"output_tokens":20},"type":"message","role":"assistant","model":"synthetic-text","content":[],"stop_reason":"end_turn"} null"#),"upstream_protocol_error"),(Bytes::from_static(br#"{"usage":{"input_tokens":100,"output_tokens":20},"type":"message","role":"assistant","model":"synthetic-text","content":[{"type":"text","text":"x","text":"y"}],"stop_reason":"end_turn"}"#),"upstream_protocol_error"),(Bytes::from_static(br#"{"type":"message","role":"assistant","model":"synthetic-text","content":[],"usage":{"input_tokens":100,"output_tokens":20}}"#),"upstream_protocol_error"),(Bytes::from(vec![b'a';16*1024*1024+1]),"upstream_response_too_large")] {
-        let h=Harness::new().await;h.provider.set(StatusCode::OK,HeaderMap::from_iter([("content-type".parse().unwrap(),"application/json".parse().unwrap())]),body).await;let r=h.request("/v1/messages",BODY).send().await.unwrap();assert_eq!(r.status(),StatusCode::BAD_GATEWAY);assert_eq!(r.headers()["x-gateway-error-code"],code);assert_eq!(r.headers()["x-should-retry"],"false");let n:i64=sqlx::query_scalar("SELECT unknown_count FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();assert_eq!(n,1);assert_eq!(h.provider.calls.lock().await.len(),1);
+        let h=Harness::new().await;h.provider.set(StatusCode::OK,HeaderMap::from_iter([("content-type".parse().unwrap(),"application/json".parse().unwrap())]),body).await;let r=h.request("/v1/messages",BODY).send().await.unwrap();assert_eq!(r.status(),StatusCode::BAD_GATEWAY);assert_eq!(r.headers()["x-gateway-error-code"],code);assert_eq!(r.headers()["x-should-retry"],"false");let n:i64=sqlx::query_scalar("SELECT unknown_count FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();assert_eq!(n,1);assert_eq!(h.provider.calls.lock().await.len(),1);
         let id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM gw_requests WHERE principal_id=$1").bind(h.principal).fetch_one(h.db.store.pool()).await.unwrap();
         assert_first_usage_event_kind(h.db.store.pool(), id, "partial").await;
         h.close().await;
@@ -2676,7 +2678,7 @@ async fn count_response_obeys_smaller_profile_and_default_limits_on_both_framing
         let facts: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id WHERE r.accounting_state='settled' AND r.cost_usd=0 AND e.normalized_usage->>'source'='profile_no_charge' AND e.normalized_usage->>'input_tokens'='0' AND e.normalized_usage->>'output_tokens'='0'").fetch_one(h.db.store.pool()).await.unwrap();
         assert_eq!(facts, 4);
         let unknown: i64 =
-            sqlx::query_scalar("SELECT sum(unknown_count)::bigint FROM gw_usage_totals")
+            sqlx::query_scalar("SELECT sum(unknown_count)::bigint FROM test_user_usage_totals")
                 .fetch_one(h.db.store.pool())
                 .await
                 .unwrap();
@@ -2731,26 +2733,28 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
                 Finalized::Noop
             );
             let value: i64 = sqlx::query_scalar(&if field == "settled_tokens" {
-                "SELECT settled_tokens FROM gw_rate_windows".into()
+                "SELECT settled_tokens FROM test_user_rate_windows".into()
             } else {
-                format!("SELECT {field} FROM gw_usage_totals")
+                format!("SELECT {field} FROM test_user_usage_totals")
             })
             .fetch_one(db.store.pool())
             .await
             .unwrap();
             assert_eq!(value, if overflow { initial } else { i64::MAX });
             if carried && field != "settled_tokens" {
-                let carried_value: i64 =
-                    sqlx::query_scalar(&format!("SELECT carried_{field} FROM gw_usage_totals"))
-                        .fetch_one(db.store.pool())
-                        .await
-                        .unwrap();
-                assert_eq!(carried_value, initial, "finalizer rewrote carried counter");
-            }
-            let unknown: i64 = sqlx::query_scalar("SELECT unknown_count FROM gw_usage_totals")
+                let carried_value: i64 = sqlx::query_scalar(&format!(
+                    "SELECT carried_{field} FROM test_user_usage_totals"
+                ))
                 .fetch_one(db.store.pool())
                 .await
                 .unwrap();
+                assert_eq!(carried_value, initial, "finalizer rewrote carried counter");
+            }
+            let unknown: i64 =
+                sqlx::query_scalar("SELECT unknown_count FROM test_user_usage_totals")
+                    .fetch_one(db.store.pool())
+                    .await
+                    .unwrap();
             assert_eq!(unknown, i64::from(overflow));
             let audit: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_audit_events")
                 .fetch_one(db.store.pool())
@@ -3219,7 +3223,7 @@ async fn anthropic_sdk_streaming_alias_and_native_error_have_one_attempt_and_rea
 async fn s4_reserved_last_budget_is_atomic() {
     let db = postgres::TestDb::new().await;
     let id = finance::human(db.store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('0.004296000000') WHERE principal_id=$1").bind(id).execute(db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('0.004296000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
     let current = finance::current(db.store.pool(), id).await;
     let ledger = Arc::new(PgLedger::new(
         db.store.clone(),
@@ -3251,10 +3255,11 @@ async fn s4_reserved_last_budget_is_atomic() {
         matches!(one, Err(LedgerError::BudgetExhausted))
             || matches!(two, Err(LedgerError::BudgetExhausted))
     );
-    let reserved: String = sqlx::query_scalar("SELECT reserved_usd::text FROM gw_usage_totals")
-        .fetch_one(db.store.pool())
-        .await
-        .unwrap();
+    let reserved: String =
+        sqlx::query_scalar("SELECT reserved_usd::text FROM test_user_usage_totals")
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
     assert_eq!(reserved, "0.004296000000");
     let (winner, permit) = match (one, two) {
         (Ok(permit), Err(_)) => (a.id, permit),
@@ -3489,7 +3494,7 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
                 row,
                 ("finished".into(), code.into(), "unknown".into(), true)
             );
-            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM gw_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(
                 held,
                 ("0.000000000000".into(), "0.000000000000".into(), 0, 0)
@@ -3571,7 +3576,7 @@ async fn s9_finalization_h0_failure_is_503_pending_not_unknown_or_success() {
     let body: serde_json::Value = serde_json::from_slice(&r.bytes().await.unwrap()).unwrap();
     assert_eq!(body["error"]["type"], "overloaded_error");
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,i64,i64,bool)=sqlx::query_as("SELECT phase,accounting_state,cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events),(SELECT COALESCE(sum(unknown_count),0)::bigint FROM gw_usage_totals),(SELECT bool_and(remaining_reservation_usd=0 AND remaining_reserved_tokens=0) FROM gw_request_budgets) FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let row:(String,String,bool,i64,i64,bool)=sqlx::query_as("SELECT phase,accounting_state,cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events),(SELECT COALESCE(sum(unknown_count),0)::bigint FROM test_user_usage_totals),(SELECT bool_and(remaining_reservation_usd=0 AND remaining_reserved_tokens=0) FROM test_user_request_budgets) FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(
         row,
         ("dispatching".into(), "pending".into(), true, 0, 0, true)
@@ -3641,12 +3646,12 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
             Some("0.000140000000".into())
         )
     );
-    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM gw_request_budgets b JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(
         budget,
         ("0.000000000000".into(), 0, 0, "0.000140000000".into(), 1)
     );
-    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(final_state, ("failed".into(), "provider".into(), 120));
     h.provider
         .set(
@@ -3711,7 +3716,7 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
     stopped.await.unwrap();
     drop(tx);
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(
         row,
         (

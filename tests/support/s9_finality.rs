@@ -69,7 +69,7 @@ async fn cancellation(complete: bool, shutdown: bool) {
                 .await
                 .unwrap();
             let row:(String,String,Option<String>,bool,String)=sqlx::query_as("SELECT accounting_state,reason_code,cost_usd::text,execution_stopped_at IS NOT NULL,outcome FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
-            let budget:(String,i64,i64,i64,i64,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final' AND normalized_usage->>'source'='provider'),w.reserved_tokens,w.settled_tokens FROM gw_request_budgets b JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN gw_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+            let budget:(String,i64,i64,i64,i64,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final' AND normalized_usage->>'source'='provider'),w.reserved_tokens,w.settled_tokens FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
             let calls = h.provider.calls.lock().await.len();
             let resources = h.runtime.request_resources();
             let available = h.runtime.available_inference();
@@ -189,7 +189,7 @@ async fn s9_failure_after_final_discards_snapshot_before_supervised_finalization
                 .unwrap();
             drop(tx);
             h.runtime.wait_requests().await;
-            let row:(String,bool,i64,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+            let row:(String,bool,i64,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
             let next = h.request(path, body).send().await.unwrap();
             let next_status = next.status();
             let _ = next.bytes().await;
@@ -249,7 +249,7 @@ async fn s9_incomplete_native_error_before_cancel_invalidates_success_without_cl
         stopped.await.unwrap();
         drop(tx);
         h.runtime.wait_requests().await;
-        let row:(String,String,String,bool,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.outcome,r.reason_code,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id").fetch_one(h.db.store.pool()).await.unwrap();
+        let row:(String,String,String,bool,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.outcome,r.reason_code,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").fetch_one(h.db.store.pool()).await.unwrap();
         let next = h.request(path, body).send().await.unwrap();
         let status = next.status();
         let _ = next.bytes().await;

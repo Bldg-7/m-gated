@@ -1,4 +1,6 @@
 import { test, expect, type BrowserContext } from '@playwright/test';
+// 화면의 시각은 브라우저 시간대로 보인다. 시험마다 같은 값이 보이도록 UTC로 고정한다.
+test.use({ timezoneId: 'UTC' });
 const base = process.env.E2E_BASE_URL!; const token = process.env.E2E_TOKEN!; const cookie = process.env.E2E_COOKIE!;
 async function authenticate(context: BrowserContext) { await context.addCookies([{ name: cookie, value: token, url: base, httpOnly: true, sameSite: 'Lax' }]); }
 test.beforeEach(async ({ context }) => {
@@ -75,7 +77,7 @@ test('401 refresh is bounded and stale usage never re-enters after logout', asyn
 test('retention 409 removes previous figures without silently dropping filters', async ({ page, context }) => {
   await authenticate(context); await page.goto('/dashboard/'); await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   await page.route(`${base}/api/usage?**`, route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'usage_detail_unavailable', details: { detail_available_from: '2026-01-01T00:00:00Z' } } }) }));
-  await page.getByLabel('모델', { exact: true }).fill('old-model'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작: 2026-01-01'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0); expect(await page.getByText('0.000000000001 USD', { exact: true }).count()).toBe(0); await expect(page.getByLabel('모델', { exact: true })).toHaveValue('old-model');
+  await page.getByLabel('모델', { exact: true }).fill('old-model'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작: 2026-01-01 00:00'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0); expect(await page.getByText('0.000000000001 USD', { exact: true }).count()).toBe(0); await expect(page.getByLabel('모델', { exact: true })).toHaveValue('old-model');
 });
 test('cross_tab_logout_latch_blocks_visibility_pageshow_and_old_cookie_until_explicit_login', async ({ page, context }) => {
   await authenticate(context); await page.goto('/dashboard/');
@@ -230,7 +232,8 @@ test('s9_csp_blocks_inline_external_scripts_and_forms_have_keyboard_names', asyn
   expect(await page.evaluate(() => Reflect.get(window, '__s9InlineExecuted'))).toBeUndefined();
   expect(await page.evaluate(() => document.documentElement.lang)).toBe('ko');
   expect(await page.locator('main').count()).toBe(1);
-  const unnamed = await page.locator('main input, main select, main textarea').evaluateAll(elements => elements.filter(element => {
+  // 폼 전송용 숨은 입력칸과 화면 밖 검사용 입력칸은 사용자가 다루지 않으므로 제외하고, Select 칸(combobox)은 포함한다.
+  const unnamed = await page.locator('main input:not([type="hidden"]):not([aria-hidden="true"]), main textarea, main [role="combobox"]').evaluateAll(elements => elements.filter(element => {
     const input = element as HTMLInputElement;
     return !(input.labels?.length || input.getAttribute('aria-label') || input.getAttribute('aria-labelledby'));
   }).length);

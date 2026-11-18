@@ -12,6 +12,7 @@ import { ModelsScreen } from './features/admin/models';
 import { SettingsScreen } from './features/admin/settings';
 import { isScreen, Link, useRoute, type Screen } from './lib/router';
 import { changeLanguage, languages, msgid } from './lib/i18n';
+import { browserTimeZone, formatTime, timeBasis, useTimeBasis } from './lib/time';
 import { Pill, Select } from './ui/ui';
 export function UsageScreen({ admin = false }: { admin?: boolean }) {
   const { t } = useTranslation();
@@ -24,7 +25,7 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
     let current = true; setUsage(null); setError(null); setLoading(true);
     // 같은 사용자의 refresh 동안 App이 이 화면을 유지하며 Session만 읽기를 재시도한다.
     // 그 밖의 인증 변경은 App의 unmount/key 변경으로 이전 결과를 폐기한다.
-    void session.read<Usage>(`/api/${admin ? 'admin/' : ''}usage?${query}`).then(data => { if (current) { setUsage(data); setLoading(false); } }).catch(e => { if (!current || e instanceof StaleResponse) return; setUsage(null); setLoading(false); setError(e instanceof ApiError && e.status === 409 ? t('상세 사용량을 제공할 수 없습니다. 상세 가용 시작: {{from}}', { from: String(e.details.detail_available_from ?? t('미확인')) }) : e instanceof ApiError && e.status === 403 ? t('현재 권한으로 조회할 수 없습니다.') : t('사용량을 가져올 수 없습니다. 다시 조회하세요.')); });
+    void session.read<Usage>(`/api/${admin ? 'admin/' : ''}usage?${query}`).then(data => { if (current) { setUsage(data); setLoading(false); } }).catch(e => { if (!current || e instanceof StaleResponse) return; setUsage(null); setLoading(false); setError(e instanceof ApiError && e.status === 409 ? t('상세 사용량을 제공할 수 없습니다. 상세 가용 시작: {{from}}', { from: typeof e.details.detail_available_from === 'string' ? formatTime(e.details.detail_available_from) : t('미확인') }) : e instanceof ApiError && e.status === 403 ? t('현재 권한으로 조회할 수 없습니다.') : t('사용량을 가져올 수 없습니다. 다시 조회하세요.')); });
     return () => { current = false; };
   }, [query, revision]);
   const submit = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const data = new FormData(event.currentTarget); const q = new URLSearchParams(); const from = String(data.get('from') ?? ''); const to = String(data.get('to') ?? ''); if (Boolean(from) !== Boolean(to)) { setUsage(null); setError(t('시작과 종료를 모두 지정하세요.')); return; } if (from && to) { q.set('from', new Date(from).toISOString()); q.set('to', new Date(to).toISOString()); } for (const name of [...(admin ? ['principal_id'] : []), 'provider', 'model', 'key_id', 'group_by']) { const value = String(data.get(name) ?? ''); if (value) q.set(name, value); } setFilters(q.toString()); setQuery(q.toString()); setRevision(v => v + 1); };
@@ -35,11 +36,11 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
     <form onSubmit={submit} key={auth.epoch} aria-label={t('사용량 조회')} className="filters">
       <label>{t('시작 (현지 시각)')}<input type="datetime-local" name="from" defaultValue={localTime(selected.get('from'))} /></label>
       <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" defaultValue={localTime(selected.get('to'))} /></label>
-      <div className="field"><label htmlFor="usage-provider">Provider</label><Select id="usage-provider" name="provider" defaultValue={selected.get('provider') ?? ''}><option value="">{t('전체')}</option><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option></Select></div>
+      <div className="field"><label htmlFor="usage-provider">Provider</label><Select id="usage-provider" name="provider" defaultValue={selected.get('provider') ?? ''} options={[{ value: '', label: t('전체') }, { value: 'anthropic', label: 'Anthropic' }, { value: 'openai', label: 'OpenAI' }, { value: 'deepseek', label: 'DeepSeek' }]} /></div>
       <label>{t('모델')}<input name="model" maxLength={200} defaultValue={selected.get('model') ?? ''} /></label>
       {admin && <label>{t('사용자 ID')}<input name="principal_id" className="mono" spellCheck={false} defaultValue={selected.get('principal_id') ?? ''} /></label>}
       <label>{t('키 ID')}<input name="key_id" className="mono" spellCheck={false} defaultValue={selected.get('key_id') ?? ''} /></label>
-      <div className="field"><label htmlFor="usage-group">{t('그룹')}</label><Select id="usage-group" name="group_by" defaultValue={selected.get('group_by') ?? ''}><option value="">{t('없음')}</option><option value="provider">Provider</option><option value="model">{t('모델')}</option><option value="key">{t('키')}</option></Select></div>
+      <div className="field"><label htmlFor="usage-group">{t('그룹')}</label><Select id="usage-group" name="group_by" defaultValue={selected.get('group_by') ?? ''} options={[{ value: '', label: t('없음') }, { value: 'provider', label: 'Provider' }, { value: 'model', label: t('모델') }, { value: 'key', label: t('키') }]} /></div>
       <div className="actions"><button className="btn-primary" disabled={loading} aria-busy={loading || undefined} type="submit">{t('조회')}</button></div>
     </form>
     {loading && <p role="status">{t('사용량 조회 중…')}</p>}{error && <p role="alert">{error}</p>}{usage && <><UsageView usage={usage} />{usage.buckets.next_cursor && <div className="actions"><button onClick={() => setQuery(`cursor=${encodeURIComponent(usage.buckets.next_cursor!)}`)}>{t('다음 그룹 페이지')}</button></div>}</>}
@@ -47,14 +48,14 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
 }
 const pages: Record<Screen, { nav: string; title: string; lead?: string }> = {
   '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 관측한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
-  '/dashboard/keys': { nav: msgid('내 키'), title: msgid('내 API 키') },
+  '/dashboard/keys': { nav: msgid('내 가상 키'), title: msgid('내 가상 키') },
   '/dashboard/admin/principals': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 · 정책 · 키'), lead: msgid('사용자와 서비스 계정의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
   '/dashboard/admin/principals/detail': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 상세'), lead: msgid('사용자 하나의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
   '/dashboard/admin/usage': { nav: msgid('전체 사용량'), title: msgid('전체 사용량'), lead: msgid('사용자·키별 사용량을 조회합니다. 사용자를 지정하지 않은 전체 합계에는 예산 잔액이 없습니다.') },
   '/dashboard/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
   '/dashboard/admin/models': { nav: msgid('모델·가격'), title: msgid('모델 · 가격 카탈로그'), lead: msgid('공급사 모델과 가격을 공개 가격 목록 models.dev 에서 불러옵니다. 동기화는 변경안만 만들고, 관리자가 이전 값과 비교해 승인해야 적용됩니다. 이미 기록된 요청의 금액은 바뀌지 않습니다.') },
   '/dashboard/admin/settings': { nav: msgid('설정'), title: msgid('게이트웨이 설정'), lead: msgid('게이트웨이 전체에 한 번 정하는 설정입니다. 지금은 월 예산의 기준 시간대를 정합니다.') },
-  '/dashboard/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 회사 키'), lead: msgid('Provider마다 회사 키를 여러 개 등록하고, 키마다 알아볼 이름을 붙입니다. 가상 키는 발급할 때 Provider별로 회사 키 하나에 연결되고, 따로 고르지 않으면 그 Provider의 기본 키에 연결됩니다. 키는 DB에 암호화해 저장하며, 저장 전에 Provider의 모델 목록 API로 실제 확인을 1회 거칩니다. 저장한 키는 다시 볼 수 없고 끝 4자리만 표시합니다. 다른 서버 인스턴스에는 상태 점검 주기(수 초) 안에 반영되고, 진행 중인 요청은 시작할 때의 키를 끝까지 씁니다.') },
+  '/dashboard/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 키'), lead: msgid('Provider마다 Provider 키를 여러 개 등록하고, 키마다 알아볼 이름을 붙입니다. 사용자는 관리자가 인가한 Provider 키만 쓸 수 있고, 가상 키는 발급할 때 Provider마다 인가된 Provider 키 하나에 연결됩니다. 추론 요청은 가상 키로만 보냅니다. 키는 DB에 암호화해 저장하며, 저장 전에 Provider의 모델 목록 API로 실제 확인을 1회 거칩니다. 저장한 키는 다시 볼 수 없고 끝 4자리만 표시합니다. 다른 서버 인스턴스에는 상태 점검 주기(수 초) 안에 반영되고, 진행 중인 요청은 시작할 때의 키를 끝까지 씁니다.') },
 };
 /** 서버가 내준 경로를 화면으로. 등록되지 않은 /dashboard/admin/* 는 전체 사용량, 그 밖은 내 사용량(기존 동작과 같음). */
 function screenOf(path: string): Screen {
@@ -67,6 +68,18 @@ function LanguageSwitch() {
     {languages.map(language => <label key={language.code} lang={language.code}><input type="radio" name="language" value={language.code} checked={i18n.language === language.code} onChange={() => changeLanguage(language.code)} />{language.label}</label>)}
   </fieldset>;
 }
+/** 화면의 모든 시각을 브라우저 시간과 UTC 사이에서 바꾼다. 입력칸(현지 시각)에는 영향이 없다. */
+function TimeSwitch() {
+  const { t } = useTranslation();
+  const basis = useTimeBasis();
+  const hint = basis === 'utc' ? t('브라우저 시간으로 보기') : t('UTC로 보기');
+  return <div className="time-switch">
+    <button type="button" className="btn-sm" aria-label={hint} title={hint} onClick={() => timeBasis.set(basis === 'utc' ? 'browser' : 'utc')}>
+      <svg className="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.8V8l2.2 1.4" /></svg>
+    </button>
+    <span>{basis === 'utc' ? 'UTC' : t('브라우저 시간({{zone}})', { zone: browserTimeZone() })}</span>
+  </div>;
+}
 export function App() {
   const { t } = useTranslation();
   const auth = useSyncExternalStore(session.subscribe, session.snapshot);
@@ -74,7 +87,7 @@ export function App() {
   if (auth.me) principal.current = auth.me.principal.id; else if (!auth.refreshing) principal.current = null;
   useEffect(() => {
     const detach = session.attach();
-    // bfcache가 DOM을 동결하기 전에 원문/폼을 동기적으로 제거한다.
+    // bfcache가 DOM을 동결하기 전에 발급된 키/폼을 동기적으로 제거한다.
     const pagehide = () => flushSync(() => session.clear());
     window.addEventListener('pagehide', pagehide);
     void session.validate();
@@ -104,7 +117,7 @@ export function App() {
         <div className="nav-group"><span className="nav-label">{t('내 계정')}</span>{link('/dashboard/')}{link('/dashboard/keys')}</div>
         {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/dashboard/admin/principals')}{link('/dashboard/admin/usage')}{link('/dashboard/admin/requests')}{link('/dashboard/admin/credentials')}{link('/dashboard/admin/models')}{link('/dashboard/admin/settings')}</div>}
       </nav>
-      <LanguageSwitch />
+      <div className="sidebar-foot"><TimeSwitch /><LanguageSwitch /></div>
     </aside>
     <main className="content"><div className="page">
       <header className="page-header"><h1 className="page-title" tabIndex={-1} ref={title}>{pageTitle}</h1>{page.lead && <p className="lead">{t(page.lead)}</p>}</header>

@@ -1,4 +1,5 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
+import { ensureProviderKey, optionNames, pickOption } from './select';
 test.use({ launchOptions: { ignoreDefaultArgs: ['--disable-back-forward-cache'] } });
 const transport = process.env.E2E_BASE_URL!;
 // 가상 HTTPS origin은 브라우저 interception에서 전용 loopback Rust로만 전달한다.
@@ -23,7 +24,7 @@ async function open(page: Page, context: BrowserContext) {
     if (route !== 'other') test.info().annotations.push({ type: 'key-http', description: `${route}:${response.status()}` });
   });
   await authenticate(context); phase('cookie'); await page.goto(`${origin}/dashboard/keys`); phase('shell');
-  await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible(); phase('heading');
+  await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible(); phase('heading');
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled(); phase('list');
   const grantState = await page.evaluate(async () => { const me = await (await fetch('/api/me')).json(); return { count: me.grants.length, allowed: me.grants.some((g: { provider: string; model: string; capabilities: string[] }) => g.provider === 'anthropic' && g.model === 'synthetic-text' && g.capabilities.includes('messages')) }; });
   const boxes = page.getByRole('checkbox'); const named = page.getByLabel('anthropic / synthetic-text / messages', { exact: true });
@@ -31,15 +32,17 @@ async function open(page: Page, context: BrowserContext) {
 }
 async function prepare(page: Page, name: string, preset = 'unlimited') {
   await page.getByLabel('키 이름', { exact: true }).fill(name);
-  await page.getByLabel('유효기간', { exact: true }).selectOption(preset);
+  await pickOption(page.getByLabel('유효기간', { exact: true }), labels[presets.indexOf(preset)]);
   await page.getByLabel('anthropic / synthetic-text / messages', { exact: true }).check();
+  // 고른 API의 Provider마다 나에게 인가된 Provider 키가 하나 있어야 발급할 수 있다.
+  await ensureProviderKey(page.getByRole('form', { name: '가상 키 발급', exact: true }));
   await page.getByRole('button', { name: '발급 내용 확인', exact: true }).click(); phase('prepared');
 }
 async function issue(page: Page, name: string, preset = 'unlimited') {
   await prepare(page, name, preset); await page.getByRole('button', { name: '발급 확인', exact: true }).click();
-  await expect(page.getByRole('region', { name: '발급 원문', exact: true })).toBeVisible(); phase('issued');
+  await expect(page.getByRole('dialog', { name: '발급된 키', exact: true })).toBeVisible(); phase('issued');
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
-  return (await page.getByRole('region', { name: '발급 원문', exact: true }).locator('code').textContent())!;
+  return (await page.getByRole('dialog', { name: '발급된 키', exact: true }).locator('code').textContent())!;
 }
 async function revoke(page: Page, name: string) {
   await page.getByRole('button', { name: `${name} 회수`, exact: true }).click();
@@ -61,8 +64,9 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
   let writes = 0, deletes = 0;
   page.on('request', request => { if (request.url() === `${origin}/api/keys` && request.method() === 'POST') writes++; if (request.method() === 'DELETE') { deletes++; expect(request.postData()).toBeNull(); expect(request.headers()['x-csrf-token']).toBeTruthy(); } });
   await open(page, context);
-  expect(await page.getByLabel('유효기간', { exact: true }).inputValue()).toBe('');
-  expect(await page.getByLabel('유효기간', { exact: true }).locator('option').allTextContents()).toEqual(['선택하세요', ...labels]);
+  await expect(page.getByLabel('유효기간', { exact: true })).toHaveAttribute('data-value', '');
+  await expect(page.getByLabel('유효기간', { exact: true })).toHaveText('선택하세요');
+  expect(await optionNames(page.getByLabel('유효기간', { exact: true }))).toEqual(labels);
   await page.getByLabel('키 이름', { exact: true }).fill('duration-required');
   await page.getByRole('button', { name: '발급 내용 확인', exact: true }).focus(); await page.keyboard.press('Enter');
   expect(writes).toBe(0);
@@ -80,13 +84,13 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
     expect(JSON.stringify(metadata).includes(secret)).toBe(false);
     expect(consoleText.some(text => text.includes(secret))).toBe(false);
     expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
-    await page.getByRole('button', { name: '원문 닫기', exact: true }).focus(); await page.keyboard.press('Enter');
+    await page.getByRole('button', { name: '닫기', exact: true }).focus(); await page.keyboard.press('Enter');
     expect(await page.locator('main').textContent()).not.toContain(secret);
   }
   expect(writes).toBe(5);
   await revoke(page, 'duration-unlimited'); expect(deletes).toBe(1);
-  await page.reload(); await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
-  expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+  await page.reload(); await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
+  expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
 });
 
 test('lost_issue_response_links_command_without_replay_then_user_revokes_and_reissues', async ({ page, context }) => {
@@ -98,13 +102,15 @@ test('lost_issue_response_links_command_without_replay_then_user_revokes_and_rei
   });
   await prepare(page, 'lost-response'); await page.getByRole('button', { name: '발급 확인', exact: true }).click();
   await expect(page.getByRole('region', { name: '명령 결과 확인', exact: true })).toContainText('연결된 키:');
-  expect(writes).toBe(1); expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+  expect(writes).toBe(1); expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
   await revoke(page, 'lost-response'); expect(writes).toBe(1);
   await page.unroute(`${origin}/api/keys`);
   await issue(page, 'explicit-replacement');
+  // 발급된 키 창이 열려 있는 동안 뒤 화면은 막혀 있다(inert). 닫은 뒤에 이동한다.
+  await page.getByRole('button', { name: '닫기', exact: true }).click();
   await page.getByRole('link', { name: '내 사용량', exact: true }).click();
   await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toBeVisible();
-  expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+  expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
 });
 
 test('key_read_refresh_once_then_cookie_write401_never_refreshes_or_replays', async ({ page, context }) => {
@@ -118,13 +124,13 @@ test('key_read_refresh_once_then_cookie_write401_never_refreshes_or_replays', as
   const filtered = `${origin}/api/keys?status=revoked`;
   page.on('response', response => { if (response.url() === filtered) reads.push(response.status()); });
   const recovered = page.waitForResponse(response => response.url() === filtered && response.status() === 200);
-  await page.getByLabel('키 상태', { exact: true }).selectOption('revoked');
+  await pickOption(page.getByLabel('키 상태', { exact: true }), '회수');
   await page.getByRole('button', { name: '키 조회', exact: true }).click();
   await recovered;
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
-  await expect(page.getByLabel('키 상태', { exact: true })).toHaveValue('revoked');
+  await expect(page.getByLabel('키 상태', { exact: true })).toHaveAttribute('data-value', 'revoked');
   expect(reads).toEqual([401, 200]);
-  await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible(); expect(refresh).toBe(1);
+  await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible(); expect(refresh).toBe(1);
   await page.route(`${origin}/api/keys`, async route => {
     if (route.request().method() !== 'POST') return route.fallback();
     writes++;
@@ -136,14 +142,15 @@ test('key_read_refresh_once_then_cookie_write401_never_refreshes_or_replays', as
   await expect(page.getByRole('alert')).toContainText('쓰기는 재전송하지 않았습니다.');
   expect(writes).toBe(1); expect(refresh).toBe(1);
   expect(await page.getByLabel('키 이름', { exact: true }).count()).toBe(0);
-  expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+  expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
 });
 
 test('key_secret_and_forms_disappear_on_bfcache_broadcast_identity_and_cross_tab_logout', async ({ page, context }) => {
   await open(page, context);
   for (const mode of ['bfcache', 'broadcast', 'identity'] as const) {
     const secret = await issue(page, `clear-${mode}`);
-    await page.getByLabel('키 이름', { exact: true }).fill('private-form');
+    // 발급된 키 창이 열려 있어 뒤 폼은 막혀 있다. 폼에 남은 키 이름이 함께 지워지는지 본다.
+    await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue(`clear-${mode}`);
     const entered = barrier(), release = barrier();
     await page.route(`${origin}/api/me`, async route => { entered.release(); await release.promise; await route.fallback(); });
     try {
@@ -156,9 +163,9 @@ test('key_secret_and_forms_disappear_on_bfcache_broadcast_identity_and_cross_tab
       expect(await page.locator('main').textContent()).not.toContain(secret);
       expect(await page.getByLabel('키 이름', { exact: true }).count()).toBe(0);
     } finally { release.release(); }
-    await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
     await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('');
-    expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+    expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
     await page.unroute(`${origin}/api/me`);
     if (mode === 'identity') {
       await authenticate(context); await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
@@ -167,7 +174,7 @@ test('key_secret_and_forms_disappear_on_bfcache_broadcast_identity_and_cross_tab
   }
   const secret = await issue(page, 'clear-logout');
   const other = await context.newPage(); await other.goto(`${origin}/dashboard/keys`);
-  await expect(other.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
+  await expect(other.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
   await other.getByRole('button', { name: '로그아웃', exact: true }).click({ noWaitAfter: true });
   await expect(page.getByRole('alert')).toHaveText('로그아웃되었습니다.');
   expect(await page.locator('main').textContent()).not.toContain(secret);
@@ -185,10 +192,10 @@ test('delayed_committed_issue_response_never_restores_secret_after_epoch_change'
   try {
     await prepare(page, 'late-committed'); await page.getByRole('button', { name: '발급 확인', exact: true }).click(); await entered.promise;
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
-    await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
     release.release();
     await expect(page.getByRole('heading', { name: 'late-committed', exact: true })).toBeVisible();
-    expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+    expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
     expect(writes).toBe(1); expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
   } finally { release.release(); }
 });
@@ -199,22 +206,22 @@ test.describe('actual_navigation_lifecycle', () => {
     await page.exposeBinding('__keyLifecycle', (_, state) => { events.push(state); });
     await page.addInitScript(() => {
       window.addEventListener('pageshow', event => {
-        Reflect.get(window, '__keyLifecycle')({ event: 'show', persisted: event.persisted, secret: !!document.querySelector('[aria-label="발급 원문"]'), form: !!document.querySelector('input[name="name"]') });
+        Reflect.get(window, '__keyLifecycle')({ event: 'show', persisted: event.persisted, secret: !!document.querySelector('.secret-value'), form: !!document.querySelector('input[name="name"]') });
       });
     });
     await open(page, context); const secret = await issue(page, 'real-navigation');
-    await page.getByLabel('키 이름', { exact: true }).fill('private-before-freeze');
+    await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('real-navigation');
     // App의 pagehide listener 뒤에 설치하여 동기 폐기 완료 시점만 관측한다.
     await page.evaluate(() => {
       window.addEventListener('pagehide', event => {
-        Reflect.get(window, '__keyLifecycle')({ event: 'hide', persisted: event.persisted, secret: !!document.querySelector('[aria-label="발급 원문"]'), form: !!document.querySelector('input[name="name"]') });
+        Reflect.get(window, '__keyLifecycle')({ event: 'hide', persisted: event.persisted, secret: !!document.querySelector('.secret-value'), form: !!document.querySelector('input[name="name"]') });
       });
     });
     // 대시보드 링크는 SPA 이동이라 문서를 떠나지 않는다. 실제 문서 이동(pagehide·bfcache)은 주소로 직접 연다.
     await page.goto(`${origin}/dashboard/`);
     await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toBeVisible();
     await page.goBack();
-    await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
     await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('');
     expect(await page.locator('main').textContent()).not.toContain(secret);
     expect(events.filter(event => event.event === 'hide').length).toBeGreaterThan(0);
@@ -226,19 +233,20 @@ test.describe('actual_navigation_lifecycle', () => {
   test('spa_navigation_unmounts_key_and_back_never_restores_secret', async ({ page, context }) => {
     let hides = 0;
     await open(page, context); const secret = await issue(page, 'spa-navigation');
-    await page.getByLabel('키 이름', { exact: true }).fill('private-before-spa-link');
+    await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('spa-navigation');
     await page.evaluate(() => { window.addEventListener('pagehide', () => { Reflect.set(window, '__spaHides', (Reflect.get(window, '__spaHides') ?? 0) + 1); }); });
-    await page.getByRole('link', { name: '내 사용량', exact: true }).click();
+    // 발급된 키 창이 뒤 화면을 막고 있으므로 링크 대신 SPA 주소 이동(history + popstate)으로 화면을 바꾼다.
+    await page.evaluate(() => { history.pushState(null, '', '/dashboard/'); window.dispatchEvent(new PopStateEvent('popstate')); });
     await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toBeVisible();
     expect(new URL(page.url()).pathname).toBe('/dashboard/');
     hides = await page.evaluate(() => Reflect.get(window, '__spaHides') ?? 0);
     expect(hides).toBe(0);
-    expect(await page.locator('[aria-label="발급 원문"]').count()).toBe(0);
+    expect(await page.locator('.secret-value').count()).toBe(0);
     expect(await page.locator('input[name="name"]').count()).toBe(0);
     expect(await page.locator('main').textContent()).not.toContain(secret);
     await page.goBack();
     expect(new URL(page.url()).pathname).toBe('/dashboard/keys');
-    await expect(page.getByRole('heading', { name: '내 키', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
     // 다시 그려진 키 화면의 목록 조회가 끝난 뒤 확인한다. 조회 중에 시험이 끝나면 전달 중인 요청이 끊겨 실패로 잡힌다.
     await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
     await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('');
@@ -249,7 +257,7 @@ test.describe('actual_navigation_lifecycle', () => {
 
 test('key_revoke409_reloads_server_metadata_before_new_user_confirmation', async ({ page, context }) => {
   await open(page, context); await issue(page, 'cas-revoke');
-  await page.getByRole('button', { name: '원문 닫기', exact: true }).click();
+  await page.getByRole('button', { name: '닫기', exact: true }).click();
   let writes = 0;
   await page.route(`${origin}/api/keys/*`, async route => {
     if (route.request().method() !== 'DELETE') return route.fallback();
@@ -275,7 +283,7 @@ test('lost_delete_response_get_confirms_revoke_before_explicit_replacement', asy
     if (request.method() === 'DELETE') deleteCommands.push(request.headers()['x-gateway-command-id']);
   });
   await issue(page, 'lost-delete-response');
-  await page.getByRole('button', { name: '원문 닫기', exact: true }).click();
+  await page.getByRole('button', { name: '닫기', exact: true }).click();
   let committed = 0, confirmedGet = 0, targetId = '';
   await page.route(url => url.origin === origin && (url.pathname === '/api/keys' || url.pathname.startsWith('/api/keys/')), async route => {
     const request = route.request(), path = new URL(request.url());
@@ -300,11 +308,11 @@ test('lost_delete_response_get_confirms_revoke_before_explicit_replacement', asy
     expect(committed).toBe(1); expect(confirmedGet).toBe(1);
     expect(deleteCommands).toHaveLength(1); expect(postCommands).toHaveLength(1);
     expect(await page.getByRole('region', { name: '명령 결과 확인', exact: true }).count()).toBe(0);
-    expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+    expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
     await prepare(page, 'explicit-after-lost-delete');
     expect(postCommands).toHaveLength(1);
     await page.getByRole('button', { name: '발급 확인', exact: true }).click();
-    await expect(page.getByRole('region', { name: '발급 원문', exact: true })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: '발급된 키', exact: true })).toBeVisible();
     expect(postCommands).toHaveLength(2); expect(new Set(postCommands).size).toBe(2);
     expect(deleteCommands).toHaveLength(1);
   } finally {
@@ -336,6 +344,6 @@ test('s9_real_origin_denial_never_refreshes_or_replays_cookie_write', async ({ p
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
   const after = await page.evaluate(async () => (await (await fetch('/api/keys')).json()).items.length as number);
   expect(after).toBe(before); expect(writes).toBe(1); expect(refresh).toBe(0);
-  expect(await page.getByRole('region', { name: '발급 원문', exact: true }).count()).toBe(0);
+  expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
 });

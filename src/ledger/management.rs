@@ -41,16 +41,17 @@ pub enum ManagementError {
     /// 기본 키이거나 가상 키가 연결된 키라서 옮길 키를 정하지 않고는 해제할 수 없다.
     CredentialInUse {
         bound_keys: i64,
-        default: bool,
     },
     /// 가상 키의 지금 연결이 요청이 가정한 회사 키와 다르다.
     BindingConflict(Option<Uuid>),
     /// 사용자의 회사 키 인가가 그사이 바뀌었다. 지금 인가(회사 키 목록, 기본 키)를 알린다.
-    AuthorizationConflict(Vec<Uuid>, Option<Uuid>),
+    AuthorizationConflict(Vec<Uuid>),
     /// 인가에서 빠지는 회사 키에 이 사용자의 가상 키가 연결돼 있다. 옮길 키나 막기를 골라야 한다.
     AuthorizationInUse(i64),
-    /// 사용자에게 인가되지 않은 회사 키를 골랐다.
+    /// 사용자에게 인가되지 않은 Provider 키를 골랐다.
     CredentialNotAuthorized,
+    /// 가상 키를 발급할 때 허용한 API의 Provider마다 Provider 키를 골라야 한다.
+    CredentialRequired,
     /// 공개 가격 목록을 하나도 받지 못했다.
     CatalogSourcesUnavailable,
     /// 변경안을 만든 뒤 카탈로그가 이미 다른 버전으로 바뀌었다. 다시 동기화해야 한다.
@@ -434,12 +435,12 @@ impl PgIdentityStore {
     }
 }
 
-/// 사용자에게 인가된 회사 키 (Provider, 회사 키, 기본 키 여부). 행이 없는 Provider는 제한이 없다.
+/// 사용자에게 인가된 Provider 키 (Provider, Provider 키).
 async fn principal_credentials(
     c: &mut sqlx::PgConnection,
     principal: Uuid,
-) -> Result<Vec<(crate::config::ProviderId, Uuid, bool)>, sqlx::Error> {
-    Ok(sqlx::query("SELECT provider,credential_id,is_default FROM gw_principal_credentials WHERE principal_id=$1 ORDER BY provider,credential_id")
+) -> Result<Vec<(crate::config::ProviderId, Uuid)>, sqlx::Error> {
+    Ok(sqlx::query("SELECT provider,credential_id FROM gw_principal_credentials WHERE principal_id=$1 ORDER BY provider,credential_id")
         .bind(principal)
         .fetch_all(c)
         .await?
@@ -448,58 +449,23 @@ async fn principal_credentials(
             Some((
                 crate::config::ProviderId::from_name(&r.get::<String, _>("provider"))?,
                 r.get::<Uuid, _>("credential_id"),
-                r.get::<bool, _>("is_default"),
             ))
         })
         .collect())
 }
-/// 가상 키 연결과 사용자 인가를 합쳐 요청이 쓸 회사 키와 막을 Provider를 정한다.
-/// - 인가가 있는 Provider에서 연결된 키가 인가 밖이면 그 Provider는 막는다.
-/// - 인가가 있는 Provider에 연결이 없으면(발급 뒤 등록한 Provider 등) 사용자의 기본 키를 쓴다.
+/// 가상 키 연결 중 키 주인에게 인가된 것만 쓰고, 인가가 해제된 Provider는 막는다.
 fn resolve_credentials(
     bound: Vec<(crate::config::ProviderId, Uuid)>,
-    allowed: &[(crate::config::ProviderId, Uuid, bool)],
+    allowed: &[(crate::config::ProviderId, Uuid)],
 ) -> (
     Vec<(crate::config::ProviderId, Uuid)>,
     Vec<crate::config::ProviderId>,
 ) {
-    let restricted = |p: crate::config::ProviderId| allowed.iter().any(|(q, _, _)| *q == p);
-    let mut blocked = Vec::new();
-    let mut credentials = Vec::new();
-    for (provider, id) in &bound {
-        if restricted(*provider) && !allowed.iter().any(|(q, c, _)| q == provider && c == id) {
-            blocked.push(*provider);
-        } else {
-            credentials.push((*provider, *id));
-        }
-    }
-    for (provider, id, default) in allowed {
-        if *default && !bound.iter().any(|(p, _)| p == provider) {
-            credentials.push((*provider, *id));
-        }
-    }
-    (credentials, blocked)
+    let (inside, outside): (Vec<_>, Vec<_>) = bound.into_iter().partition(|b| allowed.contains(b));
+    (inside, outside.into_iter().map(|(p, _)| p).collect())
 }
 
 impl PgIdentityStore {
-    /// SSO 직접 요청이 쓸 회사 키: 사용자에게 정해 둔 Provider별 기본 키.
-    pub async fn principal_default_credentials(
-        &self,
-        principal: Uuid,
-    ) -> Result<Vec<(crate::config::ProviderId, Uuid)>, AuthError> {
-        let mut c = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|_| AuthError::DatabaseUnavailable)?;
-        Ok(principal_credentials(&mut c, principal)
-            .await
-            .map_err(|_| AuthError::DatabaseUnavailable)?
-            .into_iter()
-            .filter(|(_, _, default)| *default)
-            .map(|(p, id, _)| (p, id))
-            .collect())
-    }
     pub async fn settlement_root(&self, id: Uuid) -> Result<Option<Uuid>, ManagementError> {
         let _gate = self
             .gate

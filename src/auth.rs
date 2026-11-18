@@ -10,6 +10,8 @@ pub enum AuthError {
     OwnerInactive,
     DependencyUnavailable,
     DatabaseUnavailable,
+    /// 유효한 SSO 로그인 토큰이지만 추론에는 쓸 수 없다. 추론은 가상 키로만 받는다.
+    VirtualKeyRequired,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthRoute {
@@ -472,20 +474,11 @@ impl SsoAuthenticator {
             }
             return result;
         }
-        let human = self
-            .authenticate(headers, AuthRoute::Inference, now)
+        // SSO 로그인 토큰으로는 추론하지 않는다. 어느 Provider 키로 보낼지 정할 수 없기 때문이다.
+        // 토큰이 유효한지는 먼저 확인해서, 잘못된 토큰은 지금처럼 인증 오류로 알린다.
+        self.authenticate(headers, AuthRoute::Inference, now)
             .await?;
-        // SSO 직접 요청은 사용자에게 정해 둔 기본 회사 키를 쓴다(없으면 Provider의 기본 키).
-        let credentials = self
-            .store
-            .principal_default_credentials(human.current.id)
-            .await?;
-        Ok(AuthenticatedInference {
-            current: human.current,
-            key: None,
-            credentials,
-            blocked: Vec::new(),
-        })
+        Err(AuthError::VirtualKeyRequired)
     }
     pub async fn authenticate(
         &self,
@@ -554,10 +547,9 @@ impl SsoAuthenticator {
 pub struct AuthenticatedInference {
     pub current: crate::ledger::CurrentHuman,
     pub key: Option<crate::ledger::finance::KeyScope>,
-    /// 이 요청이 Provider별로 쓸 회사 키. 가상 키의 연결이 먼저이고, 연결이 없으면 사용자의 기본 키다.
-    /// 둘 다 없는 Provider는 그 Provider의 기본 키를 쓴다.
+    /// 가상 키에 연결된 Provider별 Provider 키. 연결이 없는 Provider로 가는 요청은 거절한다.
     pub credentials: Vec<(crate::config::ProviderId, uuid::Uuid)>,
-    /// 가상 키가 연결된 회사 키의 사용 인가가 해제된 Provider. 이 Provider로 가는 요청은 거절한다.
+    /// 가상 키가 연결된 Provider 키의 사용 인가가 해제된 Provider. 이 Provider로 가는 요청은 거절한다.
     pub blocked: Vec<crate::config::ProviderId>,
 }
 impl AuthenticatedInference {

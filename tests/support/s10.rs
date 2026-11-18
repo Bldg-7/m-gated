@@ -465,7 +465,7 @@ async fn retention_preserves_manual_null_tokens_in_both_scopes_and_latest_event_
         ceiling: cfg.execution_ceiling(),
         execution_running: false,
     };
-    let issue:IssueKey=serde_json::from_value(serde_json::json!({"name":"보관 검증 키","validity":"unlimited","grants":grants,"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}})).unwrap();
+    let issue:IssueKey=serde_json::from_value(finance::with_credentials(serde_json::json!({"name":"보관 검증 키","validity":"unlimited","grants":grants,"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}}))).unwrap();
     let issued = ledger
         .management_command(&ctx, Command::Issue(issue))
         .await
@@ -955,7 +955,7 @@ async fn handoff_import_is_atomic_idempotent_and_rollback_keeps_unknown_reservat
         )
         .await
         .unwrap();
-    let held=sqlx::query("SELECT r.accounting_state,r.cost_usd IS NULL AS unresolved,b.remaining_reservation_usd::text AS reserved,b.remaining_reserved_tokens,p.inference_pause_request_id,p.inference_safety_version,p.disabled_at IS NOT NULL AS blocked,(SELECT cost_usd::text FROM gw_usage_totals WHERE scope_id=$2 AND period_start='2025-03-01T00:00:00Z') AS baseline FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(request.id).bind(scope).fetch_one(database.pool()).await.unwrap();
+    let held=sqlx::query("SELECT r.accounting_state,r.cost_usd IS NULL AS unresolved,b.remaining_reservation_usd::text AS reserved,b.remaining_reserved_tokens,p.inference_pause_request_id,p.inference_safety_version,p.disabled_at IS NOT NULL AS blocked,(SELECT cost_usd::text FROM gw_usage_totals WHERE scope_id=$2 AND period_start='2025-03-01T00:00:00Z') AS baseline FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(request.id).bind(scope).fetch_one(database.pool()).await.unwrap();
     database.pool().close().await;
     db.close().await;
     assert!(
@@ -1049,7 +1049,7 @@ async fn handoff_unknown_key_fixture(alarm_fault: Option<bool>, historical: bool
     let settings = AccessSettings::from_config(&cfg);
     let old_user = finance::human(old_clock.pool()).await;
     let old_admin = finance::human(old_clock.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=10,tpm_limit=5000 WHERE principal_id=$1").bind(old_user).execute(old_clock.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=10,tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(old_user).execute(old_clock.pool()).await.unwrap();
     let old_ledger = PgLedger::new(old_clock.clone(), settings.clone(), [1; 32]);
     let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
     let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":5000,"count_rpm":null});
@@ -1064,7 +1064,7 @@ async fn handoff_unknown_key_fixture(alarm_fault: Option<bool>, historical: bool
         ceiling: cfg.execution_ceiling(),
         execution_running: false,
     };
-    let key_input:IssueKey=serde_json::from_value(serde_json::json!({"name":"이전 키","validity":"unlimited","grants":grants,"limits":limits})).unwrap();
+    let key_input:IssueKey=serde_json::from_value(finance::with_credentials(serde_json::json!({"name":"이전 키","validity":"unlimited","grants":grants,"limits":limits}))).unwrap();
     let issued = old_ledger
         .management_command(&old_ctx, Command::Issue(key_input))
         .await
@@ -1892,7 +1892,7 @@ async fn telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_dupli
     let db = postgres::TestDb::new().await;
     let user = finance::human(db.store.pool()).await;
     sqlx::query(
-        "UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1",
+        "UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL",
     )
     .bind(user)
     .execute(db.store.pool())
@@ -1971,7 +1971,7 @@ async fn two_migrators_serialize_and_actual_advisory30s_total120s_fail_closed() 
     let clean = db.store.migrate().await.is_ok();
     db.close().await;
     assert!(timed_out && elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(35));
-    assert!(one.is_ok() && two.is_ok() && count == 9);
+    assert!(one.is_ok() && two.is_ok() && count == 10);
     assert!(
         reached
             && total_timeout.is_err()
@@ -2467,7 +2467,7 @@ async fn telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_rea
     for bound in [false, true] {
         let db = postgres::TestDb::new().await;
         let user = finance::human(db.store.pool()).await;
-        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1").bind(user).execute(db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL").bind(user).execute(db.store.pool()).await.unwrap();
         let current = finance::current(db.store.pool(), user).await;
         let cfg = configuration();
         let healthy = PgLedger::new(db.store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
@@ -2701,7 +2701,7 @@ async fn service_handoff_checks_mapped_owner_and_keeps_unknown_on_activation_and
         .execute(new.store.pool())
         .await
         .unwrap();
-    let held:bool=sqlx::query_scalar("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND b.remaining_reservation_usd>0 AND t.unknown_count=1 AND t.reserved_usd=b.remaining_reservation_usd FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE r.id=$1").bind(spec.id).fetch_one(new.store.pool()).await.unwrap();
+    let held:bool=sqlx::query_scalar("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND b.remaining_reservation_usd>0 AND t.unknown_count=1 AND t.reserved_usd=b.remaining_reservation_usd FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE r.id=$1").bind(spec.id).fetch_one(new.store.pool()).await.unwrap();
     assert!(held);
     let owner_unknown:i64=sqlx::query_scalar("SELECT count(*) FROM gw_requests WHERE principal_id=ANY($1) AND accounting_state='unknown'").bind(vec![mapped_owner,other_owner]).fetch_one(new.store.pool()).await.unwrap();
     assert_eq!(owner_unknown, 0);

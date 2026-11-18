@@ -947,7 +947,7 @@ async fn runtime_deadline_during_blocked_policy_admit_sends_no_provider_bytes() 
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gw_rate_windows")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM test_user_rate_windows")
             .fetch_one(h.db.store.pool())
             .await
             .unwrap(),
@@ -1071,7 +1071,7 @@ async fn saturated_previous_minute_retries_after_authoritative_anchor_for_both_l
     let mut cases = Vec::new();
     for free in [false, true] {
         let id = finance::human(db.store.pool()).await;
-        sqlx::query("UPDATE gw_policies SET rpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1")
+        sqlx::query("UPDATE gw_policies SET rpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL")
             .bind(id)
             .execute(db.store.pool())
             .await
@@ -1180,14 +1180,14 @@ async fn saturated_previous_minute_retries_after_authoritative_anchor_for_both_l
         );
         return;
     }
-    let rows=sqlx::query("SELECT r.id,ceil(extract(epoch FROM r.transport_deadline-$1::timestamptz)*1000)::bigint AS transport_ms,extract(epoch FROM r.execution_deadline-r.transport_deadline)::bigint AS gap,b.rate_start >= $2::timestamptz AS new_window FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id").bind(origin).bind(&boundary).fetch_all(db.store.pool()).await.unwrap();
+    let rows=sqlx::query("SELECT r.id,ceil(extract(epoch FROM r.transport_deadline-$1::timestamptz)*1000)::bigint AS transport_ms,extract(epoch FROM r.execution_deadline-r.transport_deadline)::bigint AS gap,b.rate_start >= $2::timestamptz AS new_window FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").bind(origin).bind(&boundary).fetch_all(db.store.pool()).await.unwrap();
     let requests_valid = rows.len() == 2
         && rows.iter().all(|row| {
             row.get::<bool, _>("new_window")
                 && row.get::<i64, _>("transport_ms") <= 2020
                 && row.get::<i64, _>("gap") == 5
         });
-    let windows=sqlx::query("SELECT window_start >= $1::timestamptz AS new_window,admitted_count FROM gw_rate_windows ORDER BY scope_id,window_start").bind(&boundary).fetch_all(db.store.pool()).await.unwrap();
+    let windows=sqlx::query("SELECT window_start >= $1::timestamptz AS new_window,admitted_count FROM test_user_rate_windows ORDER BY scope_id,window_start").bind(&boundary).fetch_all(db.store.pool()).await.unwrap();
     let windows_valid = windows.len() == 4
         && windows
             .iter()
@@ -1304,7 +1304,7 @@ async fn native_error_event_boundaries_preserve_wire_without_retaining_messages(
                 assert_eq!(row.get::<String, _>("reason_code"), "provider_error");
             }
             assert_eq!(
-                sqlx::query_scalar::<_, i64>("SELECT unknown_count FROM gw_usage_totals")
+                sqlx::query_scalar::<_, i64>("SELECT unknown_count FROM test_user_usage_totals")
                     .fetch_one(h.db.store.pool())
                     .await
                     .unwrap(),

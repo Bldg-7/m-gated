@@ -135,6 +135,14 @@ impl TestDb {
             ownership,
         };
         db.store.migrate().await.unwrap();
+        // 가상 키로 추론하면 장부가 사용자 단위와 키 단위로 두 줄씩 생긴다.
+        // 사용자 단위만 보는 시험 조회는 이 뷰를 쓴다.
+        for view in ["usage_totals", "request_budgets", "rate_windows"] {
+            sqlx::query(&format!("CREATE VIEW test_user_{view} AS SELECT x.* FROM gw_{view} x JOIN gw_policies p ON p.id=x.scope_id WHERE p.key_id IS NULL"))
+                .execute(db.store.pool())
+                .await
+                .unwrap();
+        }
         db
     }
     // auth target도 공유하지만 wire fault target에서만 쓰는 테스트 조립이다.

@@ -1,8 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
+import { pickOption, selectedValue } from '../../test-select';
 import { session } from '../../lib/api';
-const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'cred1', label: 'team-a', hint: '0001' }] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
 const key = { id: '00000000-0000-4000-8000-000000000001', name: '현재 키', version: '7', created_command_id: 'original', validity: 'unlimited', expires_at: null, revoked_at: null, grants: [], limits: {} };
 const response = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
@@ -16,15 +17,15 @@ async function mount(write: (input: RequestInfo | URL, init: RequestInit) => Pro
     if (read) return read();
     return Promise.resolve(response({ items: items(), next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
   });
-  vi.stubGlobal('fetch', fetcher); render(<App />); await screen.findByRole('heading', { name: '내 키' });
+  vi.stubGlobal('fetch', fetcher); render(<App />); await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
   await waitFor(() => expect((screen.getByRole('button', { name: '키 조회' }) as HTMLButtonElement).disabled).toBe(false));
   return fetcher;
 }
 function prepare() {
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '새 키' } });
-  fireEvent.change(screen.getByLabelText('유효기간'), { target: { value: 'unlimited' } });
+  pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
   fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
-  fireEvent.submit(screen.getByRole('form', { name: '개인 키 발급' }));
+  fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   fireEvent.click(screen.getByRole('button', { name: '발급 확인' }));
 }
 test('revoke409_keeps_explanation_after_get_and_requires_new_confirmation_version', async () => {
@@ -51,7 +52,7 @@ test('lost_issue_uses_created_command_get_never_post_replay', async () => {
   await mount(async (_, init) => { writes++; command = new Headers(init.headers).get('x-gateway-command-id')!; throw new TypeError('synthetic network loss'); }, () => command ? [{ ...key, created_command_id: command }] : []);
   prepare(); await screen.findByText(/연결된 키:/);
   expect(screen.getByRole('region', { name: '명령 결과 확인' }).textContent).toContain(command);
-  expect(writes).toBe(1); expect(screen.queryByRole('region', { name: '발급 원문' })).toBeNull();
+  expect(writes).toBe(1); expect(screen.queryByRole('dialog', { name: '발급된 키' })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '명령 결과 다시 조회' }));
   await screen.findByText(/연결된 키:/); expect(writes).toBe(1);
 });
@@ -61,7 +62,7 @@ test('pagehide_synchronously_removes_secret_and_form_before_page_can_freeze', as
   await act(async () => { window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })); });
   expect(screen.queryByText('temporary-secret')).toBeNull(); expect(screen.queryByLabelText('키 이름')).toBeNull();
   await act(async () => { window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
-  await screen.findByRole('heading', { name: '내 키' });
+  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
   expect(screen.queryByText('temporary-secret')).toBeNull(); expect((screen.getByLabelText('키 이름') as HTMLInputElement).value).toBe('');
 });
 test('late_committed_issue_is_not_consumed_after_explicit_revalidation', async () => {
@@ -84,12 +85,12 @@ test('same_human_key_refresh_preserves_filter_and_has_one_read_retry', async () 
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
   });
   vi.stubGlobal('fetch', fetcher); render(<App />); await screen.findByText('키가 없습니다.');
-  fireEvent.change(screen.getByLabelText('키 상태'), { target: { value: 'revoked' } });
+  pickOption(screen.getByLabelText('키 상태'), '회수');
   fireEvent.submit(screen.getByRole('form', { name: '키 조회' }));
   await screen.findByText('인증 확인 중…');
   await act(async () => { refresh.resolve(response({})); });
   await screen.findByText('키가 없습니다.');
-  expect((screen.getByLabelText('키 상태') as HTMLSelectElement).value).toBe('revoked');
+  expect(selectedValue(screen.getByLabelText('키 상태'))).toBe('revoked');
   expect(reads).toBe(2);
   expect(fetcher.mock.calls.filter(c => c[0] === '/api/keys')).toHaveLength(1);
   expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
@@ -117,15 +118,15 @@ test('lost_delete_get_confirms_exact_revocation_and_unlocks_only_user_confirmed_
     posts++; return response({ key: 'explicit-new-secret', metadata: key }, 201);
   }, () => [deleted ? revoked : key]);
   confirmRevoke();
-  await screen.findByText(/회수: 2026-01-02T00:00:00Z/);
+  await screen.findByText(/회수: 2026-01-02 00:00/);
   await waitFor(() => expect((screen.getByRole('button', { name: '발급 내용 확인' }).closest('fieldset') as HTMLFieldSetElement).disabled).toBe(false));
   expect(screen.queryByRole('region', { name: '명령 결과 확인' })).toBeNull();
   expect(screen.queryByRole('alert')).toBeNull();
-  expect(screen.queryByRole('region', { name: '발급 원문' })).toBeNull();
+  expect(screen.queryByRole('dialog', { name: '발급된 키' })).toBeNull();
   expect(deletes).toBe(1); expect(posts).toBe(0);
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '명시한 새 키' } });
-  fireEvent.change(screen.getByLabelText('유효기간'), { target: { value: 'unlimited' } });
-  fireEvent.submit(screen.getByRole('form', { name: '개인 키 발급' }));
+  pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
+  fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   expect(posts).toBe(0);
   fireEvent.click(screen.getByRole('button', { name: '발급 확인' }));
   await screen.findByText('explicit-new-secret');
@@ -161,7 +162,7 @@ test('lost_delete_superseded_get_cannot_unlock_current_uncertain_recovery', asyn
     return pageResponse([key]);
   });
   confirmRevoke(); await waitFor(() => expect(reads).toBe(2));
-  fireEvent.change(screen.getByLabelText('키 상태'), { target: { value: 'active' } });
+  pickOption(screen.getByLabelText('키 상태'), '활성');
   fireEvent.submit(screen.getByRole('form', { name: '키 조회' }));
   await waitFor(() => expect(reads).toBe(3));
   await act(async () => { old.resolve(pageResponse([revoked])); });

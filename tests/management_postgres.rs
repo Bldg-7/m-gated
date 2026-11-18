@@ -50,7 +50,7 @@ fn grants() -> Value {
     json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}])
 }
 fn issue() -> Command {
-    Command::Issue(serde_json::from_value(json!({"name":"테스트 키","validity":"3_months","grants":grants(),"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}})).unwrap())
+    Command::Issue(serde_json::from_value(finance::with_credentials(json!({"name":"테스트 키","validity":"3_months","grants":grants(),"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}}))).unwrap())
 }
 fn ctx<'a>(
     actor: Uuid,
@@ -627,6 +627,7 @@ impl Harness {
             .execute(db.store.pool())
             .await
             .unwrap();
+        finance::allow(db.store.pool(), actor).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
         let api = Arc::new(m_gated::admin::DashboardApi::new(
             &cfg,
@@ -679,6 +680,22 @@ impl Harness {
             _provider_server: provider_server,
             _jwks: jwks,
         }
+    }
+    /// 추론용 가상 키를 발급해 원문을 돌려준다. 추론은 SSO 토큰이 아니라 가상 키로만 받는다.
+    async fn key(&self) -> String {
+        let (s, v, _) = self
+            .request(
+                "POST",
+                "/api/keys",
+                Some(&self.token),
+                false,
+                Some(key_input()),
+                Some(Uuid::new_v4()),
+                &[],
+            )
+            .await;
+        assert_eq!(s, 201, "{v}");
+        v["key"].as_str().unwrap().to_owned()
     }
     #[allow(clippy::too_many_arguments)]
     async fn request(
@@ -733,7 +750,9 @@ impl Harness {
     }
 }
 fn key_input() -> Value {
-    json!({"name":"개인 키","validity":"unlimited","grants":grants(),"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}})
+    finance::with_credentials(
+        json!({"name":"개인 키","validity":"unlimited","grants":grants(),"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}}),
+    )
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
@@ -897,6 +916,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
             .unwrap()["replayed"],
         true
     );
+    finance::allow(db.store.pool(), service).await;
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
         v.service_principal_id = Some(service);
@@ -936,6 +956,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         "POST",
         "/api/keys",
     );
+    finance::allow(db.store.pool(), service).await;
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
         v.service_principal_id = Some(service);
@@ -1423,6 +1444,7 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
         .await;
     assert_eq!(s, 200);
     assert_eq!(v["result_version"], "2");
+    finance::allow(h.db.store.pool(), service.parse().unwrap()).await;
     let mut key = key_input();
     key["service_principal_id"] = json!(service);
     let (s, key, _) = h
@@ -1770,6 +1792,7 @@ async fn virtual_owner_inactive_has_specific_wire_code_and_blocks_current_balanc
         )
         .await
         .unwrap();
+    finance::allow(h.db.store.pool(), service).await;
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
         v.service_principal_id = Some(service);
@@ -2610,9 +2633,10 @@ async fn manual_and_late_final_races_preserve_money_and_separate_safety_cas() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn known_live_native_sender_cannot_be_settled_by_admin_confirmation() {
     let h = Harness::with_clock(true).await;
+    let key = h.key().await;
     let (tx, closed) = h.provider.stream().await;
     tx.send(axum::body::Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"model\":\"synthetic-text\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n")).await.unwrap();
-    let response=h.router.clone().oneshot(Request::builder().method("POST").uri("/anthropic/v1/messages").header("authorization",format!("Bearer {}",h.token)).header("content-type","application/json").header("anthropic-version","2023-06-01").body(Body::from(r#"{"model":"synthetic-text","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"synthetic-only"}]}"#)).unwrap()).await.unwrap();
+    let response=h.router.clone().oneshot(Request::builder().method("POST").uri("/anthropic/v1/messages").header("authorization",format!("Bearer {}",key)).header("content-type","application/json").header("anthropic-version","2023-06-01").body(Body::from(r#"{"model":"synthetic-text","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"synthetic-only"}]}"#)).unwrap()).await.unwrap();
     assert_eq!(response.status(), 200);
     let id = Uuid::parse_str(response.headers()["x-gateway-request-id"].to_str().unwrap()).unwrap();
     sqlx::query("UPDATE gw_fixture_clock SET observed=(SELECT lease_expires_at FROM gw_requests WHERE id=$1)").bind(id).execute(h.db.store.pool()).await.unwrap();
@@ -2738,7 +2762,7 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1").bind(actor).execute(store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(actor).execute(store.pool()).await.unwrap();
     let ledger = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
@@ -2999,13 +3023,14 @@ async fn old_and_new_configuration_servers_keep_fence_until_explicit_stop_confir
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn newly_issued_keys_cannot_escape_money_unknown_but_free_count_is_independent() {
     let h = Harness::new().await;
+    let key = h.key().await;
     h.provider.set(axum::http::StatusCode::OK,axum::http::HeaderMap::from_iter([(axum::http::header::CONTENT_TYPE,axum::http::HeaderValue::from_static("application/json"))]),axum::body::Bytes::from_static(br#"{"id":"msg_unknown","type":"message","role":"assistant","model":"synthetic-text","content":[],"stop_reason":"end_turn"}"#)).await;
     let input = json!({"model":"synthetic-text","max_tokens":16,"messages":[{"role":"user","content":"synthetic-only"}]});
     let (s, _, _) = h
         .request(
             "POST",
             "/anthropic/v1/messages",
-            Some(&h.token),
+            Some(&key),
             false,
             Some(input.clone()),
             None,
@@ -4430,10 +4455,11 @@ async fn s9_caught_request_body_panic_is_internal500_not_upstream_timeout() {
         }
     }
     let h = Harness::new().await;
+    let key = h.key().await;
     let request = Request::builder()
         .method("POST")
         .uri("/anthropic/v1/messages")
-        .header("authorization", format!("Bearer {}", h.token))
+        .header("authorization", format!("Bearer {}", key))
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .body(Body::new(PanickingBody))

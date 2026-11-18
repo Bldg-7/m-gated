@@ -197,7 +197,7 @@ async fn killed_admit_dispatch_and_free_paid_count_edges_recover_in_other_proces
                     let db = postgres::TestDb::new().await;
                     let clock = db.clock_store(None).await;
                     let user = finance::human(clock.pool()).await;
-                    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1").bind(user).execute(clock.pool()).await.unwrap();
+                    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL").bind(user).execute(clock.pool()).await.unwrap();
                     let mut writer = Worker::spawn(
                         &db,
                         json!({"action":"prepare","user":user,"free":free,"internal":internal}),
@@ -217,7 +217,7 @@ async fn killed_admit_dispatch_and_free_paid_count_edges_recover_in_other_proces
                     if !reaper_first {
                         perform(&db, id, free, "reap").await;
                     }
-                    let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.execution_stopped_at IS NULL AS stopped_unproven,(SELECT normalized_usage->>'source' FROM gw_usage_events WHERE request_id=r.id ORDER BY id LIMIT 1) AS source,(SELECT normalized_usage->>'counted_input_tokens' FROM gw_usage_events WHERE request_id=r.id ORDER BY id LIMIT 1) AS counted,b.remaining_reservation_usd::text AS reserved,t.unknown_count,t.settled_count FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE r.id=$1").bind(id).fetch_one(clock.pool()).await.unwrap();
+                    let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.execution_stopped_at IS NULL AS stopped_unproven,(SELECT normalized_usage->>'source' FROM gw_usage_events WHERE request_id=r.id ORDER BY id LIMIT 1) AS source,(SELECT normalized_usage->>'counted_input_tokens' FROM gw_usage_events WHERE request_id=r.id ORDER BY id LIMIT 1) AS counted,b.remaining_reservation_usd::text AS reserved,t.unknown_count,t.settled_count FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE r.id=$1").bind(id).fetch_one(clock.pool()).await.unwrap();
                     assert_eq!(
                         row.get::<String, _>("accounting_state"),
                         if free { "settled" } else { "unknown" }
@@ -274,7 +274,7 @@ async fn free_paid_external_internal_uncertain_dispatch_recovers_in_other_proces
             let db = postgres::TestDb::new().await;
             let clock = db.clock_store(None).await;
             let user = finance::human(clock.pool()).await;
-            sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1").bind(user).execute(clock.pool()).await.unwrap();
+            sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL").bind(user).execute(clock.pool()).await.unwrap();
             let proxy = pg_proxy::CommitProxy::new().await;
             let mut writer=Worker::spawn(&db,json!({"action":"prepare","user":user,"free":free,"internal":internal,"port":proxy.port})).await;
             let event = writer.event().await;

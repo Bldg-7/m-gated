@@ -2,10 +2,10 @@ export type BlockState = { blocked: boolean; reasons: string[]; global_unknown_c
 export type Grant = { provider: string; model: string; capabilities: string[] };
 export type Limits = { budget: null | { mode: 'actual' | 'reserved'; limit_usd: string; period: { kind: 'calendar_month' } }; rpm: number | null; tpm: number | null; count_rpm: number | null };
 export type Validity = '3_months' | '6_months' | '1_year' | '3_years' | 'unlimited';
-/** authorized=false: 키 주인에게 이 회사 키의 사용 인가가 해제됐다. 이 Provider로 가는 요청은 거절된다. */
+/** authorized=false: 키 주인에게 이 Provider 키의 사용 인가가 해제됐다. 이 Provider로 가는 요청은 거절된다. */
 export type KeyCredential = { provider: string; credential_id: string; label: string; hint: string; state: 'active' | 'retired'; authorized: boolean };
-/** 사용자에게 인가된 회사 키. 인가가 있는 Provider만 담긴다(없는 Provider는 그 Provider의 기본 키를 쓴다). */
-export type AuthorizedCredentials = { provider: string; credentials: { id: string; label: string; hint: string; default: boolean }[] }[];
+/** 사용자에게 인가된 Provider 키. 인가가 있는 Provider만 담긴다. 인가가 없는 Provider는 그 사용자가 쓸 수 없다. */
+export type AuthorizedCredentials = { provider: string; credentials: { id: string; label: string; hint: string }[] }[];
 /** 예산 기간의 기준 시간대(관리자 설정). pending은 다음 기간부터 바뀔 시간대다. */
 export type BudgetTimezone = { timezone: string; period_start: string; period_end: string; pending: null | { timezone: string; effective_from: string; first_period_end: string }; version: string };
 export type KeyMetadata = { provider_credentials: KeyCredential[]; id: string; principal_id: string; name: string; key_hint: string; created_at: string; created_by: string; created_command_id: string; validity: Validity; expires_at: string | null; revoked_at: string | null; version: string; grants: Grant[]; limits: Limits };

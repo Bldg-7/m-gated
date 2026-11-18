@@ -132,6 +132,15 @@ async fn provider_credentials_rotate_replay_shred_and_refresh_across_instances()
     let db = postgres::TestDb::new().await;
     let fake = fake_models().await;
     let actor = finance::human(db.store.pool()).await;
+    // 이 시험은 Provider 키가 하나도 없는 상태에서 시작한다(finance::human 이 만든 시험 고정 키를 지운다).
+    sqlx::query("DELETE FROM gw_principal_credentials")
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM gw_provider_credentials")
+        .execute(db.store.pool())
+        .await
+        .unwrap();
     let settings = settings();
     let grants = json!([]);
     let ceiling = m_gated::ledger::policy::PolicyLimits::default();
@@ -253,12 +262,18 @@ async fn provider_credentials_rotate_replay_shred_and_refresh_across_instances()
         CredentialStatus::Missing
     );
     pod_b.refresh().await.unwrap();
-    let active = pod_b.cache().get(ProviderId::Anthropic, None).unwrap();
+    let active = pod_b
+        .cache()
+        .get(ProviderId::Anthropic, Some(first_id))
+        .unwrap();
     assert_eq!(active.id, first_id);
     assert_eq!(active.secret.as_str(), KEY_A);
 
     // 교체: 새 행이 active가 되고 이전 행은 암호문이 지워진다. 고정해 둔 이전 키는 계속 쓸 수 있다.
-    let held = pod_b.cache().get(ProviderId::Anthropic, None).unwrap();
+    let held = pod_b
+        .cache()
+        .get(ProviderId::Anthropic, Some(first_id))
+        .unwrap();
     let rotated = pod_a
         .execute(&ctx(Uuid::new_v4()), replace(first_id, 1, KEY_B))
         .await
@@ -282,7 +297,7 @@ async fn provider_credentials_rotate_replay_shred_and_refresh_across_instances()
     assert_eq!(
         pod_b
             .cache()
-            .get(ProviderId::Anthropic, None)
+            .get(ProviderId::Anthropic, Some(second_id))
             .unwrap()
             .secret
             .as_str(),
@@ -299,7 +314,7 @@ async fn provider_credentials_rotate_replay_shred_and_refresh_across_instances()
     assert!(
         wrong_root
             .cache()
-            .get(ProviderId::Anthropic, None)
+            .get(ProviderId::Anthropic, Some(second_id))
             .is_none()
     );
     let listed = wrong_root.list().await.unwrap();
@@ -541,15 +556,31 @@ fn id_of(v: &serde_json::Value) -> Uuid {
     v.as_str().unwrap().parse().unwrap()
 }
 
+/// 가상 키 발급 입력. 고른 Provider 키가 있으면 넣는다.
+fn issue(chosen: Option<Uuid>) -> serde_json::Value {
+    let mut body = json!({"name":"k","validity":"1_year","grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}});
+    if let Some(id) = chosen {
+        body["provider_credentials"] = json!({"anthropic": id});
+    }
+    body
+}
+fn authorize(ids: &[Uuid], expected: &[Uuid]) -> serde_json::Value {
+    json!({"provider":"anthropic","credential_ids":ids,"expected":{"credential_ids":expected}})
+}
+const CREDS: &str = "/api/admin/provider-credentials";
+
+/// Provider 키 여러 개와 이름. 가상 키는 발급할 때 인가된 Provider 키를 반드시 직접 고르고, 요청은 그 키로 나간다.
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
+async fn labeled_keys_are_chosen_explicitly_and_route_requests() {
     let h = Http::new().await;
-    const CREDS: &str = "/api/admin/provider-credentials";
-    // 주체를 만들고 둘 다 synthetic-text를 쓸 수 있게 한다.
+    let mut ids = Vec::new();
     for token in [&h.alice, &h.bob] {
-        assert_eq!(h.call("GET", "/api/me", token, None).await.0, 200);
+        let (status, me) = h.call("GET", "/api/me", token, None).await;
+        assert_eq!(status, 200);
+        ids.push(id_of(&me["principal"]["id"]));
     }
+    let (alice, bob) = (ids[0], ids[1]);
     sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE key_id IS NULL")
         .bind(
             json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]),
@@ -558,7 +589,7 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         .await
         .unwrap();
 
-    // 이름을 붙여 키 두 개를 등록한다. 첫 키가 기본 키가 된다.
+    // 이름을 붙여 키 두 개를 등록한다. 기본 키라는 개념은 없다.
     let add = |label: &str, secret: &str| json!({"label":label,"secret":secret});
     let (status, a) = h
         .call(
@@ -570,7 +601,7 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         .await;
     assert_eq!(status, 201, "{a}");
     assert_eq!(a["credential"]["label"], "team-a");
-    assert_eq!(a["credential"]["default"], true);
+    assert!(a["credential"].get("default").is_none());
     let a_id = id_of(&a["target"]["id"]);
     let (status, err) = h
         .call(
@@ -605,66 +636,67 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         )
         .await;
     assert_eq!(status, 201, "{b}");
-    assert_eq!(b["credential"]["default"], false);
     let b_id = id_of(&b["target"]["id"]);
-    // 관리자가 아니면 목록도 볼 수 없다.
     assert_eq!(h.call("GET", CREDS, &h.bob, None).await.0, 403);
     let (_, list) = h.call("GET", CREDS, &h.alice, None).await;
-    let listed: Vec<_> = list["providers"][0]["credentials"]
+    assert_eq!(list["providers"][0]["status"], "active");
+    let labels: Vec<_> = list["providers"][0]["credentials"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|c| {
-            (
-                c["label"].as_str().unwrap().to_owned(),
-                c["default"].as_bool().unwrap(),
-            )
-        })
+        .map(|c| c["label"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(listed, [("team-a".into(), true), ("team-b".into(), false)]);
+    assert_eq!(labels, ["team-a", "team-b"]);
     h.service.refresh().await.unwrap();
 
-    // 일반 사용자는 회사 키를 고를 수 없고, 발급하면 기본 키에 연결된다.
-    let issue = |chosen: Option<Uuid>| {
-        let mut body = json!({"name":"k","validity":"1_year","grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}});
-        if let Some(id) = chosen {
-            body["provider_credentials"] = json!({"anthropic": id});
-        }
-        body
-    };
+    // 인가가 없으면 아무 키도 고를 수 없고, 키를 고르지 않으면 발급하지 않는다.
+    let (status, err) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(a_id))))
+        .await;
+    assert_eq!(
+        (status, err["error"]["code"].clone()),
+        (403, json!("provider_credential_not_authorized"))
+    );
+    let (status, err) = h.call("POST", "/api/keys", &h.bob, Some(issue(None))).await;
+    assert_eq!(
+        (status, err["error"]["code"].clone()),
+        (400, json!("provider_credential_required"))
+    );
+    for (who, keys) in [(bob, vec![a_id]), (alice, vec![a_id, b_id])] {
+        let (status, v) = h
+            .call(
+                "PUT",
+                &format!("/api/admin/principals/{who}/provider-credentials"),
+                &h.alice,
+                Some(authorize(&keys, &[])),
+            )
+            .await;
+        assert_eq!(status, 200, "{v}");
+    }
+    // 관리자도 인가 밖의 키는 고를 수 없다.
     let (status, _) = h
         .call("POST", "/api/keys", &h.bob, Some(issue(Some(b_id))))
         .await;
     assert_eq!(status, 403);
-    let (status, bob_key) = h.call("POST", "/api/keys", &h.bob, Some(issue(None))).await;
+    let (status, bob_key) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(a_id))))
+        .await;
     assert_eq!(status, 201, "{bob_key}");
     assert_eq!(
         bob_key["metadata"]["provider_credentials"][0]["label"],
         "team-a"
     );
+    assert_eq!(
+        bob_key["metadata"]["provider_credentials"][0]["authorized"],
+        true
+    );
     let bob_secret = bob_key["key"].as_str().unwrap().to_owned();
-    let bob_key_id = id_of(&bob_key["metadata"]["id"]);
-    // 관리자는 발급할 때 회사 키를 고른다. 해제됐거나 다른 Provider 키는 거부한다.
-    let (status, _) = h
-        .call(
-            "POST",
-            "/api/keys",
-            &h.alice,
-            Some(issue(Some(Uuid::new_v4()))),
-        )
-        .await;
-    assert_eq!(status, 400);
     let (status, alice_key) = h
         .call("POST", "/api/keys", &h.alice, Some(issue(Some(b_id))))
         .await;
     assert_eq!(status, 201, "{alice_key}");
-    assert_eq!(
-        alice_key["metadata"]["provider_credentials"][0]["label"],
-        "team-b"
-    );
     let alice_secret = alice_key["key"].as_str().unwrap().to_owned();
     let alice_key_id = id_of(&alice_key["metadata"]["id"]);
-    // 키 목록에도 연결된 회사 키 이름이 보인다.
     let (_, keys) = h.call("GET", "/api/keys", &h.bob, None).await;
     assert_eq!(
         keys["items"][0]["provider_credentials"][0]["label"],
@@ -672,7 +704,7 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     );
     assert_eq!(keys["items"][0]["provider_credentials"][0]["hint"], "0001");
 
-    // 요청은 가상 키에 연결된 회사 키로 나가고, 장부에 그 키가 남는다. SSO 직접 요청은 기본 키를 쓴다.
+    // 요청은 가상 키에 연결된 Provider 키로 나가고, 장부에 그 키가 남는다. SSO 토큰으로는 추론하지 않는다.
     assert_eq!(
         h.infer(&bob_secret).await,
         (200, Some(KEY_A.into()), Some(a_id))
@@ -681,10 +713,14 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         h.infer(&alice_secret).await,
         (200, Some(KEY_B.into()), Some(b_id))
     );
+    let body = json!({"model":"synthetic-text","max_tokens":100,"messages":[{"role":"user","content":"x"}]});
+    h.provider.calls.lock().await.clear();
+    let (status, err) = h.call("POST", "/v1/messages", &h.alice, Some(body)).await;
     assert_eq!(
-        h.infer(&h.alice).await,
-        (200, Some(KEY_A.into()), Some(a_id))
+        (status, err["gateway_error_code"].clone()),
+        (403, json!("virtual_key_required"))
     );
+    assert!(h.provider.calls.lock().await.is_empty());
     let request: Uuid = sqlx::query_scalar("SELECT id FROM gw_requests WHERE provider_credential_id=$1 ORDER BY admitted_at DESC LIMIT 1")
         .bind(b_id)
         .fetch_one(h.db.store.pool())
@@ -700,27 +736,31 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         .await;
     assert_eq!(detail["provider_credential"]["label"], "team-b", "{detail}");
 
-    // 이름 변경과 기본 키 지정. 연결이 있는 가상 키는 그대로 자기 키를 쓴다.
+    // 이름 변경. 기본 키 지정은 없다.
+    let path_b = format!("{CREDS}/anthropic/{b_id}");
     let (status, renamed) = h
         .call(
             "PATCH",
-            &format!("{CREDS}/anthropic/{b_id}"),
+            &path_b,
             &h.alice,
-            Some(json!({"expected_version":"1","label":"team-b-prod","default":true})),
+            Some(json!({"expected_version":"1","label":"team-b-prod"})),
         )
         .await;
     assert_eq!(status, 200, "{renamed}");
-    assert_eq!(
-        (
-            renamed["credential"]["label"].clone(),
-            renamed["credential"]["default"].clone()
-        ),
-        (json!("team-b-prod"), json!(true))
-    );
+    assert_eq!(renamed["credential"]["label"], "team-b-prod");
+    let (status, _) = h
+        .call(
+            "PATCH",
+            &path_b,
+            &h.alice,
+            Some(json!({"expected_version":"2","default":true})),
+        )
+        .await;
+    assert_eq!(status, 400);
     let (status, stale) = h
         .call(
             "PATCH",
-            &format!("{CREDS}/anthropic/{b_id}"),
+            &path_b,
             &h.alice,
             Some(json!({"expected_version":"1","label":"x"})),
         )
@@ -729,15 +769,12 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         (status, stale["error"]["code"].clone()),
         (409, json!("version_conflict"))
     );
-    h.service.refresh().await.unwrap();
-    assert_eq!(h.infer(&h.alice).await.1.as_deref(), Some(KEY_B));
-    assert_eq!(h.infer(&bob_secret).await.1.as_deref(), Some(KEY_A));
 
-    // 가상 키가 연결된 키는 옮길 키 없이 해제할 수 없다.
+    // 쓰고 있는 가상 키가 연결된 키는 옮길 키 없이 해제할 수 없다.
     let (status, busy) = h
         .call(
             "DELETE",
-            &format!("{CREDS}/anthropic/{a_id}?expected_version=2"),
+            &format!("{CREDS}/anthropic/{a_id}?expected_version=1"),
             &h.alice,
             None,
         )
@@ -747,9 +784,9 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         (409, json!("credential_in_use")),
         "{busy}"
     );
-    assert_eq!(busy["error"]["details"]["bound_keys"], "1");
+    assert_eq!(busy["error"]["details"], json!({"bound_keys":"1"}));
 
-    // 관리자는 가상 키 하나의 연결을 바꾼다. 지금 연결을 잘못 알고 있으면 거부한다.
+    // 관리자는 가상 키 하나의 연결을 키 주인에게 인가된 키로 바꾼다.
     let bind = |credential: Uuid, expected: Uuid| json!({"provider":"anthropic","credential_id":credential,"expected_credential_id":expected});
     let path = format!("/api/admin/keys/{alice_key_id}/provider-credential");
     let (status, err) = h.call("PUT", &path, &h.alice, Some(bind(a_id, a_id))).await;
@@ -766,11 +803,11 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     assert_eq!(rebound["key"]["provider_credentials"][0]["label"], "team-a");
     assert_eq!(h.infer(&alice_secret).await.1.as_deref(), Some(KEY_A));
 
-    // 옮길 키를 정하면 해제되고, 연결된 가상 키 두 개가 함께 옮겨진다.
+    // 옮길 키를 정하면 해제되고, 연결된 가상 키 두 개와 인가가 함께 옮겨진다.
     let (status, retired) = h
         .call(
             "DELETE",
-            &format!("{CREDS}/anthropic/{a_id}?expected_version=2&move_to={b_id}"),
+            &format!("{CREDS}/anthropic/{a_id}?expected_version=1&move_to={b_id}"),
             &h.alice,
             None,
         )
@@ -782,13 +819,17 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         h.infer(&bob_secret).await,
         (200, Some(KEY_B.into()), Some(b_id))
     );
-    assert_eq!(h.infer(&alice_secret).await.1.as_deref(), Some(KEY_B));
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    assert_eq!(
+        me["provider_credentials"],
+        json!([{"provider":"anthropic","credentials":[{"id":b_id,"label":"team-b-prod","hint":"0002"}]}])
+    );
 
-    // 원문 교체: 이름·기본 여부·연결이 새 키로 옮겨진다.
+    // 키 교체: 이름·연결·인가가 새 행으로 옮겨진다.
     let (status, replaced) = h
         .call(
             "PUT",
-            &format!("{CREDS}/anthropic/{b_id}"),
+            &path_b,
             &h.alice,
             Some(json!({"secret":KEY_A,"expected_version":"2"})),
         )
@@ -797,10 +838,9 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     assert_eq!(
         (
             replaced["credential"]["label"].clone(),
-            replaced["credential"]["default"].clone(),
             replaced["credential"]["moved_keys"].clone()
         ),
-        (json!("team-b-prod"), json!(true), json!("2"))
+        (json!("team-b-prod"), json!("2"))
     );
     let c_id = id_of(&replaced["target"]["id"]);
     h.service.refresh().await.unwrap();
@@ -808,13 +848,8 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         h.infer(&bob_secret).await,
         (200, Some(KEY_A.into()), Some(c_id))
     );
-    let (_, keys) = h.call("GET", "/api/keys", &h.bob, None).await;
-    assert_eq!(
-        keys["items"][0]["provider_credentials"][0]["credential_id"],
-        json!(c_id)
-    );
 
-    // 마지막 키는 옮길 곳 없이 해제할 수 있다. 그 뒤 요청은 송신 전에 거절한다.
+    // 마지막 키는 옮길 곳 없이 해제할 수 있다. 연결이 지워져 그 뒤 요청은 송신 전에 거절한다.
     let (status, _) = h
         .call(
             "DELETE",
@@ -825,21 +860,18 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         .await;
     assert_eq!(status, 200);
     h.service.refresh().await.unwrap();
-    let (status, _, _) = h.infer(&bob_secret).await;
-    assert_eq!(status, 503);
-    assert!(h.provider.calls.lock().await.is_empty());
-    // 해제한 이름은 다시 쓸 수 있고, 연결이 없던 가상 키는 새 기본 키를 쓴다.
-    let (status, again) = h
-        .call(
-            "POST",
-            &format!("{CREDS}/anthropic"),
-            &h.alice,
-            Some(add("team-a", KEY_B)),
-        )
+    let (_, list) = h.call("GET", CREDS, &h.alice, None).await;
+    assert_eq!(list["providers"][0]["status"], "missing");
+    h.provider.calls.lock().await.clear();
+    let body = json!({"model":"synthetic-text","max_tokens":100,"messages":[{"role":"user","content":"x"}]});
+    let (status, err) = h
+        .call("POST", "/v1/messages", &bob_secret, Some(body))
         .await;
-    assert_eq!(status, 201, "{again}");
-    h.service.refresh().await.unwrap();
-    assert_eq!(h.infer(&bob_secret).await.1.as_deref(), Some(KEY_B));
+    assert_eq!(
+        (status, err["gateway_error_code"].clone()),
+        (403, json!("provider_credential_unbound"))
+    );
+    assert!(h.provider.calls.lock().await.is_empty());
     let audits: Vec<String> = sqlx::query_scalar(
         "SELECT operation FROM gw_audit_events WHERE operation LIKE '%credential%' ORDER BY id",
     )
@@ -851,24 +883,23 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         [
             "add_provider_credential",
             "add_provider_credential",
+            "authorize_principal_credentials",
+            "authorize_principal_credentials",
             "update_provider_credential",
             "bind_key_credential",
             "retire_provider_credential",
             "replace_provider_credential",
             "retire_provider_credential",
-            "add_provider_credential"
         ]
     );
-    let _ = bob_key_id;
     h.db.close().await;
 }
 
-/// 사용자별 회사 키 인가: 인가된 키 안에서만 고르고, 인가를 풀면 연결된 가상 키를 막거나 옮긴다.
+/// Provider 키 인가: 인가된 키 안에서만 고르고, 인가를 풀면 연결된 가상 키를 막거나 옮긴다.
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn user_authorization_limits_company_keys_and_blocks_deauthorized_keys() {
+async fn authorization_limits_provider_keys_and_blocks_deauthorized_keys() {
     let h = Http::new().await;
-    const CREDS: &str = "/api/admin/provider-credentials";
     for token in [&h.alice, &h.bob] {
         assert_eq!(h.call("GET", "/api/me", token, None).await.0, 200);
     }
@@ -904,82 +935,37 @@ async fn user_authorization_limits_company_keys_and_blocks_deauthorized_keys() {
     h.service.refresh().await.unwrap();
 
     let path = format!("/api/admin/principals/{bob}/provider-credentials");
-    let authorize = |ids: &[Uuid],
-                     default: Option<Uuid>,
-                     expected: &[Uuid],
-                     expected_default: Option<Uuid>| {
-        json!({"provider":"anthropic","credential_ids":ids,"default_credential_id":default,"expected":{"credential_ids":expected,"default_credential_id":expected_default}})
-    };
-    // 관리자만 인가를 바꾼다. 기본 키는 인가된 키 중 하나여야 한다.
+    // 관리자만 인가를 바꾼다.
     assert_eq!(
-        h.call(
-            "PUT",
-            &path,
-            &h.bob,
-            Some(authorize(&[b_id], Some(b_id), &[], None))
-        )
-        .await
-        .0,
+        h.call("PUT", &path, &h.bob, Some(authorize(&[b_id], &[])))
+            .await
+            .0,
         403
     );
-    assert_eq!(
-        h.call(
-            "PUT",
-            &path,
-            &h.alice,
-            Some(authorize(&[b_id], Some(a_id), &[], None))
-        )
-        .await
-        .0,
-        400
-    );
     let (status, granted) = h
-        .call(
-            "PUT",
-            &path,
-            &h.alice,
-            Some(authorize(&[b_id], Some(b_id), &[], None)),
-        )
+        .call("PUT", &path, &h.alice, Some(authorize(&[b_id], &[])))
         .await;
     assert_eq!(status, 200, "{granted}");
     assert_eq!(
-        granted["authorization"]["provider_credentials"][0]["credentials"][0]["label"],
-        "team-b"
+        granted["authorization"]["provider_credentials"],
+        json!([{"provider":"anthropic","credentials":[{"id":b_id,"label":"team-b","hint":"0002"}]}])
     );
-    // 다른 관리자가 먼저 바꿨으면(지금 인가를 잘못 알면) 덮어쓰지 않는다.
+    // 다른 관리자가 먼저 바꿨으면 덮어쓰지 않는다.
     let (status, stale) = h
-        .call(
-            "PUT",
-            &path,
-            &h.alice,
-            Some(authorize(&[a_id], Some(a_id), &[], None)),
-        )
+        .call("PUT", &path, &h.alice, Some(authorize(&[a_id], &[])))
         .await;
     assert_eq!(
         (status, stale["error"]["code"].clone()),
         (409, json!("credential_authorization_conflict"))
     );
-    assert_eq!(stale["error"]["details"]["credential_ids"], json!([b_id]));
-
-    // 사용자는 /api/me 에서 자기에게 인가된 회사 키를 본다.
+    assert_eq!(stale["error"]["details"], json!({"credential_ids":[b_id]}));
     let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
     assert_eq!(
         me["provider_credentials"][0]["credentials"][0]["label"],
         "team-b"
     );
-    assert_eq!(
-        me["provider_credentials"][0]["credentials"][0]["default"],
-        true
-    );
 
-    // 인가된 키는 일반 사용자도 고를 수 있다. 인가 밖의 키는 거절한다. 고르지 않으면 사용자의 기본 키다.
-    let issue = |chosen: Option<Uuid>| {
-        let mut body = json!({"name":"k","validity":"1_year","grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}});
-        if let Some(id) = chosen {
-            body["provider_credentials"] = json!({"anthropic": id});
-        }
-        body
-    };
+    // 인가된 키로만 발급한다.
     let (status, denied) = h
         .call("POST", "/api/keys", &h.bob, Some(issue(Some(a_id))))
         .await;
@@ -987,28 +973,24 @@ async fn user_authorization_limits_company_keys_and_blocks_deauthorized_keys() {
         (status, denied["error"]["code"].clone()),
         (403, json!("provider_credential_not_authorized"))
     );
-    let (status, chosen) = h
-        .call("POST", "/api/keys", &h.bob, Some(issue(Some(b_id))))
-        .await;
-    assert_eq!(status, 201, "{chosen}");
-    let (status, plain) = h.call("POST", "/api/keys", &h.bob, Some(issue(None))).await;
-    assert_eq!(status, 201, "{plain}");
+    let mut secrets = Vec::new();
+    let mut key_ids = Vec::new();
+    for _ in 0..2 {
+        let (status, issued) = h
+            .call("POST", "/api/keys", &h.bob, Some(issue(Some(b_id))))
+            .await;
+        assert_eq!(status, 201, "{issued}");
+        secrets.push(issued["key"].as_str().unwrap().to_owned());
+        key_ids.push(id_of(&issued["metadata"]["id"]));
+    }
     assert_eq!(
-        plain["metadata"]["provider_credentials"][0]["label"],
-        "team-b"
+        h.infer(&secrets[0]).await,
+        (200, Some(KEY_B.into()), Some(b_id))
     );
-    let key1 = chosen["key"].as_str().unwrap().to_owned();
-    let key2 = plain["key"].as_str().unwrap().to_owned();
-    let key1_id = id_of(&chosen["metadata"]["id"]);
-    // 요청은 인가된 키로 나간다. SSO 직접 요청도 사용자의 기본 키(Provider 기본 키가 아니다)를 쓴다.
-    assert_eq!(h.infer(&key1).await, (200, Some(KEY_B.into()), Some(b_id)));
-    assert_eq!(h.infer(&h.bob).await, (200, Some(KEY_B.into()), Some(b_id)));
-    assert_eq!(h.infer(&h.alice).await.1.as_deref(), Some(KEY_A));
-    // 관리자도 인가 밖의 키로는 연결을 옮기지 못한다.
     let (status, err) = h
         .call(
             "PUT",
-            &format!("/api/admin/keys/{key1_id}/provider-credential"),
+            &format!("/api/admin/keys/{}/provider-credential", key_ids[0]),
             &h.alice,
             Some(
                 json!({"provider":"anthropic","credential_id":a_id,"expected_credential_id":b_id}),
@@ -1020,36 +1002,25 @@ async fn user_authorization_limits_company_keys_and_blocks_deauthorized_keys() {
         (403, json!("provider_credential_not_authorized"))
     );
 
-    // 연결된 가상 키가 있는 회사 키의 인가를 풀려면 막을지 옮길지 골라야 한다.
+    // 연결된 가상 키가 있는 키의 인가를 풀려면 막을지 옮길지 골라야 한다.
     let (status, busy) = h
-        .call(
-            "PUT",
-            &path,
-            &h.alice,
-            Some(authorize(&[a_id], Some(a_id), &[b_id], Some(b_id))),
-        )
+        .call("PUT", &path, &h.alice, Some(authorize(&[a_id], &[b_id])))
         .await;
     assert_eq!(
         (status, busy["error"]["code"].clone()),
         (409, json!("credential_authorization_in_use"))
     );
     assert_eq!(busy["error"]["details"]["bound_keys"], "2");
-    let mut block = authorize(&[a_id], Some(a_id), &[b_id], Some(b_id));
+    let mut block = authorize(&[a_id], &[b_id]);
     block["bound_keys"] = json!("block");
     let (status, blocked) = h.call("PUT", &path, &h.alice, Some(block)).await;
     assert_eq!(status, 200, "{blocked}");
     assert_eq!(blocked["authorization"]["blocked_keys"], "2");
-    // 막힌 키의 요청은 송신 전에 403으로 거절된다. 키 목록에 인가 해제가 보인다.
-    let (status, _, _) = h.infer(&key1).await;
+    let (status, _, _) = h.infer(&secrets[0]).await;
     assert_eq!(status, 403);
     assert!(h.provider.calls.lock().await.is_empty());
     let (_, body) = h
-        .call(
-            "POST",
-            "/v1/messages",
-            &key2,
-            Some(json!({"model":"synthetic-text","max_tokens":100,"messages":[{"role":"user","content":"x"}]})),
-        )
+        .call("POST", "/v1/messages", &secrets[1], Some(json!({"model":"synthetic-text","max_tokens":100,"messages":[{"role":"user","content":"x"}]})))
         .await;
     assert_eq!(
         body["gateway_error_code"],
@@ -1062,49 +1033,33 @@ async fn user_authorization_limits_company_keys_and_blocks_deauthorized_keys() {
             "{item}"
         );
     }
-    let (_, keys) = h.call("GET", "/api/keys", &h.alice, None).await;
-    assert!(
-        keys["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|k| k["provider_credentials"][0]["authorized"] == true)
-    );
-    // SSO 직접 요청은 새 기본 키를 쓴다.
-    assert_eq!(h.infer(&h.bob).await.1.as_deref(), Some(KEY_A));
 
-    // 다시 인가하면 막힌 키가 원래 회사 키로 다시 나간다.
+    // 다시 인가하면 막힌 키가 원래 Provider 키로 다시 나간다.
     let (status, _) = h
         .call(
             "PUT",
             &path,
             &h.alice,
-            Some(authorize(&[a_id, b_id], Some(a_id), &[a_id], Some(a_id))),
+            Some(authorize(&[a_id, b_id], &[a_id])),
         )
         .await;
     assert_eq!(status, 200);
-    assert_eq!(h.infer(&key1).await.1.as_deref(), Some(KEY_B));
+    assert_eq!(h.infer(&secrets[0]).await.1.as_deref(), Some(KEY_B));
     // 옮기기를 고르면 연결된 가상 키가 인가된 키로 옮겨진다.
-    let mut moving = authorize(&[a_id], Some(a_id), &[a_id, b_id], Some(a_id));
+    let mut moving = authorize(&[a_id], &[a_id, b_id]);
     moving["bound_keys"] = json!({"move_to": a_id});
     let (status, moved) = h.call("PUT", &path, &h.alice, Some(moving)).await;
     assert_eq!(status, 200, "{moved}");
     assert_eq!(moved["authorization"]["moved_keys"], "2");
-    assert_eq!(h.infer(&key1).await, (200, Some(KEY_A.into()), Some(a_id)));
+    assert_eq!(
+        h.infer(&secrets[0]).await,
+        (200, Some(KEY_A.into()), Some(a_id))
+    );
 
-    // 회사 키를 해제하면 인가도 옮길 키로 넘어간다.
-    let (status, _) = h
-        .call(
-            "PUT",
-            &path,
-            &h.alice,
-            Some(authorize(&[b_id], Some(b_id), &[a_id], Some(a_id))).map(|mut v| {
-                v["bound_keys"] = json!({"move_to": b_id});
-                v
-            }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    // Provider 키를 해제하면 인가도 옮길 키로 넘어간다.
+    let mut back = authorize(&[b_id], &[a_id]);
+    back["bound_keys"] = json!({"move_to": b_id});
+    assert_eq!(h.call("PUT", &path, &h.alice, Some(back)).await.0, 200);
     let version: String =
         h.call("GET", CREDS, &h.alice, None).await.1["providers"][0]["credentials"]
             .as_array()
@@ -1134,19 +1089,25 @@ async fn user_authorization_limits_company_keys_and_blocks_deauthorized_keys() {
         .await;
     assert_eq!(
         detail["principal"]["provider_credentials"],
-        json!([{"provider":"anthropic","credentials":[{"id":a_id,"label":"team-a","hint":"0001","default":true}]}])
+        json!([{"provider":"anthropic","credentials":[{"id":a_id,"label":"team-a","hint":"0001"}]}])
     );
-    // 목록을 비우면 제한이 풀린다.
-    let (status, cleared) = h
-        .call(
-            "PUT",
-            &path,
-            &h.alice,
-            Some(authorize(&[], None, &[a_id], Some(a_id))),
-        )
+    // 목록을 비우면 그 Provider를 쓸 수 없다. 연결된 가상 키가 있으면 막을지 옮길지 골라야 한다.
+    let (status, busy) = h
+        .call("PUT", &path, &h.alice, Some(authorize(&[], &[a_id])))
         .await;
+    assert_eq!(
+        (status, busy["error"]["code"].clone()),
+        (409, json!("credential_authorization_in_use"))
+    );
+    let mut clear = authorize(&[], &[a_id]);
+    clear["bound_keys"] = json!("block");
+    let (status, cleared) = h.call("PUT", &path, &h.alice, Some(clear)).await;
     assert_eq!(status, 200, "{cleared}");
     assert_eq!(cleared["authorization"]["provider_credentials"], json!([]));
+    let (status, _) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(a_id))))
+        .await;
+    assert_eq!(status, 403);
     h.db.close().await;
 }
 

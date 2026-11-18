@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
+import { pickOption } from '../../test-select';
 import { session } from '../../lib/api';
 const principal = { id: 'service1', kind: 'service', display_name: '서비스', email: null, management_owner_id: 'owner1', version: '7', policy: { id: 'policy1', version: '13', disabled: false, grants: [], limits: { budget: null, rpm: null, tpm: null, count_rpm: null } }, inference_safety: { paused: true, version: '29', reason: 'cost_bound_violation', paused_at: '2026-01-01Z', trigger_request_id: 'request1' }, block_state: { blocked: true, reasons: ['inference_paused'], global_unknown_count: '0', expired_dispatch_count: '0' } };
 const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
@@ -26,7 +27,12 @@ test('admin_direct_route_uses_separate_principal_policy_safety_cas_and_ack_get',
   expect(screen.getByRole('link', { name: '사용자·정책·키 관리' }).getAttribute('aria-current')).toBe('page');
   fireEvent.change(screen.getByLabelText('서비스 이름'), { target: { value: '새 서비스' } });
   fireEvent.submit(screen.getByRole('form', { name: '서비스 변경' }));
-  fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
+  // 관리 명령은 확인 창(모달)에서 실행한다. 창이 열리면 실행 버튼에 초점이 간다.
+  const confirm = screen.getByRole('dialog', { name: '서비스 변경 확인' });
+  expect(document.activeElement).toBe(within(confirm).getByRole('button', { name: '명령 실행' }));
+  expect(confirm.textContent).toContain('새 서비스');
+  fireEvent.click(within(confirm).getByRole('button', { name: '명령 실행' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
   await screen.findByText(/서버 재조회 완료/);
   expect(calls.find(c => c.method === 'PATCH')?.body?.expected_version).toBe('7');
   fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: '정책 확인' } });
@@ -119,7 +125,7 @@ test('policy_form_rejects_a_malformed_budget_without_sending', async () => {
   }));
   render(<App />);
   expect((await screen.findByRole('group', { name: '사용할 수 있는 모델·API' })).textContent).toContain('고를 수 있는 모델이 없습니다');
-  fireEvent.change(screen.getByLabelText('월 예산 방식'), { target: { value: 'reserved' } });
+  pickOption(screen.getByLabelText('월 예산 방식'), '예약 기반');
   fireEvent.change(screen.getByLabelText('월 예산 (USD)'), { target: { value: '1.5.0' } });
   fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: 'x' } });
   fireEvent.submit(screen.getByRole('form', { name: '정책 교체' }));

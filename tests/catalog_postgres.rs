@@ -1,3 +1,6 @@
+#[path = "support/finance.rs"]
+#[allow(dead_code)]
+mod finance;
 #[path = "support/postgres.rs"]
 mod postgres;
 #[path = "support/provider.rs"]
@@ -245,10 +248,28 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
         json!(["synthetic-"])
     );
     let body = json!({"model":"synthetic-text","max_tokens":100,"messages":[{"role":"user","content":"x"}]});
+    let alice: Uuid =
+        sqlx::query_scalar("SELECT id FROM gw_principals WHERE email='alice@example.test'")
+            .fetch_one(h.db.store.pool())
+            .await
+            .unwrap();
+    finance::allow(h.db.store.pool(), alice).await;
+    let issue = finance::with_credentials(
+        json!({"name":"k","validity":"1_year","grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}}),
+    );
     let (status, _) = h
-        .call("POST", "/v1/messages", &h.alice, None, Some(body.clone()))
+        .call(
+            "POST",
+            "/api/keys",
+            &h.alice,
+            Some(Uuid::new_v4()),
+            Some(issue.clone()),
+        )
         .await;
-    assert_eq!(status, 400, "승인 전에는 profile 이 없다");
+    assert_eq!(
+        status, 403,
+        "승인 전에는 그 모델로 가상 키를 발급할 수 없다"
+    );
 
     // 관리자만 동기화할 수 있다.
     let (status, _) = h.sync_as_bob().await;
@@ -323,8 +344,19 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
     sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE principal_id=(SELECT id FROM gw_principals WHERE email='alice@example.test') AND key_id IS NULL")
         .bind(json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]))
         .execute(h.db.store.pool()).await.unwrap();
+    let (status, issued) = h
+        .call(
+            "POST",
+            "/api/keys",
+            &h.alice,
+            Some(Uuid::new_v4()),
+            Some(issue),
+        )
+        .await;
+    assert_eq!(status, 201, "{issued}");
+    let key = issued["key"].as_str().unwrap().to_owned();
     let (status, answer) = h
-        .call("POST", "/v1/messages", &h.alice, None, Some(body.clone()))
+        .call("POST", "/v1/messages", &key, None, Some(body.clone()))
         .await;
     assert_eq!(status, 200, "{answer}");
     assert_eq!(h.provider.calls.lock().await.len(), 1);
@@ -372,7 +404,7 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
         .await;
     assert_eq!(status, 200);
     let (status, second) = h
-        .call("POST", "/v1/messages", &h.alice, None, Some(body.clone()))
+        .call("POST", "/v1/messages", &key, None, Some(body.clone()))
         .await;
     assert_eq!(status, 200, "{second}");
     let costs: Vec<String> =

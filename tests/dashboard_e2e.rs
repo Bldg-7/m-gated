@@ -1,5 +1,8 @@
 #[path = "support/browser_result.rs"]
 mod browser_result;
+#[path = "support/finance.rs"]
+#[allow(dead_code)]
+mod finance;
 #[path = "support/postgres.rs"]
 mod postgres;
 #[path = "support/provider.rs"]
@@ -64,6 +67,8 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
     .execute(db.store.pool())
     .await
     .unwrap();
+    // Provider 키 인가는 필수다. 시험 고정 Provider 키를 인가한다.
+    finance::allow(db.store.pool(), human.id).await;
     let ledger = Arc::new(PgLedger::new(
         db.store.clone(),
         AccessSettings::from_config(&cfg),

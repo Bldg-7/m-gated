@@ -3,7 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { ApiError, session, StaleResponse } from '../../lib/api';
 import type { BudgetTimezone } from '../../lib/types';
 import { failure, ReadState, useResource } from './shared';
-import { Select } from '../../ui/ui';
+import { useTimeFormat } from '../../lib/time';
+import { SearchSelect, Time } from '../../ui/ui';
 
 /** 브라우저가 아는 IANA 시간대 목록. UTC는 목록에 없을 수 있어 앞에 둔다. */
 export function timezones(): string[] {
@@ -28,7 +29,7 @@ function BudgetTimezoneForm({ current, onSaved }: { current: BudgetTimezone; onS
   const { t } = useTranslation();
   const target = current.pending?.timezone ?? current.timezone;
   const [value, setValue] = useState(target), [busy, setBusy] = useState(false), [status, setStatus] = useState<string | null>(null);
-  const mounted = useRef(true);
+  const mounted = useRef(true), format = useTimeFormat();
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const save = async () => {
     const epoch = session.snapshot().epoch, commandId = crypto.randomUUID();
@@ -50,11 +51,11 @@ function BudgetTimezoneForm({ current, onSaved }: { current: BudgetTimezone; onS
     <p className="meta">{t('사용자 정책과 가상 키의 월 예산은 모두 이 시간대의 달력 한 달로 셉니다. 매달 1일 0시(이 시간대 기준)에 사용액이 0으로 돌아갑니다.')}</p>
     <dl className="stack-sm">
       <div><dt>{t('지금 시간대')}</dt><dd className="mono">{current.timezone}</dd></div>
-      <div><dt>{t('이번 예산 기간')}</dt><dd className="mono">{current.period_start} ~ {current.period_end}</dd></div>
-      {current.pending && <div><dt>{t('예약된 변경')}</dt><dd>{t('{{at}}부터 {{timezone}}. 바뀐 직후의 기간은 {{at}}부터 {{end}}까지입니다.', { at: current.pending.effective_from, timezone: current.pending.timezone, end: current.pending.first_period_end })}</dd></div>}
+      <div><dt>{t('이번 예산 기간')}</dt><dd><Time value={current.period_start} /> ~ <Time value={current.period_end} /></dd></div>
+      {current.pending && <div><dt>{t('예약된 변경')}</dt><dd>{t('{{at}}부터 {{timezone}}. 바뀐 직후의 기간은 {{at}}부터 {{end}}까지입니다.', { at: format(current.pending.effective_from), timezone: current.pending.timezone, end: format(current.pending.first_period_end) })}</dd></div>}
     </dl>
     <fieldset disabled={busy} className="stack-sm">
-      <div className="field"><label htmlFor="budget-timezone">{t('시간대')}</label><Select id="budget-timezone" value={value} onChange={e => setValue(e.target.value)}>{timezones().map(z => <option key={z} value={z}>{z}</option>)}</Select></div>
+      <div className="field"><label htmlFor="budget-timezone">{t('시간대')}</label><SearchSelect id="budget-timezone" value={value} onChange={setValue} options={timezones().map(z => ({ value: z, label: z }))} /></div>
       <p className="meta">{t('바꾸면 이번 기간은 지금 시간대로 끝까지 세고, 다음 기간부터 새 시간대를 씁니다. 바뀐 직후의 기간 하나만 이전 기간이 끝난 시각부터 새 시간대의 다음 달 1일 0시까지로 셉니다. 지금 시간대를 다시 고르면 예약된 변경이 취소됩니다.')}</p>
       <div className="actions"><button className="btn-primary" disabled={value === target}>{t('시간대 저장')}</button></div>
     </fieldset>

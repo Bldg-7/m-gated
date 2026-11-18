@@ -252,22 +252,14 @@ impl PgLedger {
                     ctx.actor,
                 )
                 .await?;
-                // 사용자에게 인가된 회사 키는 본인이 고를 수 있다. 인가가 없는 Provider의 키를 고르는 것은
-                // 관리자만 할 수 있다. 고르지 않으면 사용자의 기본 키(없으면 Provider의 기본 키)에 연결한다.
-                if !v.provider_credentials.is_empty()
-                    && super::credentials::choice_needs_admin(
-                        &mut tx,
-                        target_principal,
-                        &v.provider_credentials,
-                    )
-                    .await?
-                {
-                    management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
-                }
+                // 허용한 API의 Provider마다 키 주인에게 인가된 Provider 키를 반드시 골라야 한다.
+                let providers: std::collections::BTreeSet<String> =
+                    v.grants.iter().map(|g| g.provider.clone()).collect();
                 super::credentials::bind_new_key(
                     &mut tx,
                     key.id,
                     target_principal,
+                    &providers,
                     &v.provider_credentials,
                 )
                 .await?;

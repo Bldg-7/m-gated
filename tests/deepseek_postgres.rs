@@ -67,6 +67,8 @@ struct Harness {
     monitor: tokio::task::JoinHandle<()>,
     base: String,
     token: String,
+    /// 관리 API용 SSO 토큰. 추론은 `token`(가상 키)으로만 한다.
+    sso: String,
     principal: uuid::Uuid,
     runtime: Arc<m_gated::runtime::Runtime>,
 }
@@ -119,6 +121,7 @@ impl Harness {
             .unwrap();
         let principal = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"deepseek","model":"synthetic-text","capabilities":["chat_completions"]}])).execute(database.pool()).await.unwrap();
+        let key = finance::virtual_key(&db.store, &cfg, principal).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
             PgLedger::new(
@@ -205,7 +208,8 @@ impl Harness {
             task,
             monitor,
             base: format!("http://{address}"),
-            token,
+            token: key,
+            sso: token,
             principal,
             runtime,
         }
@@ -262,7 +266,7 @@ async fn set(h: &Harness, native: &str, stream: bool) {
 }
 async fn state(h: &Harness) -> (i64, i64, String, i64, i64) {
     h.runtime.wait_requests().await;
-    sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE accounting_state='unknown')::bigint,COALESCE(sum(cost_usd),0)::text,COALESCE((SELECT sum(input_tokens)::bigint FROM gw_usage_totals),0),COALESCE((SELECT sum(output_tokens)::bigint FROM gw_usage_totals),0) FROM gw_requests").fetch_one(h.db.store.pool()).await.unwrap()
+    sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE accounting_state='unknown')::bigint,COALESCE(sum(cost_usd),0)::text,COALESCE((SELECT sum(input_tokens)::bigint FROM test_user_usage_totals),0),COALESCE((SELECT sum(output_tokens)::bigint FROM test_user_usage_totals),0) FROM gw_requests").fetch_one(h.db.store.pool()).await.unwrap()
 }
 async fn sdk(h: &Harness, kind: &str, status: u16, native_status: &str, token: &str) {
     use std::os::unix::fs::DirBuilderExt;
@@ -354,7 +358,7 @@ fn native(stream: bool) -> String {
     }
 }
 async fn strict(h: &Harness) {
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1,tpm_limit=5000")
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1,tpm_limit=5000 WHERE key_id IS NULL")
         .execute(h.db.store.pool())
         .await
         .unwrap();
@@ -452,14 +456,14 @@ async fn deepseek_strict_context_reserves_and_settles_native_thinking() {
         let request = h.request(PATH, body).send();
         tokio::pin!(request);
         tokio::select! {r=&mut request=>panic!("unexpected early response {}",r.is_ok()),_=started=>{}}
-        let snapshot:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM gw_rate_windows) FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+        let snapshot:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
         assert_eq!(snapshot, ("0.004296000000".into(), 4196));
         release.send(()).unwrap();
         let r = request.await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.bytes().await.unwrap(), native(stream));
         assert_eq!(state(&h).await, (1, 0, "0.000120000000".into(), 100, 20));
-        let left:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT settled_tokens FROM gw_rate_windows) FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+        let left:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT settled_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
         assert_eq!(left, ("0.000000000000".into(), 120));
         h.close().await;
     }
@@ -531,7 +535,7 @@ async fn api(
         .unwrap();
     let mut r = client
         .request(method, format!("{}{path}", h.base))
-        .bearer_auth(&h.token)
+        .bearer_auth(&h.sso)
         .header("x-gateway-command-id", uuid::Uuid::new_v4().to_string());
     if let Some(input) = input {
         r = r
@@ -554,7 +558,9 @@ fn limits() -> serde_json::Value {
     serde_json::json!({"budget":null,"rpm":null,"tpm":null,"count_rpm":null})
 }
 async fn key(h: &Harness, service: Option<uuid::Uuid>) -> (String, uuid::Uuid) {
-    let mut input = serde_json::json!({"name":"합성 DeepSeek key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"actual","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":null,"count_rpm":null}});
+    let mut input = finance::with_credentials(
+        serde_json::json!({"name":"합성 DeepSeek key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"actual","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":null,"count_rpm":null}}),
+    );
     if let Some(service) = service {
         input["service_principal_id"] = service.to_string().into();
     }
@@ -600,6 +606,7 @@ async fn deepseek_personal_and_service_keys_apply_both_scopes_owner_and_revoke()
         let(status,v)=api(&h,reqwest::Method::POST,"/api/admin/principals",Some(serde_json::json!({"display_name":"합성 DeepSeek service","management_owner_id":h.principal}))).await;
         assert_eq!(status, 201);
         let service: uuid::Uuid = v["target"]["id"].as_str().unwrap().parse().unwrap();
+        finance::allow(h.db.store.pool(), service).await;
         let service_path = format!("/api/admin/principals/{service}");
         let(status,_)=api(&h,reqwest::Method::PUT,&format!("{service_path}/policy"),Some(serde_json::json!({"expected_version":"1","disabled":false,"grants":grants(),"limits":limits(),"reason":"합성 허용"}))).await;
         assert_eq!(status, 200);
@@ -650,7 +657,7 @@ async fn deepseek_personal_and_service_keys_apply_both_scopes_owner_and_revoke()
 }
 
 async fn reservation(h: &Harness) {
-    let r=sqlx::query("SELECT r.phase,b.reservation_usd::text AS amount,b.remaining_reservation_usd::text AS held,b.reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id ORDER BY admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
+    let r=sqlx::query("SELECT r.phase,b.reservation_usd::text AS amount,b.remaining_reservation_usd::text AS held,b.reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) ORDER BY admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(r.get::<String, _>("phase"), "dispatching");
     assert_eq!(r.get::<String, _>("amount"), "0.004296000000");
     assert_eq!(r.get::<String, _>("held"), "0.004296000000");
@@ -787,6 +794,7 @@ async fn deepseek_absolute_transport_deadline_preserves_five_second_finalization
 }
 
 #[path = "support/finance.rs"]
+#[allow(dead_code)]
 mod finance;
 #[path = "support/pg_proxy.rs"]
 mod pg_proxy;
@@ -802,7 +810,7 @@ async fn deepseek_uncertain_dispatch_original_id_expires_unknown_without_reissui
     for api in [ApiKind::DeepseekChat] {
         let db = postgres::TestDb::new().await;
         let principal = finance::human(db.store.pool()).await;
-        sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode='actual',budget_limit_usd=1,tpm_limit=NULL WHERE principal_id=$1").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode='actual',budget_limit_usd=1,tpm_limit=NULL WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
         let current = finance::current(db.store.pool(), principal).await;
         let proxy = pg_proxy::CommitProxy::new().await;
         let store = db.clock_store(Some(proxy.port)).await;
@@ -867,7 +875,7 @@ async fn deepseek_uncertain_dispatch_original_id_expires_unknown_without_reissui
             Some(Finalized::Unknown)
         );
         assert_eq!(second.recover_expired(spec.id).await.unwrap(), None);
-        let row=sqlx::query("SELECT r.accounting_state,b.remaining_reservation_usd::text AS held,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
+        let row=sqlx::query("SELECT r.accounting_state,b.remaining_reservation_usd::text AS held,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
         assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
         assert_eq!(row.get::<String, _>("held"), "0.000000000000");
         assert!(row.get::<String, _>("period").starts_with("2025-03-01"));
@@ -922,7 +930,7 @@ async fn deepseek_usage_and_terminal_negative_matrix_keeps_unknown_reservation()
         assert!([200, 502].contains(&r.status().as_u16()));
         let _ = r.bytes().await;
         unknown(&h).await;
-        let row:(String,i64)=sqlx::query_as("SELECT remaining_reservation_usd::text,remaining_reserved_tokens FROM gw_request_budgets WHERE state='unknown'").fetch_one(h.db.store.pool()).await.unwrap();
+        let row:(String,i64)=sqlx::query_as("SELECT remaining_reservation_usd::text,remaining_reserved_tokens FROM test_user_request_budgets WHERE state='unknown'").fetch_one(h.db.store.pool()).await.unwrap();
         assert_eq!(
             row,
             ("0.004296000000".into(), 4196),
@@ -1236,7 +1244,7 @@ async fn deepseek_price_snapshot_survives_mutation_and_alias_uncertainty() {
     };
     let db = postgres::TestDb::new().await;
     let id = finance::human(db.store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE principal_id=$1")
+    sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE principal_id=$1 AND key_id IS NULL")
         .bind(id)
         .bind(grants())
         .execute(db.store.pool())
@@ -1300,7 +1308,7 @@ async fn deepseek_unknown_spans_next_month_other_providers() {
     let store = db.clock_store(None).await;
     let id = finance::human(store.pool()).await;
     let rules = serde_json::json!([{"provider":"deepseek","model":"synthetic-text","capabilities":["chat_completions"]},{"provider":"openai","model":"synthetic-text","capabilities":["chat_completions"]},{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]);
-    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=1 WHERE principal_id=$1")
+    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL")
         .bind(id)
         .bind(rules)
         .execute(store.pool())
@@ -1360,7 +1368,7 @@ async fn deepseek_unknown_spans_next_month_other_providers() {
             Err(LedgerError::Unsettled)
         ));
     }
-    let original:(String,String)=sqlx::query_as("SELECT r.accounting_state,b.period_start::text FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id WHERE r.id=$1").bind(root.id).fetch_one(store.pool()).await.unwrap();
+    let original:(String,String)=sqlx::query_as("SELECT r.accounting_state,b.period_start::text FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) WHERE r.id=$1").bind(root.id).fetch_one(store.pool()).await.unwrap();
     assert_eq!(original.0, "unknown");
     assert!(original.1.starts_with("2025-03-01"));
     store.pool().close().await;
@@ -1556,7 +1564,7 @@ async fn deepseek_review_r1_effective_thinking_http_pg() {
         ))
         .await;
         strict(&h).await;
-        sqlx::query("UPDATE gw_policies SET tpm_limit=100000,rpm_limit=100")
+        sqlx::query("UPDATE gw_policies SET tpm_limit=100000,rpm_limit=100 WHERE key_id IS NULL")
             .execute(h.db.store.pool())
             .await
             .unwrap();
@@ -1640,7 +1648,7 @@ async fn deepseek_review_r1_effective_thinking_http_pg() {
                 count * 20
             )
         );
-        let left:(String,i64,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM gw_rate_windows),(SELECT settled_tokens FROM gw_rate_windows) FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+        let left:(String,i64,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows),(SELECT settled_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
         assert_eq!(left, ("0.000000000000".into(), 0, count * 120));
         h.close().await;
     }
@@ -1682,7 +1690,7 @@ async fn deepseek_review_r2_top_p_http_pg() {
         assert_eq!(h.provider.calls.lock().await.last().unwrap().body, b);
     }
     assert_eq!(state(&h).await, (4, 0, "0.000480000000".into(), 400, 80));
-    let left:(String,i64,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM gw_rate_windows),(SELECT settled_tokens FROM gw_rate_windows) FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+    let left:(String,i64,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows),(SELECT settled_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(left, ("0.000000000000".into(), 0, 480));
     h.close().await;
 }
@@ -1758,7 +1766,7 @@ fn feature_native(stream: bool, tool: bool, thinking: bool) -> String {
     wire
 }
 async fn assert_held_feature(h: &Harness) {
-    let held:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM gw_rate_windows) FROM gw_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+    let held:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(held, ("0.004296000000".into(), 4196));
 }
 async fn assert_settled_features(h: &Harness, count: i64) {
@@ -1773,8 +1781,8 @@ async fn assert_settled_features(h: &Harness, count: i64) {
         )
     );
     // 한 scope/lane도 정상 호출 사이에 분창이 바뀔 수 있다. 원래 budget 창 집합을 중복 없이 검사한다.
-    let windows: Vec<(i64, i64, i64)> = sqlx::query_as("WITH expected AS (SELECT scope_id,rate_lane,rate_start,sum(applied_input_tokens+applied_output_tokens)::bigint AS tokens FROM gw_request_budgets GROUP BY scope_id,rate_lane,rate_start) SELECT e.tokens,w.settled_tokens,w.reserved_tokens FROM expected e JOIN gw_rate_windows w ON w.scope_id=e.scope_id AND w.lane=e.rate_lane AND w.window_start=e.rate_start").fetch_all(h.db.store.pool()).await.unwrap();
-    let counts:(i64,i64)=sqlx::query_as("SELECT count(*)::bigint,(SELECT count(*) FROM (SELECT DISTINCT scope_id,rate_lane,rate_start FROM gw_request_budgets) b)::bigint FROM gw_rate_windows").fetch_one(h.db.store.pool()).await.unwrap();
+    let windows: Vec<(i64, i64, i64)> = sqlx::query_as("WITH expected AS (SELECT scope_id,rate_lane,rate_start,sum(applied_input_tokens+applied_output_tokens)::bigint AS tokens FROM test_user_request_budgets GROUP BY scope_id,rate_lane,rate_start) SELECT e.tokens,w.settled_tokens,w.reserved_tokens FROM expected e JOIN test_user_rate_windows w ON w.scope_id=e.scope_id AND w.lane=e.rate_lane AND w.window_start=e.rate_start").fetch_all(h.db.store.pool()).await.unwrap();
+    let counts:(i64,i64)=sqlx::query_as("SELECT count(*)::bigint,(SELECT count(*) FROM (SELECT DISTINCT scope_id,rate_lane,rate_start FROM test_user_request_budgets) b)::bigint FROM test_user_rate_windows").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(counts, (windows.len() as i64, windows.len() as i64));
     assert!(!windows.is_empty());
     let mut settled = 0;
@@ -1784,12 +1792,13 @@ async fn assert_settled_features(h: &Harness, count: i64) {
         settled += actual;
     }
     assert_eq!(settled, count * 120);
-    let budget:(i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE reservation_usd=0.004296 AND reserved_tokens=4196 AND remaining_reservation_usd=0 AND remaining_reserved_tokens=0 AND applied_cost_usd=0.00012 AND state='settled')::bigint,(SELECT count(*) FROM gw_usage_events WHERE kind='final') FROM gw_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE reservation_usd=0.004296 AND reserved_tokens=4196 AND remaining_reservation_usd=0 AND remaining_reserved_tokens=0 AND applied_cost_usd=0.00012 AND state='settled')::bigint,(SELECT count(*) FROM gw_usage_events WHERE kind='final') FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(budget, (count, count, count));
-    let reserved: String = sqlx::query_scalar("SELECT reserved_usd::text FROM gw_usage_totals")
-        .fetch_one(h.db.store.pool())
-        .await
-        .unwrap();
+    let reserved: String =
+        sqlx::query_scalar("SELECT reserved_usd::text FROM test_user_usage_totals")
+            .fetch_one(h.db.store.pool())
+            .await
+            .unwrap();
     assert_eq!(reserved, "0.000000000000");
     let calls = h.provider.calls.lock().await;
     assert_eq!(calls.len(), count as usize);
@@ -2069,7 +2078,7 @@ async fn s9_upstream_idle_timeout_is_504_before_headers_and_incomplete_after_hea
     assert!(began.elapsed() >= std::time::Duration::from_secs(119));
     for h in [&h0, &h1] {
         assert_eq!(h.provider.calls.lock().await.len(), 1);
-        let held:(String,String,String,i64,i64)=sqlx::query_as("SELECT r.phase,b.reservation_usd::text,b.remaining_reservation_usd::text,b.reserved_tokens,b.remaining_reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id").fetch_one(h.db.store.pool()).await.unwrap();
+        let held:(String,String,String,i64,i64)=sqlx::query_as("SELECT r.phase,b.reservation_usd::text,b.remaining_reservation_usd::text,b.reserved_tokens,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").fetch_one(h.db.store.pool()).await.unwrap();
         assert_eq!(
             held,
             (
@@ -2165,7 +2174,7 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
                 row,
                 ("finished".into(), code.into(), "unknown".into(), true)
             );
-            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM gw_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(
                 held,
                 ("0.004296000000".into(), "0.004296000000".into(), 4196, 4196)
@@ -2233,12 +2242,12 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
             Some("0.000120000000".into())
         )
     );
-    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM gw_request_budgets b JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(
         budget,
         ("0.000000000000".into(), 0, 0, "0.000120000000".into(), 1)
     );
-    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(final_state, ("failed".into(), "provider".into(), 120));
     h.provider
         .set(
@@ -2269,7 +2278,7 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
         "",
     ))
     .await;
-    sqlx::query("UPDATE gw_policies SET tpm_limit=100000")
+    sqlx::query("UPDATE gw_policies SET tpm_limit=100000 WHERE key_id IS NULL")
         .execute(h.db.store.pool())
         .await
         .unwrap();
@@ -2300,7 +2309,7 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
     stopped.await.unwrap();
     drop(tx);
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(
         row,
         (
@@ -2368,7 +2377,7 @@ async fn s9_deepseek_feature_accounting_checks_each_original_rate_window() {
         let _ = r.bytes().await.unwrap();
         h.runtime.wait_requests().await;
     }
-    let windows:(i64,i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(DISTINCT scope_id)::bigint,count(DISTINCT lane)::bigint,count(DISTINCT window_start)::bigint FROM gw_rate_windows").fetch_one(h.database.pool()).await.unwrap();
+    let windows:(i64,i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(DISTINCT scope_id)::bigint,count(DISTINCT lane)::bigint,count(DISTINCT window_start)::bigint FROM test_user_rate_windows").fetch_one(h.database.pool()).await.unwrap();
     assert_eq!(windows, (2, 1, 1, 2));
     // 원래 helper의 단일행 가정을 두 정상 분창으로 직접 반증한다.
     use futures_util::FutureExt;

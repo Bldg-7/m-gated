@@ -1,6 +1,7 @@
-import { useState, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useState, type ReactNode, type TextareaHTMLAttributes } from 'react';
 import { useTranslation } from 'react-i18next';
 import { msgid } from '../lib/i18n';
+import { useTimeFormat } from '../lib/time';
 
 /** 정밀 장부 디자인 시스템의 공용 표시 요소. 값은 서버 문자열을 그대로 쓰고 화면에서 새 숫자를 만들지 않는다. */
 export type Tone = 'success' | 'warning' | 'critical' | 'info' | 'neutral' | 'blocked';
@@ -57,10 +58,14 @@ export function Money({ value }: { value: string | null }) {
   return <span className="money"><span>{head}</span>{zeros && <span className="money-zeros">{zeros}</span>}{' '}<span className="money-unit">USD</span></span>;
 }
 
-/** 기본 화살표를 끈 select에 CSS 화살표를 붙이는 감싸개. CSP(img-src 'self') 때문에 배경 이미지를 쓰지 않는다. */
-export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <span className="select"><select {...props} /></span>;
+/** 서버 시각을 지금 기준(브라우저 시간 또는 UTC)으로 YYYY-MM-DD HH:mm까지 보여 준다. 서버 값은 dateTime에 그대로 남긴다. */
+export function Time({ value }: { value: string }) {
+  const format = useTimeFormat();
+  return <time className="mono" dateTime={value}>{format(value)}</time>;
 }
+
+export { Select, SearchSelect, type SelectOption, type SelectProps } from './select';
+export { Modal, type ModalProps } from './modal';
 
 /**
  * 크기 조절 손잡이 없이 rows로 처음 높이를 정한다.

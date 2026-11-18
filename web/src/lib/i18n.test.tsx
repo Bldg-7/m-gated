@@ -39,7 +39,7 @@ test('language_switch_renders_english_and_only_remembers_an_explicit_english_cho
   await screen.findByRole('heading', { name: 'Usage for the period' });
   expect(screen.getByRole('heading', { level: 1, name: 'My usage' })).toBeTruthy();
   expect(screen.getByText('Unsettled (all time): 1 / Expired billable executions: 0')).toBeTruthy();
-  expect(screen.getByRole('link', { name: 'My keys' })).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'My virtual keys' })).toBeTruthy();
   expect(document.documentElement.lang).toBe('en');
   expect(document.title).toBe('My usage · m-gated');
   expect(localStorage.getItem('m-gated.lang')).toBe('en');

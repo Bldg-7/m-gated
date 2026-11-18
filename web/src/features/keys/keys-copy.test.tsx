@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
+import { pickOption } from '../../test-select';
 import { session } from '../../lib/api';
-const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'cred1', label: 'team-a', hint: '0001' }] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); Reflect.deleteProperty(navigator, 'clipboard'); });
 
@@ -15,10 +16,10 @@ async function issue() {
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
   }));
   render(<App />);
-  await screen.findByRole('heading', { name: '내 키' });
+  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '복사 키' } });
-  fireEvent.change(screen.getByLabelText('유효기간'), { target: { value: 'unlimited' } });
-  fireEvent.submit(screen.getByRole('form', { name: '개인 키 발급' }));
+  pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
+  fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   fireEvent.click(await screen.findByRole('button', { name: '발급 확인' }));
   await screen.findByText('one-time-synthetic-secret');
 }
@@ -28,19 +29,19 @@ test('issued_key_is_copied_only_when_the_copy_button_is_pressed', async () => {
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
   await issue();
   expect(writeText).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: '원문 복사' }));
+  fireEvent.click(screen.getByRole('button', { name: '키 복사' }));
   await screen.findByText('클립보드에 복사했습니다.');
   expect(writeText).toHaveBeenCalledExactlyOnceWith('one-time-synthetic-secret');
-  fireEvent.click(screen.getByRole('button', { name: '원문 닫기' }));
+  fireEvent.click(screen.getByRole('button', { name: '닫기' }));
   expect(screen.queryByText('one-time-synthetic-secret')).toBeNull();
-  expect(screen.queryByRole('button', { name: '원문 복사' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '키 복사' })).toBeNull();
   expect(localStorage.length + sessionStorage.length).toBe(0);
 });
 
 test('copy_failure_keeps_the_key_visible_and_asks_for_manual_copy', async () => {
   Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn(() => Promise.reject(new Error('denied'))) }, configurable: true });
   await issue();
-  fireEvent.click(screen.getByRole('button', { name: '원문 복사' }));
-  await screen.findByText('복사하지 못했습니다. 원문을 직접 선택해 복사하세요.');
+  fireEvent.click(screen.getByRole('button', { name: '키 복사' }));
+  await screen.findByText('복사하지 못했습니다. 키를 직접 선택해 복사하세요.');
   expect(screen.getByText('one-time-synthetic-secret')).toBeTruthy();
 });

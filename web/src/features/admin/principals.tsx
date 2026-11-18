@@ -4,6 +4,7 @@ import { session } from '../../lib/api';
 import { msgid } from '../../lib/i18n';
 import { Link, navigate, useRoute } from '../../lib/router';
 import type { Page, Grant, Limits } from '../../lib/types';
+import { useTimeFormat } from '../../lib/time';
 import { Pill, Select, StatusBadge } from '../../ui/ui';
 import { BudgetTimezoneNote, KeysScreen } from '../keys/keys';
 import { CredentialAccess } from './access';
@@ -25,8 +26,8 @@ export function PrincipalsScreen() {
     <section aria-labelledby="principal-list-heading" className="stack">
       <h2 id="principal-list-heading">{t('사용자 목록')}</h2>
       <form aria-label={t('사용자 조회')} className="filters" onSubmit={e => { const f = fields(e), q = new URLSearchParams(); for (const key of ['kind', 'disabled', 'limit']) if (f.get(key)) q.set(key, String(f.get(key))); setQuery(q.toString()); if (q.toString() === query) void page.reload().catch(() => {}); }}>
-        <div className="field"><label htmlFor="principal-kind">{t('사용자 종류')}</label><Select id="principal-kind" name="kind"><option value="">{t('전체')}</option><option value="human">{t('사람')}</option><option value="service">{t('서비스')}</option></Select></div>
-        <div className="field"><label htmlFor="principal-disabled">{t('계정 정지')}</label><Select id="principal-disabled" name="disabled"><option value="">{t('전체')}</option><option value="true">{t('정지')}</option><option value="false">{t('활성')}</option></Select></div>
+        <div className="field"><label htmlFor="principal-kind">{t('사용자 종류')}</label><Select id="principal-kind" name="kind" defaultValue="" options={[{ value: '', label: t('전체') }, { value: 'human', label: t('사람') }, { value: 'service', label: t('서비스') }]} /></div>
+        <div className="field"><label htmlFor="principal-disabled">{t('계정 정지')}</label><Select id="principal-disabled" name="disabled" defaultValue="" options={[{ value: '', label: t('전체') }, { value: 'true', label: t('정지') }, { value: 'false', label: t('활성') }]} /></div>
         <label>{t('사용자 페이지 크기')}<input name="limit" type="number" min="1" max="100" /></label>
         <div className="actions"><button className="btn-primary">{t('사용자 조회')}</button></div>
       </form>
@@ -66,7 +67,7 @@ function PrincipalEditor({ id }: { id: string }) {
   const { t } = useTranslation();
   const detail = useResource<PrincipalDetail>(`/api/admin/principals/${encodeURIComponent(id)}`);
   const command = useCommand(async () => { await detail.reload(); });
-  const [formError, setFormError] = useState<string | null>(null), p = detail.data?.principal;
+  const [formError, setFormError] = useState<string | null>(null), p = detail.data?.principal, format = useTimeFormat();
   return <section aria-label={t('사용자 상세')} className="stack">
     <ReadState {...detail} />{formError && <p role="alert">{formError}</p>}{command.view}{p && <>
     <div className={p.block_state.reasons.length ? 'card card-critical' : 'card'}>
@@ -80,7 +81,7 @@ function PrincipalEditor({ id }: { id: string }) {
     </div>
     <div className="grid-2">
       {p.kind === 'service' && <form key={`principal-${p.version}`} aria-label={t('서비스 변경')} onSubmit={e => { const f = fields(e); command.prepare({ label: msgid('서비스 변경 확인'), url: `/api/admin/principals/${p.id}`, method: 'PATCH', body: { expected_version: p.version, display_name: String(f.get('display_name')), management_owner_id: String(f.get('owner')) } }); }}><fieldset disabled={command.busy} className="group"><legend>{t('서비스 변경')}</legend><label>{t('서비스 이름')}<input name="display_name" defaultValue={p.display_name} required maxLength={100} /></label><label>{t('서비스 owner ID')}<input name="owner" className="mono" spellCheck={false} defaultValue={p.management_owner_id ?? ''} required /></label><div className="actions"><button className="btn-primary">{t('서비스 변경 확인')}</button></div></fieldset></form>}
-      <section aria-label={t('자동 안전차단')} className={p.inference_safety.paused ? 'card card-critical' : 'card'}><h3>{t('자동 과금 안전차단')}</h3><p className="meta">{t('{{state}} · 안전 버전 {{version}} · 사유 {{reason}} · 시각 {{at}} · 원인 요청 {{request}}', { state: p.inference_safety.paused ? t('차단 중') : t('해제 상태'), version: p.inference_safety.version, reason: p.inference_safety.reason ?? t('없음'), at: p.inference_safety.paused_at ?? t('없음'), request: p.inference_safety.trigger_request_id ?? t('없음') })}</p><p className="meta">{t('별도 해제는 unknown·계정 정지·fence·예산·키 회수를 해제하지 않습니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/api/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>
+      <section aria-label={t('자동 안전차단')} className={p.inference_safety.paused ? 'card card-critical' : 'card'}><h3>{t('자동 과금 안전차단')}</h3><p className="meta">{t('{{state}} · 안전 버전 {{version}} · 사유 {{reason}} · 시각 {{at}} · 원인 요청 {{request}}', { state: p.inference_safety.paused ? t('차단 중') : t('해제 상태'), version: p.inference_safety.version, reason: p.inference_safety.reason ?? t('없음'), at: p.inference_safety.paused_at ? format(p.inference_safety.paused_at) : t('없음'), request: p.inference_safety.trigger_request_id ?? t('없음') })}</p><p className="meta">{t('별도 해제는 unknown·계정 정지·fence·예산·키 회수를 해제하지 않습니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/api/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>
     </div>
     <PolicyForm key={`policy-${p.policy.version}`} principalId={p.id} policy={p.policy} ceiling={detail.data!.execution_ceiling.grants} busy={command.busy} onSubmit={body => command.prepare({ label: msgid('정책 전체 교체 확인'), url: `/api/admin/principals/${p.id}/policy`, method: 'PUT', body })} onError={setFormError} />
     <CredentialAccess principalId={p.id} authorized={p.provider_credentials ?? []} onChanged={async () => { await detail.reload(); }} />
@@ -146,7 +147,7 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
     </fieldset>
     <fieldset className="stack-sm"><legend>{t('한도')}</legend>
       <div className="form-grid">
-        <div className="field"><label htmlFor="policy-budget-mode">{t('월 예산 방식')}</label><Select id="policy-budget-mode" value={budgetMode} onChange={e => setBudgetMode(e.target.value)}><option value="none">{t('예산 없음')}</option><option value="actual">{t('실사용량 (하드캡 아님)')}</option><option value="reserved">{t('예약 기반')}</option></Select></div>
+        <div className="field"><label htmlFor="policy-budget-mode">{t('월 예산 방식')}</label><Select id="policy-budget-mode" value={budgetMode} onChange={setBudgetMode} options={[{ value: 'none', label: t('예산 없음') }, { value: 'actual', label: t('실사용량 (하드캡 아님)') }, { value: 'reserved', label: t('예약 기반') }]} /></div>
         {budgetMode !== 'none' && <label>{t('월 예산 (USD)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} defaultValue={budget ? shortUsd(budget.limit_usd) : ''} required /></label>}
         <label>{t('분당 요청 수 한도 (RPM)')}<input name="rpm" className="mono" inputMode="numeric" defaultValue={policy.limits.rpm ?? ''} placeholder={t('제한 없음')} /></label>
         <label>{t('분당 토큰 수 한도 (TPM)')}<input name="tpm" className="mono" inputMode="numeric" defaultValue={policy.limits.tpm ?? ''} placeholder={t('제한 없음')} /></label>

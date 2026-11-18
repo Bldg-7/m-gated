@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import type { Balance, Usage } from '../../lib/types';
-import { Money } from '../../ui/ui';
+import { Money, Time } from '../../ui/ui';
 export function money(value: string | null): string { return value === null ? '미확인' : `${value} USD`; }
 /** 한도 대비 비율 막대. 장식용(aria-hidden)이며 적힌 금액은 모두 서버 값이다. */
 function Meter({ balance: b }: { balance: Balance }) {
@@ -21,8 +21,8 @@ export function UsageView({ usage }: { usage: Usage }) {
   return <>
     <section aria-labelledby="period-heading" className="stack">
       <div className="stack-sm"><h2 id="period-heading">{t('조회 기간 사용량')}</h2>
-        <p className="meta"><span className="mono">{usage.from} ~ {usage.to}</span> {t('(끝 시각 제외)')} · {t('관측')}: <span className="mono">{usage.as_of}</span> · {t('집계 모드')}: {usage.aggregation === 'detail' ? t('상세') : t('보관된 기간 합계')}</p>
-        {usage.detail_available_from && <p className="meta">{t('상세 가용 시작')}: <span className="mono">{usage.detail_available_from}</span></p>}
+        <p className="meta"><Time value={usage.from} /> ~ <Time value={usage.to} /> {t('(끝 시각 제외)')} · {t('관측')}: <Time value={usage.as_of} /> · {t('집계 모드')}: {usage.aggregation === 'detail' ? t('상세') : t('보관된 기간 합계')}</p>
+        {usage.detail_available_from && <p className="meta">{t('상세 가용 시작')}: <Time value={usage.detail_available_from} /></p>}
       </div>
       <dl className="stats">
         <div className="stat"><dt>{t('확정 비용')}</dt><dd><Money value={usage.settled_usd} /></dd></div>
@@ -40,7 +40,7 @@ export function UsageView({ usage }: { usage: Usage }) {
       {usage.budget_balances.length > 0 && <div className="grid-cards">{usage.budget_balances.map(b => <article key={b.scope_id} className={b.balance_state === 'unresolved' || b.blocked ? 'card card-critical' : 'card'}>
         <div className="stack-sm">
           <div className="row row-between"><h3>{b.scope_kind === 'principal' ? t('사용자') : t('선택 키 {{key}}', { key: b.key_id })}</h3><span className={b.mode === 'actual' ? 'pill tone-warning' : 'pill'}>{b.mode === 'actual' ? t('실사용량') : t('예약 기반')}</span></div>
-          <p className="meta"><span className="mono">{b.period_start} ~ {b.period_end}</span> / {b.timezone}</p>
+          <p className="meta"><Time value={b.period_start} /> ~ <Time value={b.period_end} /> / {b.timezone}</p>
         </div>
         <Meter balance={b} />
         <dl className="kv kv-figures">
@@ -53,7 +53,7 @@ export function UsageView({ usage }: { usage: Usage }) {
         {b.blocked && <p className="callout callout-critical">{t('차단 사유: {{reasons}}', { reasons: b.reasons.join(', ') })}</p>}
         <div className="stack-sm">
           <p className="meta">{t('이 scope 미정산 {{scope}} · 사용자 전체 미정산 {{principal}}', { scope: b.scope_unknown_count, principal: b.principal_unknown_count })}</p>
-          <p className="meta">{t('관측')}: <span className="mono">{b.as_of}</span>, {t('정책 버전')}: {b.policy_version}</p>
+          <p className="meta">{t('관측')}: <Time value={b.as_of} />, {t('정책 버전')}: {b.policy_version}</p>
           <p className="meta">scope ID: <span className="mono">{b.scope_id}</span> · {t('설정 지문')}: <span className="mono">{b.config_digest}</span></p>
         </div>
       </article>)}</div>}

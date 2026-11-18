@@ -213,7 +213,11 @@ impl NativeClient {
             provider: self.provider,
         })
     }
-    /// 고정한 회사 키의 DB id. 테스트 고정 키는 None이다.
+    /// DB의 Provider 키를 쓰는 client인지(테스트 고정 키가 아닌지).
+    pub fn uses_store(&self) -> bool {
+        matches!(self.key, KeySource::Store(_))
+    }
+    /// 고정한 Provider 키의 DB id. 테스트 고정 키는 None이다.
     pub fn credential_id(&self) -> Option<Uuid> {
         match &self.key {
             KeySource::Bound { id, .. } => Some(*id),

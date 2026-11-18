@@ -466,7 +466,16 @@ async fn execute(
     let Some(client) = state.gateway.clients.get(&provider) else {
         return error(id, StatusCode::BAD_REQUEST, "unsupported_model", true);
     };
-    // 가상 키가 연결된 회사 키의 인가가 해제됐으면 장부 행 없이 거절한다.
+    // 가상 키에 이 Provider의 Provider 키가 연결돼 있지 않으면 장부 행 없이 거절한다.
+    if client.uses_store() && !human.blocked(provider) && human.credential_for(provider).is_none() {
+        return error(
+            id,
+            StatusCode::FORBIDDEN,
+            "provider_credential_unbound",
+            true,
+        );
+    }
+    // 가상 키가 연결된 Provider 키의 인가가 해제됐으면 장부 행 없이 거절한다.
     if human.blocked(provider) {
         return error(
             id,
@@ -1028,6 +1037,7 @@ fn native_auth(id: Uuid, e: AuthError) -> Response {
         "auth_source_forbidden" => "auth_source_forbidden",
         "access_denied" => "access_denied",
         "owner_inactive" => "owner_inactive",
+        "virtual_key_required" => "virtual_key_required",
         "db_unavailable" => "db_unavailable",
         _ => "auth_dependency_unavailable",
     };

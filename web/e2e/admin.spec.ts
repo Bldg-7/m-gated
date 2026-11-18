@@ -1,4 +1,5 @@
 import { test, expect, type BrowserContext, type Page, type Route } from '@playwright/test';
+import { ensureProviderKey, pickOption } from './select';
 const origin = 'https://m-gated.example.test', transport = process.env.E2E_BASE_URL!;
 const service = process.env.E2E_SERVICE_ID!, alice = process.env.E2E_ADMIN_ID!, bob = process.env.E2E_BOB_ID!;
 test.use({ timezoneId: 'UTC' });
@@ -9,7 +10,7 @@ async function open(page: Page, context: BrowserContext, path: string) { page.on
 async function execute(page: Page) { await page.getByRole('button', { name: '명령 실행', exact: true }).focus(); await page.keyboard.press('Enter'); await expect(page.getByRole('status').filter({ hasText: '서버 재조회 완료' })).toBeVisible(); }
 async function json(page: Page, path: string) { return page.evaluate(async path => { const r = await fetch(path); return { status: r.status, body: await r.json() }; }, path); }
 async function cookieCommand(page: Page, path: string, body: unknown) { return page.evaluate(async ({ path, body }) => { const csrf = await (await fetch('/api/csrf')).json(); const r = await fetch(path, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf.token, 'X-Gateway-Command-ID': crypto.randomUUID() }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; }, { path, body }); }
-async function prepareSettlement(page: Page, cost: string, reason: string) { await page.getByLabel('처리 결정', { exact: true }).selectOption(cost === '0.000000000000' ? 'no_charge' : 'charged'); await page.getByLabel('처리 금액 USD', { exact: true }).fill(cost); await page.getByLabel('수동 처리 사유', { exact: true }).fill(reason); const confirm = page.getByLabel('대상 executor 실행 종료를 확인했습니다 (관리자 진술)', { exact: true }); if (await confirm.count()) await confirm.check(); await page.getByRole('button', { name: '수동 정산 확인', exact: true }).click(); }
+async function prepareSettlement(page: Page, cost: string, reason: string) { await pickOption(page.getByLabel('처리 결정', { exact: true }), cost === '0.000000000000' ? '무과금' : '과금'); await page.getByLabel('처리 금액 USD', { exact: true }).fill(cost); await page.getByLabel('수동 처리 사유', { exact: true }).fill(reason); const confirm = page.getByLabel('대상 executor 실행 종료를 확인했습니다 (관리자 진술)', { exact: true }); if (await confirm.count()) await confirm.check(); await page.getByRole('button', { name: '수동 정산 확인', exact: true }).click(); }
 test.beforeEach(async ({ context }) => { await context.route('**/*', async route => { if (new URL(route.request().url()).origin !== origin) return route.abort('blockedbyclient'); const response = await forward(route); await route.fulfill({ response }); }); });
 
 test('admin_principal_separate_three_cas_ack_get_policy_conflict_and_safety', async ({ page, context }) => {
@@ -52,10 +53,14 @@ test('admin_service_create_deny_all_owner_authority_service_key_and_global_keys'
   await owner.route('**/*', async route => { if (new URL(route.request().url()).origin !== origin) return route.abort(); return route.fulfill({ response: await forward(route) }); });
   await ownerPage.goto(`${origin}/dashboard/admin/principals?principal_id=${id}`); await expect(ownerPage.getByRole('alert')).toContainText('관리자 권한이 없습니다'); expect((await json(ownerPage, `/api/admin/principals/${id}`)).status).toBe(403); await owner.close();
   await page.goto(`${origin}/dashboard/admin/principals?principal_id=${service}`); const keys = page.getByRole('region', { name: '사용자 상세', exact: true });
-  await keys.getByLabel('키 이름', { exact: true }).fill('서비스 키'); expect(await keys.getByLabel('유효기간', { exact: true }).inputValue()).toBe(''); await keys.getByLabel('유효기간', { exact: true }).selectOption('unlimited'); await keys.getByRole('form', { name: '서비스 키 발급', exact: true }).getByLabel('anthropic / synthetic-text / messages', { exact: true }).check();
-  await keys.getByRole('button', { name: '발급 내용 확인', exact: true }).click(); await keys.getByRole('button', { name: '발급 확인', exact: true }).click(); await expect(keys.getByRole('region', { name: '발급 원문', exact: true })).toBeVisible();
-  const secret = await keys.getByRole('region', { name: '발급 원문', exact: true }).locator('code').textContent(); await keys.getByRole('button', { name: '원문 닫기', exact: true }).click();
-  await keys.getByRole('button', { name: '서비스 키 회수', exact: true }).click(); await keys.getByRole('button', { name: '회수 확인', exact: true }).click(); await expect(keys.getByRole('button', { name: '서비스 키 회수', exact: true })).toHaveCount(0);
+  await keys.getByLabel('키 이름', { exact: true }).fill('서비스 키'); await expect(keys.getByLabel('유효기간', { exact: true })).toHaveAttribute('data-value', ''); await pickOption(keys.getByLabel('유효기간', { exact: true }), '무제한 (만료 없음, 회수·정지는 적용)');
+  const issueForm = keys.getByRole('form', { name: '서비스 계정의 가상 키 발급', exact: true }); await issueForm.getByLabel('anthropic / synthetic-text / messages', { exact: true }).check();
+  // 발급에는 서비스 계정에 인가된 Provider 키가 꼭 필요하다(관리자도 전체 키에서 고르지 않는다).
+  await ensureProviderKey(issueForm);
+  await keys.getByRole('button', { name: '발급 내용 확인', exact: true }).click(); await page.getByRole('dialog', { name: '발급 확인', exact: true }).getByRole('button', { name: '발급 확인', exact: true }).click();
+  const issued = page.getByRole('dialog', { name: '발급된 키', exact: true }); await expect(issued).toBeVisible();
+  const secret = await issued.locator('code').textContent(); await issued.getByRole('button', { name: '닫기', exact: true }).click(); await expect(issued).toHaveCount(0);
+  await keys.getByRole('button', { name: '서비스 키 회수', exact: true }).click(); await page.getByRole('dialog', { name: '회수 확인', exact: true }).getByRole('button', { name: '회수 확인', exact: true }).click(); await expect(keys.getByRole('button', { name: '서비스 키 회수', exact: true })).toHaveCount(0);
   // 전체 키 목록은 사용자 목록 페이지에 있다.
   await page.goto(`${origin}/dashboard/admin/principals`);
   const allKeys = page.locator('details').filter({ has: page.getByText('전체 키 조회·회수', { exact: true }) }), lookup = allKeys.getByRole('button', { name: '키 조회', exact: true });
@@ -105,8 +110,8 @@ test('admin_usage_current_balances_period_totals_and_retention409_remove_old_amo
   const from = new Date(usage.from), to = new Date(from); to.setUTCMonth(to.getUTCMonth() + 1);
   const oldFigures = await page.locator('table').textContent(); expect(oldFigures).toContain('USD');
   await page.request.post(`${process.env.E2E_CONTROL_URL}/retention`);
-  await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작:'); await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toHaveCount(0); await expect(page.locator('table')).toHaveCount(0); expect(await page.getByLabel('그룹', { exact: true }).inputValue()).toBe('provider');
-  await page.getByLabel('시작 (현지 시각)', { exact: true }).fill(from.toISOString().slice(0, 16)); await page.getByLabel('종료 (현지 시각)', { exact: true }).fill(to.toISOString().slice(0, 16)); await page.getByLabel('그룹', { exact: true }).selectOption(''); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.locator('p', { hasText: '집계 모드: 보관된 기간 합계' })).toBeVisible(); await expect(page.getByText('상세 가용 시작:', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작:'); await expect(page.getByRole('heading', { name: '조회 기간 사용량', exact: true })).toHaveCount(0); await expect(page.locator('table')).toHaveCount(0); await expect(page.getByLabel('그룹', { exact: true })).toHaveAttribute('data-value', 'provider');
+  await page.getByLabel('시작 (현지 시각)', { exact: true }).fill(from.toISOString().slice(0, 16)); await page.getByLabel('종료 (현지 시각)', { exact: true }).fill(to.toISOString().slice(0, 16)); await pickOption(page.getByLabel('그룹', { exact: true }), '없음'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.locator('p', { hasText: '집계 모드: 보관된 기간 합계' })).toBeVisible(); await expect(page.getByText('상세 가용 시작:', { exact: false })).toBeVisible();
 });
 
 test('admin_direct_ids_role_demotion403_purges_forms_cache_and_late_payload', async ({ page, context }) => {

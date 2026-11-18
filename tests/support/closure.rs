@@ -22,7 +22,7 @@ async fn count_explicit_error_is_not_evidence_for_free_or_paid_external_or_inter
                     s4::chargeable_configuration(true)
                 };
                 let h = Harness::with_config(cfg).await;
-                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
                 h.provider.set_count(StatusCode::OK, json_headers(), Bytes::from_static(if bad {
                     br#"{"type":"error","error":{"type":"api_error","message":"synthetic failure"},"input_tokens":1}"#
                 } else { br#"{"input_tokens":321}"# })).await;
@@ -59,12 +59,13 @@ async fn count_explicit_error_is_not_evidence_for_free_or_paid_external_or_inter
                 let accounting = rows[0].get::<String, _>("accounting_state");
                 let cost = rows[0].get::<Option<String>, _>("cost");
                 let source = rows[0].get::<Option<String>, _>("source");
-                let child_budget: (String, String, bool) = sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,remaining_reserved_tokens=reserved_tokens FROM gw_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='count_tokens'").fetch_one(h.db.store.pool()).await.unwrap();
-                let totals: (String, i64) =
-                    sqlx::query_as("SELECT cost_usd::text,unknown_count FROM gw_usage_totals")
-                        .fetch_one(h.db.store.pool())
-                        .await
-                        .unwrap();
+                let child_budget: (String, String, bool) = sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,remaining_reserved_tokens=reserved_tokens FROM test_user_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='count_tokens'").fetch_one(h.db.store.pool()).await.unwrap();
+                let totals: (String, i64) = sqlx::query_as(
+                    "SELECT cost_usd::text,unknown_count FROM test_user_usage_totals",
+                )
+                .fetch_one(h.db.store.pool())
+                .await
+                .unwrap();
                 let first_calls = h.provider.calls.lock().await.len();
                 // 무료 count 실패는 금전 unknown을 만들지 않는다. 후속이 실행되도록 정상 count로 교체한다.
                 h.provider
@@ -205,7 +206,7 @@ async fn sse_unexpected_terminal_usage_native_and_alias_same_or_split_part_stays
                         Bytes::from_static(br#"{"input_tokens":321}"#),
                     )
                     .await;
-                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
                 let tail = if bad {
                     END.replace(
                         r#"{"type":"message_stop"}"#,
@@ -240,7 +241,7 @@ async fn sse_unexpected_terminal_usage_native_and_alias_same_or_split_part_stays
                 stopped.await.unwrap();
                 h.runtime.wait_requests().await;
                 let state: (String, Option<String>, i64) = sqlx::query_as("SELECT accounting_state,cost_usd::text,(SELECT count(*) FROM gw_usage_events e WHERE kind='final' AND e.request_id=r.id) FROM gw_requests r WHERE api='messages'").fetch_one(h.db.store.pool()).await.unwrap();
-                let held: (String, String, i64, i64) = sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM gw_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='messages'").fetch_one(h.db.store.pool()).await.unwrap();
+                let held: (String, String, i64, i64) = sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='messages'").fetch_one(h.db.store.pool()).await.unwrap();
                 let next = h.request(path, BODY).send().await.unwrap();
                 let next_status = next.status();
                 let _ = next.bytes().await.unwrap();

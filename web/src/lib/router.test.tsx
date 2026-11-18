@@ -40,13 +40,13 @@ test('spa_link_moves_between_screens_without_document_navigation_and_remounts_ea
   expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: '전체 사용량' }));
   expect(document.title).toBe('전체 사용량 · m-gated');
 
-  expect(clickRecord(screen.getByRole('link', { name: '내 키' }))).toBe(true);
-  await screen.findByRole('heading', { name: '내 키' });
+  expect(clickRecord(screen.getByRole('link', { name: '내 가상 키' }))).toBe(true);
+  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
   expect(paths).toContain('/api/keys');
 
   await act(async () => { history.pushState(null, '', '/dashboard/'); window.dispatchEvent(new PopStateEvent('popstate')); });
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
-  expect(screen.queryByRole('heading', { name: '내 키' })).toBeNull();
+  expect(screen.queryByRole('heading', { name: '내 가상 키' })).toBeNull();
   expect(paths.filter(path => path === '/api/me')).toHaveLength(1);
 });
 

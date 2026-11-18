@@ -267,6 +267,11 @@ pub fn authentication_error(error: crate::auth::AuthError) -> Response {
             "auth_dependency_unavailable",
             "인증 의존성이 준비되지 않았습니다.",
         ),
+        AuthError::VirtualKeyRequired => (
+            StatusCode::FORBIDDEN,
+            "virtual_key_required",
+            "추론 요청은 가상 키로만 보낼 수 있습니다.",
+        ),
         AuthError::DatabaseUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "db_unavailable",

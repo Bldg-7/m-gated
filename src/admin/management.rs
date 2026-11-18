@@ -72,11 +72,11 @@ pub(super) fn error(e: ManagementError) -> Response {
                 json!({"current_credential_id":current}),
             );
         }
-        AuthorizationConflict(ids, default) => {
+        AuthorizationConflict(ids) => {
             return details(
                 StatusCode::CONFLICT,
                 "credential_authorization_conflict",
-                json!({"credential_ids":ids,"default_credential_id":default}),
+                json!({"credential_ids":ids}),
             );
         }
         AuthorizationInUse(n) => {
@@ -87,6 +87,7 @@ pub(super) fn error(e: ManagementError) -> Response {
             );
         }
         CredentialNotAuthorized => (403, "provider_credential_not_authorized"),
+        CredentialRequired => (400, "provider_credential_required"),
         CredentialDuplicate(id) => {
             return details(
                 StatusCode::CONFLICT,
@@ -94,14 +95,11 @@ pub(super) fn error(e: ManagementError) -> Response {
                 json!({"credential_id":id}),
             );
         }
-        CredentialInUse {
-            bound_keys,
-            default,
-        } => {
+        CredentialInUse { bound_keys } => {
             return details(
                 StatusCode::CONFLICT,
                 "credential_in_use",
-                json!({"bound_keys":bound_keys.to_string(),"default":default}),
+                json!({"bound_keys":bound_keys.to_string()}),
             );
         }
         SecretUnavailable(id) => {
@@ -749,22 +747,13 @@ async fn provider_credentials(
                 .map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok()))
                 .collect()
         };
-        let optional_id = |v: Option<Value>| match v {
-            Some(Value::Null) => Ok(None),
-            Some(Value::String(s)) => Uuid::parse_str(&s).map(Some).map_err(|_| ()),
-            _ => Err(()),
-        };
         if let Some(principal) = principal {
             let provider = take_string("provider").and_then(|p| ProviderId::from_name(&p));
             let credentials = ids(input.remove("credential_ids"));
-            let default = optional_id(input.remove("default_credential_id"));
             let expected = match input.remove("expected") {
                 Some(Value::Object(mut e)) => {
-                    let r = (
-                        ids(e.remove("credential_ids")),
-                        optional_id(e.remove("default_credential_id")),
-                    );
-                    if e.is_empty() { Some(r) } else { None }
+                    let r = ids(e.remove("credential_ids"));
+                    if e.is_empty() { r } else { None }
                 }
                 _ => None,
             };
@@ -779,20 +768,15 @@ async fn provider_credentials(
                 },
                 Some(_) => Err(()),
             };
-            let command = match (provider, credentials, default, expected, bound) {
-                (
-                    Some(provider),
-                    Some(credentials),
-                    Ok(default),
-                    Some((Some(expected_ids), Ok(expected_default))),
-                    Ok(bound),
-                ) if head.method == Method::PUT && input.is_empty() => {
+            let command = match (provider, credentials, expected, bound) {
+                (Some(provider), Some(credentials), Some(expected), Ok(bound))
+                    if head.method == Method::PUT && input.is_empty() =>
+                {
                     CredentialCommand::Authorize {
                         principal,
                         provider,
                         credentials,
-                        default,
-                        expected: (expected_ids, expected_default),
+                        expected,
                         bound,
                     }
                 }
@@ -827,27 +811,16 @@ async fn provider_credentials(
                 }
             }
             ("PATCH", Some(provider), Some(id), None) => {
-                let expected = version(take_string("expected_version"));
-                let label = match input.remove("label") {
-                    None => Ok(None),
-                    Some(Value::String(s)) => Ok(Some(s)),
-                    Some(_) => Err(()),
-                };
-                let make_default = match input.remove("default") {
-                    None => Ok(false),
-                    Some(Value::Bool(true)) => Ok(true),
-                    Some(_) => Err(()),
-                };
-                match (expected, label, make_default) {
-                    (Some(expected), Ok(label), Ok(make_default)) => {
-                        Some(CredentialCommand::Update {
-                            provider,
-                            id,
-                            expected,
-                            label,
-                            make_default,
-                        })
-                    }
+                match (
+                    version(take_string("expected_version")),
+                    take_string("label"),
+                ) {
+                    (Some(expected), Some(label)) => Some(CredentialCommand::Update {
+                        provider,
+                        id,
+                        expected,
+                        label,
+                    }),
                     _ => None,
                 }
             }

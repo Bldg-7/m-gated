@@ -167,10 +167,8 @@ impl CredentialStatus {
 }
 #[derive(Clone, Default)]
 struct Snapshot {
-    /// 사용 중인 회사 키 전체(id → Provider, 상태).
+    /// 사용 중인 Provider 키 전체(id → Provider, 상태).
     by_id: BTreeMap<Uuid, (ProviderId, Entry)>,
-    /// Provider별 기본 키. 연결이 없는 가상 키와 SSO 직접 요청이 쓴다.
-    defaults: BTreeMap<ProviderId, Uuid>,
 }
 
 /// 프로세스의 복호화된 회사 키. 해제되면 원문 메모리를 지운다.
@@ -184,32 +182,22 @@ impl fmt::Debug for CredentialCache {
     }
 }
 impl CredentialCache {
-    /// 요청 하나에 쓸 키. 가상 키에 연결된 키가 있으면 그 키, 없으면 Provider의 기본 키.
-    /// 연결된 키가 해제됐거나 풀 수 없으면 기본 키로 대신하지 않고 None을 돌려준다.
+    /// 요청 하나에 쓸 키: 가상 키에 연결된 Provider 키. 연결이 없거나, 해제됐거나, 풀 수 없으면 None이다.
     pub fn get(&self, provider: ProviderId, bound: Option<Uuid>) -> Option<ActiveCredential> {
         let snapshot = self.entries.read().ok()?;
-        let id = bound.or_else(|| snapshot.defaults.get(&provider).copied())?;
-        match snapshot.by_id.get(&id)? {
+        match snapshot.by_id.get(&bound?)? {
             (p, Entry::Active(active)) if *p == provider => Some(active.clone()),
             _ => None,
         }
     }
-    /// Provider 기본 키의 상태.
+    /// Provider의 상태: 사용 중인 키가 없으면 Missing, 풀 수 없는 키가 하나라도 있으면 Undecryptable.
     pub fn status(&self, provider: ProviderId) -> CredentialStatus {
         let Ok(snapshot) = self.entries.read() else {
             return CredentialStatus::Missing;
         };
-        match snapshot
-            .defaults
-            .get(&provider)
-            .and_then(|id| snapshot.by_id.get(id))
-        {
-            Some((_, Entry::Active(_))) => CredentialStatus::Active,
-            Some((_, Entry::Undecryptable { .. })) => CredentialStatus::Undecryptable,
-            None => CredentialStatus::Missing,
-        }
+        status_of(&snapshot, provider)
     }
-    /// 테스트 조립 전용: DB 없이 키를 넣고 그 Provider의 기본 키로 둔다.
+    /// 테스트 조립 전용: DB 없이 키를 넣는다.
     pub fn insert_for_test(&self, provider: ProviderId, id: Uuid, secret: &str) {
         let mut snapshot = self.entries.write().expect("캐시 lock");
         snapshot.by_id.insert(
@@ -223,7 +211,20 @@ impl CredentialCache {
                 }),
             ),
         );
-        snapshot.defaults.insert(provider, id);
+    }
+}
+fn status_of(snapshot: &Snapshot, provider: ProviderId) -> CredentialStatus {
+    let mut entries = snapshot
+        .by_id
+        .values()
+        .filter(|(p, _)| *p == provider)
+        .peekable();
+    if entries.peek().is_none() {
+        CredentialStatus::Missing
+    } else if entries.any(|(_, e)| matches!(e, Entry::Undecryptable { .. })) {
+        CredentialStatus::Undecryptable
+    } else {
+        CredentialStatus::Active
     }
 }
 
@@ -294,7 +295,7 @@ impl CredentialService {
     /// DB의 active 행과 캐시를 맞춘다. 바뀐 행만 다시 복호화하고 결과는 telemetry에 남긴다.
     pub async fn refresh(&self) -> Result<(), sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id,provider,version,is_default,kek_id,nonce,ciphertext FROM gw_provider_credentials WHERE state='active'",
+            "SELECT id,provider,version,kek_id,nonce,ciphertext FROM gw_provider_credentials WHERE state='active'",
         )
         .fetch_all(self.store.pool())
         .await?;
@@ -334,27 +335,17 @@ impl CredentialService {
                     None => Entry::Undecryptable { version },
                 },
             };
-            if row.get::<bool, _>("is_default") {
-                next.defaults.insert(provider, id);
-            }
             next.by_id.insert(id, (provider, entry));
         }
-        // 설정된 Provider 중 기본 키가 없거나 풀 수 없는 수 + 풀 수 없는 나머지 키 수.
+        // 설정된 Provider 중 사용 중인 키가 없는 수 + 풀 수 없는 키 수.
         let unavailable = self
             .configured()
-            .filter(|p| {
-                next.defaults
-                    .get(p)
-                    .and_then(|id| next.by_id.get(id))
-                    .is_none_or(|(_, e)| !matches!(e, Entry::Active(_)))
-            })
+            .filter(|p| status_of(&next, *p) == CredentialStatus::Missing)
             .count()
             + next
                 .by_id
-                .iter()
-                .filter(|(id, (p, e))| {
-                    matches!(e, Entry::Undecryptable { .. }) && next.defaults.get(p) != Some(id)
-                })
+                .values()
+                .filter(|(_, e)| matches!(e, Entry::Undecryptable { .. }))
                 .count();
         if let Ok(mut entries) = self.cache.entries.write() {
             *entries = next;

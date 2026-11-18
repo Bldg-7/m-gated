@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ApiError, session, StaleResponse } from '../../lib/api';
 import i18n, { msgid } from '../../lib/i18n';
+import { useTimeFormat } from '../../lib/time';
 import { Badge, type Tone } from '../../ui/ui';
 import { failure, ReadState, useResource } from './shared';
 import type { CatalogEntry, CatalogProposal, CatalogProposalItem, CatalogView } from './types';
@@ -38,6 +39,7 @@ function tokens(value: number | null | undefined) {
 /** 모델·가격 카탈로그. 동기화는 변경안만 만들고, 관리자가 비교해 보고 승인해야 적용된다. */
 export function ModelsScreen() {
   const { t } = useTranslation();
+  const format = useTimeFormat();
   const view = useResource<CatalogView>('/api/admin/model-catalog');
   const [proposal, setProposal] = useState<{ id: string; body: CatalogProposal } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -83,7 +85,7 @@ export function ModelsScreen() {
     {view.data && <section aria-label={t('현재 카탈로그')} className="card stack">
       <div className="row row-between"><h3>{t('현재 카탈로그 · 버전 {{version}}', { version: view.data.version })}</h3>
         <div className="actions"><button className="btn-primary" disabled={busy !== null} aria-busy={busy === 'sync' || undefined} onClick={() => void run('sync')}>{busy === 'sync' ? t('동기화 중…') : t('공개 가격 목록과 동기화')}</button></div></div>
-      {view.data.approved_at ? <p className="meta">{t('승인 {{at}} ({{by}})', { at: view.data.approved_at, by: view.data.approved_by_email ?? t('알 수 없음') })}</p> : <p className="meta">{t('아직 승인된 카탈로그가 없습니다. 동기화한 뒤 쓸 모델을 골라 승인하세요.')}</p>}
+      {view.data.approved_at ? <p className="meta">{t('승인 {{at}} ({{by}})', { at: format(view.data.approved_at), by: view.data.approved_by_email ?? t('알 수 없음') })}</p> : <p className="meta">{t('아직 승인된 카탈로그가 없습니다. 동기화한 뒤 쓸 모델을 골라 승인하세요.')}</p>}
       <p className="meta">{t('카탈로그로 관리하는 공급사')}: {view.data.providers.map(p => `${p.provider} (${p.model_prefixes.join(', ')})`).join(' · ') || t('없음')}</p>
       {view.data.entries.length > 0 && <EntriesTable entries={view.data.entries} />}
     </section>}
