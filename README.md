@@ -626,11 +626,16 @@ key: every request goes out with the provider key its virtual key is bound to.
   keys that are still in use move to the new row, so users do not need new virtual keys. Requests already in
   progress keep the key they started with. Other instances pick up the change at their next health
   check (every 5 s).
-- **Retiring.** If virtual keys still in use are bound to the key and the provider has other keys,
-  retiring needs a replacement (`move_to`, another key of the same provider); without it the request
-  fails with `409 credential_in_use`. With it, the bound virtual keys and the users' access move to
-  the chosen key. The last key of a provider can be retired without `move_to`: its bindings and
-  access are removed, and those virtual keys get `403 provider_credential_unbound` for that provider.
+- **Retiring.** Retiring a key never makes a blocked virtual key usable again. Virtual keys that were
+  blocked by removing access stay bound to the retired key and stay blocked until an admin binds them
+  to another key. The other virtual keys bound to the key (not revoked or expired, and whose owners
+  may use the key) are handled as follows:
+  - If the provider has other keys, the request must name a replacement (`move_to`, another key of
+    the same provider); without it, it fails with `409 credential_in_use`. Those virtual keys move to
+    the replacement, and every user who could use the retired key can use the replacement.
+  - If it is the provider's last key, no replacement is needed. Those virtual keys lose their binding
+    and get `403 provider_credential_unbound` for that provider. Users' access to the retired key is
+    removed.
 - **Compare-and-swap.** Each key has an `id` and a `version`, both returned by `GET
   /api/admin/provider-credentials`. The version goes up whenever the key is renamed or retired.
   Rename, replace and retire requests must send the version you last read (`expected_version`); if
@@ -644,7 +649,10 @@ key: every request goes out with the provider key its virtual key is bound to.
   find what a leaked key was used for.
 - **Monitoring.** The `provider_credentials_unavailable` metric is the sum of two counts: configured
   providers with no provider key in use, and keys in use that cannot be decrypted with the current
-  `CREDENTIAL_ENCRYPTION_KEY`. Zero means every key works. `/readyz` is not affected, so an admin can
+  `CREDENTIAL_ENCRYPTION_KEY`. Zero means every key works. To recover a key that cannot be
+  decrypted, replace it with the same provider API key (**Replace key**): its label, bindings and
+  access stay. Adding it again as a new key does not help, because virtual keys stay bound to the
+  old one. `/readyz` is not affected, so an admin can
   still reach the dashboard to register a key.
 
 API (admin only; cookie writes need the usual `Origin` and `X-CSRF-Token`):

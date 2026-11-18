@@ -236,20 +236,28 @@ pub async fn bind_new_key(
 }
 
 /// 사용 중인 가상 키(회수·만료 전)의 연결만 옮긴다. 회수·만료된 키는 쓰던 키를 이력으로 남긴다.
+/// `blocked`가 false면 키 주인에게 `from`이 인가된 연결만 옮긴다. 인가가 풀려 막힌 연결(관리자가 「막기」를 고른 연결)은
+/// 해제된 키에 그대로 남아 계속 막힌다. 관리자가 다시 인가하거나 연결을 바꿔야 다시 쓸 수 있다.
 async fn move_bindings(
     c: &mut PgConnection,
     from: Uuid,
     to: Option<Uuid>,
+    blocked: bool,
 ) -> Result<i64, ManagementError> {
     const ACTIVE: &str = "key_id IN(SELECT id FROM gw_virtual_keys WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()))";
+    let owner = if blocked {
+        ""
+    } else {
+        " AND key_id IN(SELECT k.id FROM gw_virtual_keys k JOIN gw_principal_credentials a ON a.principal_id=k.principal_id WHERE a.credential_id=$1)"
+    };
     let n = match to {
-        Some(to) => sqlx::query(&format!("UPDATE gw_virtual_key_credentials SET credential_id=$2,bound_at=clock_timestamp() WHERE credential_id=$1 AND {ACTIVE}"))
+        Some(to) => sqlx::query(&format!("UPDATE gw_virtual_key_credentials SET credential_id=$2,bound_at=clock_timestamp() WHERE credential_id=$1 AND {ACTIVE}{owner}"))
             .bind(from)
             .bind(to)
             .execute(c)
             .await?,
-        // 마지막 키를 해제하면 연결을 지운다. 나중에 키를 새로 등록하면 그 Provider의 기본 키를 쓴다.
-        None => sqlx::query(&format!("DELETE FROM gw_virtual_key_credentials WHERE credential_id=$1 AND {ACTIVE}"))
+        // 마지막 키를 해제하면 연결을 지운다. 그 가상 키는 이 Provider로 보낼 수 없다(provider_credential_unbound).
+        None => sqlx::query(&format!("DELETE FROM gw_virtual_key_credentials WHERE credential_id=$1 AND {ACTIVE}{owner}"))
             .bind(from)
             .execute(c)
             .await?,
@@ -258,7 +266,15 @@ async fn move_bindings(
     Ok(n as i64)
 }
 
-/// 회사 키를 해제할 때 그 키의 사용자 인가를 옮길 키로 넘긴다. 옮길 키가 없으면(마지막 키) 지운다.
+/// 해제할 때 옮겨야 하는 연결 수: 키 주인에게 이 키가 인가된, 사용 중인 가상 키.
+async fn movable_bindings(c: &mut PgConnection, from: Uuid) -> Result<i64, ManagementError> {
+    Ok(sqlx::query_scalar("SELECT count(*) FROM gw_virtual_key_credentials b JOIN gw_virtual_keys k ON k.id=b.key_id JOIN gw_principal_credentials a ON a.principal_id=k.principal_id AND a.credential_id=b.credential_id WHERE b.credential_id=$1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>clock_timestamp())")
+        .bind(from)
+        .fetch_one(c)
+        .await?)
+}
+
+/// Provider 키를 해제할 때 그 키의 사용자 인가를 옮길 키로 넘긴다. 옮길 키가 없으면(마지막 키) 지운다.
 async fn move_authorizations(
     c: &mut PgConnection,
     from: Uuid,
@@ -574,7 +590,8 @@ impl CredentialService {
                     sqlx::query("INSERT INTO gw_provider_credentials(id,provider,state,kek_id,nonce,ciphertext,fingerprint,hint,verified_at,created_by,label) VALUES($1,$2,'active',$3,$4,$5,$6,$7,clock_timestamp(),$8,$9)")
                         .bind(new).bind(provider.name()).bind(kek.as_slice()).bind(nonce.as_slice()).bind(&sealed).bind(fingerprint.expect("교체 키").as_slice()).bind(credentials::hint(secret)).bind(ctx.actor).bind(old.get::<String, _>("label"))
                         .execute(&mut *tx).await?;
-                    moved = move_bindings(&mut tx, *id, Some(new)).await?;
+                    // 키 교체는 같은 Provider 키로 본다. 막힌 연결도 새 행으로 옮기고, 인가가 없으니 계속 막힌다.
+                    moved = move_bindings(&mut tx, *id, Some(new), true).await?;
                     // 사용자 인가도 새 키로 옮긴다(이름과 같이, 키만 바뀐 같은 Provider 키로 본다).
                     sqlx::query("UPDATE gw_principal_credentials SET credential_id=$2 WHERE credential_id=$1")
                         .bind(id)
@@ -622,15 +639,13 @@ impl CredentialService {
                 {
                     return Err(ManagementError::Invalid);
                 }
-                let bound: i64 = before["bound_keys"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or(ManagementError::Invariant)?;
+                // 막힌 연결은 옮기지 않으므로, 옮길 키가 필요한지는 인가된 연결만 보고 정한다.
+                let bound = movable_bindings(&mut tx, *id).await?;
                 if move_to.is_none() && others && bound > 0 {
                     return Err(ManagementError::CredentialInUse { bound_keys: bound });
                 }
                 retire(&mut tx, *id, ctx.actor).await?;
-                moved = move_bindings(&mut tx, *id, *move_to).await?;
+                moved = move_bindings(&mut tx, *id, *move_to, false).await?;
                 move_authorizations(&mut tx, *id, *move_to).await?;
                 (200, "credential", *id, before, true)
             }

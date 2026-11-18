@@ -1276,3 +1276,108 @@ async fn budget_timezone_is_global_and_changes_from_next_period() {
     assert_eq!(audits, 2);
     h.db.close().await;
 }
+
+/// 「막기」로 막아 둔 가상 키는 그 Provider 키를 해제해도 대신 쓸 키로 옮겨지지 않고 계속 막힌다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn retiring_a_key_keeps_blocked_virtual_keys_blocked() {
+    let h = Http::new().await;
+    for token in [&h.alice, &h.bob] {
+        assert_eq!(h.call("GET", "/api/me", token, None).await.0, 200);
+    }
+    sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE key_id IS NULL")
+        .bind(
+            json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]),
+        )
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    let bob = id_of(&me["principal"]["id"]);
+    let add = |label: &str, secret: &str| json!({"label":label,"secret":secret});
+    let (_, a) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-a", KEY_A)),
+        )
+        .await;
+    let a_id = id_of(&a["target"]["id"]);
+    let (_, b) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-b", KEY_B)),
+        )
+        .await;
+    let b_id = id_of(&b["target"]["id"]);
+    h.service.refresh().await.unwrap();
+    let path = format!("/api/admin/principals/{bob}/provider-credentials");
+    assert_eq!(
+        h.call("PUT", &path, &h.alice, Some(authorize(&[b_id], &[])))
+            .await
+            .0,
+        200
+    );
+    let (status, issued) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(b_id))))
+        .await;
+    assert_eq!(status, 201, "{issued}");
+    let secret = issued["key"].as_str().unwrap().to_owned();
+    // b의 인가를 풀면서 연결된 가상 키를 막는다. bob은 a만 쓸 수 있다.
+    let mut block = authorize(&[a_id], &[b_id]);
+    block["bound_keys"] = json!("block");
+    assert_eq!(h.call("PUT", &path, &h.alice, Some(block)).await.0, 200);
+    assert_eq!(h.infer(&secret).await.0, 403);
+    // b를 해제하면서 a를 대신 쓸 키로 골라도, 막힌 가상 키는 옮겨지지 않는다.
+    // 옮길 연결이 없으므로 대신 쓸 키 없이도 해제할 수 있다.
+    let (status, retired) = h
+        .call(
+            "DELETE",
+            &format!("{CREDS}/anthropic/{b_id}?expected_version=1&move_to={a_id}"),
+            &h.alice,
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{retired}");
+    assert_eq!(retired["credential"]["moved_keys"], "0");
+    h.service.refresh().await.unwrap();
+    let (status, _, _) = h.infer(&secret).await;
+    assert_eq!(
+        status, 403,
+        "막아 둔 가상 키가 해제를 거쳐 다시 살아나면 안 된다"
+    );
+    assert!(h.provider.calls.lock().await.is_empty());
+    let (_, keys) = h.call("GET", "/api/keys", &h.bob, None).await;
+    let binding = &keys["items"][0]["provider_credentials"][0];
+    assert_eq!(
+        (
+            binding["credential_id"].clone(),
+            binding["state"].clone(),
+            binding["authorized"].clone()
+        ),
+        (json!(b_id), json!("retired"), json!(false))
+    );
+    // 관리자가 연결을 a로 바꾸면 다시 쓸 수 있다.
+    let (status, rebound) = h
+        .call(
+            "PUT",
+            &format!(
+                "/api/admin/keys/{}/provider-credential",
+                id_of(&issued["metadata"]["id"])
+            ),
+            &h.alice,
+            Some(
+                json!({"provider":"anthropic","credential_id":a_id,"expected_credential_id":b_id}),
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{rebound}");
+    assert_eq!(
+        h.infer(&secret).await,
+        (200, Some(KEY_A.into()), Some(a_id))
+    );
+    h.db.close().await;
+}

@@ -114,7 +114,7 @@ export const en: Record<string, string> = {
   "페이지의 행을 합산해 전체 비용으로 사용하지 않습니다.": "Don't add up the rows on this page as a total cost.",
 
   // Provider 키
-  "CREDENTIAL_ENCRYPTION_KEY가 바뀌었습니다. 키를 다시 등록하세요.": "CREDENTIAL_ENCRYPTION_KEY has changed. Register the key again.",
+  "CREDENTIAL_ENCRYPTION_KEY가 바뀌었습니다. 복호화할 수 없는 키마다 「키 교체」로 같은 키를 다시 넣으세요. 이름·연결·인가는 그대로 유지됩니다.": "CREDENTIAL_ENCRYPTION_KEY has changed. For each key that cannot be decrypted, use Replace key to enter the same key again. Its name, bindings and access stay the same.",
   "Provider가 이 키를 거절했습니다. 저장하지 않았습니다.": "The provider rejected this key. It was not saved.",
   "Provider 확인 요청이 실패해 키가 유효한지 알 수 없습니다. 저장하지 않았습니다. 잠시 후 다시 시도하세요.": "The provider verification request failed, so the key's validity is unknown. It was not saved. Try again shortly.",
   "{{reason}} 명령 ID: {{id}}.": "{{reason}} Command ID: {{id}}.",
