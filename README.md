@@ -19,7 +19,7 @@ Key properties:
 - **SSO identity.** Users authenticate with RS256 JWTs from an external SSO (verified against a
   JWKS). From the dashboard they can issue scoped gateway API keys.
 - **Single binary.** Written in Rust (Tokio, axum, reqwest, sqlx). It serves the React dashboard at
-  `/ui/` and listens on port `4000`.
+  `/dashboard/` and listens on port `4000`.
 
 ## Concepts
 
@@ -138,8 +138,8 @@ pass `--config <path>`.
 
 ### 5. First use
 
-1. An admin (listed in `admin_emails`) opens `https://<gateway>/ui/` and signs in through the SSO.
-   Under *Admin → Provider keys* (`/ui/admin/credentials`), the admin registers a company key for
+1. An admin (listed in `admin_emails`) opens `https://<gateway>/dashboard/` and signs in through the SSO.
+   Under *Admin → Provider keys* (`/dashboard/admin/credentials`), the admin registers a company key for
    each configured provider. Until then, requests to that provider are rejected with `503
    provider_credential_unavailable` (the gateway itself stays ready).
 2. New principals start **deny-all**. Under *Admin → Principals*, the admin sets a policy for each
@@ -195,7 +195,7 @@ tags and merge keys. [`config.example.yaml`](config.example.yaml) is an annotate
 | `jwks_uri` | JWKS endpoint. Keys are cached for 300 s. |
 | `access_cookie_name` | Name of the cookie in which the SSO stores the access JWT for the browser. |
 | `login_url`, `refresh_url`, `logout_url` | SSO endpoints used by the dashboard. |
-| `return_param` | Optional. Name of the query parameter your SSO reads to send the user back after login or logout (for example `return_to`). When set, the gateway sends users to `login_url?<return_param>=<public_origin>/ui/` and `logout_url?<return_param>=<public_origin>/ui/`. Without it, the SSO decides where users land after login. Letters, digits, `_` and `-` only. A `return_to` query sent by a client to `/auth/login` is always ignored. |
+| `return_param` | Optional. Name of the query parameter your SSO reads to send the user back after login or logout (for example `return_to`). When set, the gateway sends users to `login_url?<return_param>=<public_origin>/dashboard/` and `logout_url?<return_param>=<public_origin>/dashboard/`. Without it, the SSO decides where users land after login. Letters, digits, `_` and `-` only. A `return_to` query sent by a client to `/auth/login` is always ignored. |
 
 `jwks_uri`, `login_url`, `refresh_url` and `logout_url` must have the **same origin as `issuer`**,
 because the dashboard's Content-Security-Policy allows exactly one SSO origin. URLs must use
@@ -348,7 +348,7 @@ A person is identified by the pair (`iss`, `sub`). The e-mail address is used on
 allow-list and the admin check. The gateway never issues or refreshes tokens and never stores
 refresh tokens.
 
-| Credential | Inference | Own data and keys (`/gateway/*`) | Admin (`/gateway/admin/*`) |
+| Credential | Inference | Own data and keys (`/api/*`) | Admin (`/api/admin/*`) |
 |---|---|---|---|
 | SSO JWT in `Authorization: Bearer` or `x-api-key` | yes | yes | if admin |
 | SSO JWT in the access cookie (browser) | **no** | yes (writes need CSRF) | if admin |
@@ -359,12 +359,12 @@ Code sends both.
 
 **Browser flow.** `/auth/login` redirects to `login_url` when the request has no valid cookie.
 After sign-in, the SSO must set `access_cookie_name` on a domain that includes the gateway host and
-send the user back to `/ui/`. The dashboard calls `refresh_url` with
+send the user back to `/dashboard/`. The dashboard calls `refresh_url` with
 `POST` and `credentials: 'include'`, so the SSO must allow that CORS request from `public_origin`.
 For logout, the dashboard navigates to `logout_url`. Cookie-authenticated writes require
-`Origin == public_origin` and an `X-CSRF-Token` obtained from `GET /gateway/csrf`.
+`Origin == public_origin` and an `X-CSRF-Token` obtained from `GET /api/csrf`.
 
-**API keys.** Users issue keys on the dashboard (`POST /gateway/keys`). A key has a name, a validity
+**API keys.** Users issue keys on the dashboard (`POST /api/keys`). A key has a name, a validity
 period (`3_months`, `6_months`, `1_year`, `3_years` or `unlimited`), grants that must be a subset of
 the owner's current grants, and optional limits. The secret is shown once. Only a hash is stored. Each
 principal can have up to 32 active keys. Admins can also create **service principals**, which have a
@@ -396,11 +396,11 @@ Every inference request goes through the ledger in Postgres:
    Unknown costs are never estimated. While any of a principal's requests are `unknown`, that
    principal's paid calls are rejected with `unsettled_usage_block`. An admin resolves each request
    on *Admin → Requests*
-   (`PUT /gateway/admin/requests/{id}/settlement` with `decision: charged|no_charge`, `cost_usd` and
+   (`PUT /api/admin/requests/{id}/settlement` with `decision: charged|no_charge`, `cost_usd` and
    `reason`).
 5. **Safety pause.** If the settled cost exceeds the cost bound computed at admission, the gateway
    pauses inference for that principal (`inference_paused`). An admin must release the pause
-   explicitly (`/gateway/admin/principals/{id}/inference-pause/release`). Policy edits do not clear it.
+   explicitly (`/api/admin/principals/{id}/inference-pause/release`). Policy edits do not clear it.
 
 `reserved` budgets and `tpm` limits rely on a hard input bound. To use them with a model, its profile
 must declare `input_bound_contract`. An Anthropic `messages` profile also needs
@@ -466,20 +466,20 @@ Known limitations:
 
 ## Dashboard
 
-The dashboard at `/ui/` (`/ui` redirects there) is served from the built bundle under a strict CSP.
+The dashboard is at `/dashboard/`. Requests to `/` and `/dashboard` redirect there. The dashboard is served from the built bundle under a strict CSP.
 It has no inline scripts and loads nothing from external CDNs.
 
 | Screen | Path | Audience |
 |---|---|---|
-| My usage and budget balances | `/ui/` | users |
-| My API keys (issue and revoke) | `/ui/keys` | users |
-| Principals, policies, service principals, safety-pause release | `/ui/admin/principals` | admins |
-| Organization-wide usage | `/ui/admin/usage` | admins |
-| Requests and manual settlement | `/ui/admin/requests` | admins |
-| Provider company keys (register, rotate, retire) | `/ui/admin/credentials` | admins |
-| Model & price catalog (sync, compare, approve) | `/ui/admin/models` | admins |
+| My usage and budget balances | `/dashboard/` | users |
+| My API keys (issue and revoke) | `/dashboard/keys` | users |
+| Principals, policies, service principals, safety-pause release | `/dashboard/admin/principals` | admins |
+| Organization-wide usage | `/dashboard/admin/usage` | admins |
+| Requests and manual settlement | `/dashboard/admin/requests` | admins |
+| Provider company keys (register, rotate, retire) | `/dashboard/admin/credentials` | admins |
+| Model & price catalog (sync, compare, approve) | `/dashboard/admin/models` | admins |
 
-The JSON API behind it is under `/gateway/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
+The JSON API behind it is under `/api/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
 routes). It is same-origin only, with no CORS. The UI is in Korean by default; a language switch in the header changes it to English (the choice is remembered in that browser only).
 
 ## Operations
@@ -504,7 +504,7 @@ routes). It is same-origin only, with no CORS. The UI is in Korean by default; a
 For providers configured with `catalog`, models and prices live in Postgres
 (`gw_model_catalog_versions`). Nothing changes automatically:
 
-1. An admin presses the sync button (**Sync with public price list**) on `/ui/admin/models`. The gateway downloads the public price list
+1. An admin presses the sync button (**Sync with public price list**) on `/dashboard/admin/models`. The gateway downloads the public price list
    [models.dev](https://models.dev/api.json) and builds a proposal. No provider publishes an official
    pricing API, so this community list is the only price source; the gateway does not mix in other
    lists.
@@ -529,9 +529,9 @@ can grant catalog models like any other model.
 
 | Method and path | Body | Result |
 |---|---|---|
-| `GET /gateway/admin/model-catalog` | – | Current version, entries and the catalog policy per provider |
-| `POST /gateway/admin/model-catalog/sync` | empty or `{}` | `201` with `proposal_id` and the proposal; `502 catalog_sources_unavailable` if models.dev could not be downloaded (the code keeps its earlier plural name) |
-| `POST /gateway/admin/model-catalog/approve` | `{"proposal_id": "<uuid>", "expected_version": "<n>", "items": [{"provider": "...", "model": "..."}]}` | `200` with the new `result_version` |
+| `GET /api/admin/model-catalog` | – | Current version, entries and the catalog policy per provider |
+| `POST /api/admin/model-catalog/sync` | empty or `{}` | `201` with `proposal_id` and the proposal; `502 catalog_sources_unavailable` if models.dev could not be downloaded (the code keeps its earlier plural name) |
+| `POST /api/admin/model-catalog/approve` | `{"proposal_id": "<uuid>", "expected_version": "<n>", "items": [{"provider": "...", "model": "..."}]}` | `200` with the new `result_version` |
 
 Both writes need `X-Gateway-Command-Id` and replay like other admin commands.
 
@@ -550,7 +550,7 @@ binding (label and last 4 characters), so you can see which company key a virtua
   while that provider had no company key yet.
 - **Binding virtual keys.** When a virtual key is issued, it is bound to one company key per
   provider and keeps using that key. Admins can choose the key when issuing
-  (`"provider_credentials": {"anthropic": "<credential id>"}` in `POST /gateway/keys`). Other users
+  (`"provider_credentials": {"anthropic": "<credential id>"}` in `POST /api/keys`). Other users
   cannot choose: their virtual keys are bound to the default key at the time of issue. An admin can
   later move one virtual key to another company key. When upgrading from 0.5.x, the company key in
   use is named `default` and becomes the default key, and every existing virtual key is bound to it.
@@ -577,7 +577,7 @@ binding (label and last 4 characters), so you can see which company key a virtua
   their binding and use the provider's default key once a new key is registered. Until then their
   requests are rejected with `503 provider_credential_unavailable` before anything is sent.
 - **Compare-and-swap.** Each key has an `id` and a `version`, both returned by `GET
-  /gateway/admin/provider-credentials`. The version goes up whenever the key is renamed, made the
+  /api/admin/provider-credentials`. The version goes up whenever the key is renamed, made the
   default, demoted or retired. Rename, replace and retire requests must send the version you last
   read (`expected_version`); if another admin changed the key in between, the request fails with
   `409 version_conflict`. Moving a virtual key must send the company key it is bound to now
@@ -595,12 +595,12 @@ API (admin only; cookie writes need the usual `Origin` and `X-CSRF-Token`):
 
 | Method and path | Body / query | Result |
 |---|---|---|
-| `GET /gateway/admin/provider-credentials` | – | Per configured provider: status of the default key, keys in use (`id`, `version`, label, default, number of bound virtual keys) and the last 10 retired keys |
-| `POST /gateway/admin/provider-credentials/{provider}` | `{"label": "...", "secret": "..."}` | `201`, key added |
-| `PUT /gateway/admin/provider-credentials/{provider}/{id}` | `{"secret": "...", "expected_version": "<n>"}` | `201` secret replaced (new id), `200` no-op if it is the same secret |
-| `PATCH /gateway/admin/provider-credentials/{provider}/{id}` | `{"expected_version": "<n>", "label"?: "...", "default"?: true}` | `200`, renamed and/or made the default |
-| `DELETE /gateway/admin/provider-credentials/{provider}/{id}` | `?expected_version=<n>[&move_to=<id>]` | `200`, key retired |
-| `PUT /gateway/admin/keys/{key id}/provider-credential` | `{"provider": "...", "credential_id": "<id>", "expected_credential_id": "<id>" \| null}` | `200`, virtual key moved to another company key |
+| `GET /api/admin/provider-credentials` | – | Per configured provider: status of the default key, keys in use (`id`, `version`, label, default, number of bound virtual keys) and the last 10 retired keys |
+| `POST /api/admin/provider-credentials/{provider}` | `{"label": "...", "secret": "..."}` | `201`, key added |
+| `PUT /api/admin/provider-credentials/{provider}/{id}` | `{"secret": "...", "expected_version": "<n>"}` | `201` secret replaced (new id), `200` no-op if it is the same secret |
+| `PATCH /api/admin/provider-credentials/{provider}/{id}` | `{"expected_version": "<n>", "label"?: "...", "default"?: true}` | `200`, renamed and/or made the default |
+| `DELETE /api/admin/provider-credentials/{provider}/{id}` | `?expected_version=<n>[&move_to=<id>]` | `200`, key retired |
+| `PUT /api/admin/keys/{key id}/provider-credential` | `{"provider": "...", "credential_id": "<id>", "expected_credential_id": "<id>" \| null}` | `200`, virtual key moved to another company key |
 
 Writes require an `X-Gateway-Command-Id` header. As with other admin commands, resending the same
 command id returns the recorded result without running the command or calling the provider again.

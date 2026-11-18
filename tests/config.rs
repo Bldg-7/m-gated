@@ -122,11 +122,11 @@ fn sso_return_param_appends_dashboard_address_to_login_and_logout_only_when_set(
     let set = load(&yaml).unwrap();
     assert_eq!(
         set.login_redirect(),
-        "https://auth.example.test/sso/login?return_to=https%3A%2F%2Fm-gated.example.test%2Fui%2F"
+        "https://auth.example.test/sso/login?return_to=https%3A%2F%2Fm-gated.example.test%2Fdashboard%2F"
     );
     assert_eq!(
         set.logout_redirect(),
-        "https://auth.example.test/sso/logout?return_to=https%3A%2F%2Fm-gated.example.test%2Fui%2F"
+        "https://auth.example.test/sso/logout?return_to=https%3A%2F%2Fm-gated.example.test%2Fdashboard%2F"
     );
     let mut env = support::environment();
     env.insert("SSO_RETURN_PARAM".into(), "next".into());
@@ -139,7 +139,7 @@ fn sso_return_param_appends_dashboard_address_to_login_and_logout_only_when_set(
     assert!(
         from_env
             .login_redirect()
-            .ends_with("?next=https%3A%2F%2Fm-gated.example.test%2Fui%2F")
+            .ends_with("?next=https%3A%2F%2Fm-gated.example.test%2Fdashboard%2F")
     );
     for bad in [
         "''",

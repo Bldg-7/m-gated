@@ -6,13 +6,13 @@ const response = (body: unknown, status = 200) => new Response(JSON.stringify(bo
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 test('auth_epoch_drops_stale_responses_and_logout_removes_identity', async () => {
   const late = deferred<Response>(); const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockReturnValueOnce(late.promise); const nav = vi.fn(); const session = new Session(fetcher, nav); await session.validate();
-  const pending = session.read('/gateway/usage'); session.logout(); late.resolve(response({ settled_usd: '999.000000000000' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse); expect(session.snapshot().me).toBeNull(); expect(nav).toHaveBeenCalledWith(me.sso.logout_url);
+  const pending = session.read('/api/usage'); session.logout(); late.resolve(response({ settled_usd: '999.000000000000' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse); expect(session.snapshot().me).toBeNull(); expect(nav).toHaveBeenCalledWith(me.sso.logout_url);
 });
 test('initial_401_redirects_without_refresh_and_403_never_loops', async () => {
   for (const status of [401, 403]) { const fetcher = vi.fn().mockResolvedValue(response({ error: { code: 'auth' } }, status)); const nav = vi.fn(); const session = new Session(fetcher, nav); await session.validate(); expect(fetcher).toHaveBeenCalledTimes(1); expect(nav).toHaveBeenCalledTimes(status === 401 ? 1 : 0); expect(session.snapshot().me).toBeNull(); }
 });
 test('refresh_reads_once_never_replays_writes', async () => {
-  const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ error: { code: 'invalid_credentials' } }, 401)).mockResolvedValueOnce(response({})).mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ token: 'synthetic-csrf' })).mockResolvedValueOnce(response({ value: 1 })); const session = new Session(fetcher, vi.fn()); await session.validate(); expect(await session.read('/gateway/usage')).toEqual({ value: 1 }); expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/gateway/me', '/gateway/usage', me.sso.refresh_url, '/gateway/me', '/gateway/csrf', '/gateway/usage']); expect(fetcher.mock.calls[2][1].method).toBe('POST');
+  const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ error: { code: 'invalid_credentials' } }, 401)).mockResolvedValueOnce(response({})).mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ token: 'synthetic-csrf' })).mockResolvedValueOnce(response({ value: 1 })); const session = new Session(fetcher, vi.fn()); await session.validate(); expect(await session.read('/api/usage')).toEqual({ value: 1 }); expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/api/me', '/api/usage', me.sso.refresh_url, '/api/me', '/api/csrf', '/api/usage']); expect(fetcher.mock.calls[2][1].method).toBe('POST');
 });
 test('visible_revalidation_supersedes_an_old_pending_me', async () => {
   const old = deferred<Response>(); const fetcher = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValueOnce(response(me)); const session = new Session(fetcher, vi.fn()); const first = session.validate(); session.clear(); const second = session.validate(); old.resolve(response({ ...me, principal: { ...me.principal, id: 'old-human' } })); await Promise.all([first, second]); expect(session.snapshot().me?.principal.id).toBe('human1'); expect(fetcher).toHaveBeenCalledTimes(2);
@@ -20,17 +20,17 @@ test('visible_revalidation_supersedes_an_old_pending_me', async () => {
 test('concurrent_401_reads_join_one_refresh_and_retry_once', async () => {
   const a = deferred<Response>(), b = deferred<Response>(), refresh = deferred<Response>();
   const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise).mockReturnValueOnce(refresh.promise).mockResolvedValueOnce(response(me)).mockImplementation(() => Promise.resolve(response({ value: 1 })));
-  const session = new Session(fetcher, vi.fn()); await session.validate(); const first = session.read('/gateway/usage'); const second = session.read('/gateway/me');
+  const session = new Session(fetcher, vi.fn()); await session.validate(); const first = session.read('/api/usage'); const second = session.read('/api/me');
   a.resolve(response({ error: { code: 'expired' } }, 401)); await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4)); b.resolve(response({ error: { code: 'expired' } }, 401)); refresh.resolve(response({}));
   const result = await Promise.allSettled([first, second]); expect(result.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']); expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
 });
 test('self_403_discards_identity_and_other_late_reads_without_login_loop', async () => {
   const late = deferred<Response>(); const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockReturnValueOnce(late.promise).mockResolvedValueOnce(response({ error: { code: 'access_denied' } }, 403)).mockResolvedValueOnce(response({ error: { code: 'access_denied' } }, 403));
-  const nav = vi.fn(); const session = new Session(fetcher, nav); await session.validate(); const original = session.snapshot().epoch; const pending = session.read('/gateway/usage?model=old'); await expect(session.read('/gateway/usage')).rejects.toMatchObject({ status: 403 }); await vi.waitFor(() => expect(session.snapshot().status).toBe('error')); late.resolve(response({ value: 'late-private-data' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse); expect(session.snapshot().epoch).toBeGreaterThan(original); expect(session.snapshot().me).toBeNull(); expect(nav).not.toHaveBeenCalled(); expect(fetcher.mock.calls.filter(c => c[0] === '/gateway/me')).toHaveLength(2);
+  const nav = vi.fn(); const session = new Session(fetcher, nav); await session.validate(); const original = session.snapshot().epoch; const pending = session.read('/api/usage?model=old'); await expect(session.read('/api/usage')).rejects.toMatchObject({ status: 403 }); await vi.waitFor(() => expect(session.snapshot().status).toBe('error')); late.resolve(response({ value: 'late-private-data' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse); expect(session.snapshot().epoch).toBeGreaterThan(original); expect(session.snapshot().me).toBeNull(); expect(nav).not.toHaveBeenCalled(); expect(fetcher.mock.calls.filter(c => c[0] === '/api/me')).toHaveLength(2);
 });
 test('a_403_on_the_single_retry_also_invalidates_all_cached_authority',async()=>{
  const fetcher=vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({error:{code:'expired'}},401)).mockResolvedValueOnce(response({})).mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({token:'synthetic-csrf'})).mockResolvedValueOnce(response({error:{code:'access_denied'}},403)).mockResolvedValueOnce(response({error:{code:'access_denied'}},403));
- const session=new Session(fetcher,vi.fn());await session.validate();await expect(session.read('/gateway/usage')).rejects.toMatchObject({status:403});await vi.waitFor(()=>expect(session.snapshot().status).toBe('error'));expect(session.snapshot().me).toBeNull();
+ const session=new Session(fetcher,vi.fn());await session.validate();await expect(session.read('/api/usage')).rejects.toMatchObject({status:403});await vi.waitFor(()=>expect(session.snapshot().status).toBe('error'));expect(session.snapshot().me).toBeNull();
 });
 test('broadcast_logout_does_not_rehydrate_still_valid_cookies',async()=>{
  let channel:{onmessage:((event:{data:{type:string}})=>void)|null};
@@ -71,11 +71,11 @@ test('refresh_new_me_403_stays_permission_error_without_login', async () => {
     .mockResolvedValueOnce(response({ error: { code: 'expired' } }, 401))
     .mockResolvedValueOnce(response({})).mockResolvedValueOnce(response({ error: { code: 'access_denied' } }, 403));
   const nav = vi.fn(); const session = new Session(fetcher, nav); await session.validate();
-  const pending = session.read('/gateway/usage?model=old');
-  await expect(session.read('/gateway/usage')).rejects.toMatchObject({ status: 403 });
+  const pending = session.read('/api/usage?model=old');
+  await expect(session.read('/api/usage')).rejects.toMatchObject({ status: 403 });
   late.resolve(response({ private: 'old' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse);
   expect(nav).not.toHaveBeenCalled(); expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '접근 권한이 없습니다.' });
-  expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/gateway/me', '/gateway/usage?model=old', '/gateway/usage', me.sso.refresh_url, '/gateway/me']);
+  expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/api/me', '/api/usage?model=old', '/api/usage', me.sso.refresh_url, '/api/me']);
 });
 
 test('verified_identity_change_notifies_other_session_once_without_echo', async () => {
@@ -94,7 +94,7 @@ test('verified_identity_change_notifies_other_session_once_without_echo', async 
   const a = new Session(aFetch, vi.fn()), b = new Session(bFetch, vi.fn());
   await a.validate(); await b.validate(); const detachA = a.attach(), detachB = b.attach();
   try {
-    const pending = b.read('/gateway/usage?model=old');
+    const pending = b.read('/api/usage?model=old');
     await a.validate();
     expect(sent).toEqual([{ type: 'auth-change' }]);
     expect(b.snapshot().me).toBeNull(); expect(b.snapshot().status).toBe('checking');
@@ -109,7 +109,7 @@ test('refresh_new_me_dependency_failure_is_not_a_login_failure', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ error: { code: 'expired' } }, 401))
       .mockResolvedValueOnce(response({})).mockResolvedValueOnce(response({ error: { code: 'auth_dependency_unavailable' } }, status));
     const nav = vi.fn(), session = new Session(fetcher, nav); await session.validate();
-    await expect(session.read('/gateway/usage')).rejects.toMatchObject({ status });
+    await expect(session.read('/api/usage')).rejects.toMatchObject({ status });
     expect(nav).not.toHaveBeenCalled();
     expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '인증 상태를 확인할 수 없습니다.' });
     expect(fetcher).toHaveBeenCalledTimes(4);
@@ -121,7 +121,7 @@ test('refresh_failure_or_new_me401_still_navigates_once_without_read_replay', as
     const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ error: { code: 'expired' } }, 401))
       .mockResolvedValueOnce(response({}, failure === 'refresh' ? 403 : 200)).mockResolvedValueOnce(response({ error: { code: 'expired' } }, 401));
     const nav = vi.fn(), session = new Session(fetcher, nav); await session.validate();
-    await expect(session.read('/gateway/usage')).rejects.toBeInstanceOf(Error);
+    await expect(session.read('/api/usage')).rejects.toBeInstanceOf(Error);
     expect(nav.mock.calls).toEqual([['/auth/login']]); expect(session.snapshot().me).toBeNull();
     expect(fetcher).toHaveBeenCalledTimes(failure === 'refresh' ? 3 : 4);
   }
@@ -131,7 +131,7 @@ test('refresh_success_does_not_turn_new_me_network_failure_into_login', async ()
   const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ error: { code: 'expired' } }, 401))
     .mockResolvedValueOnce(response({})).mockRejectedValueOnce(new TypeError('synthetic network failure'));
   const nav = vi.fn(), session = new Session(fetcher, nav); await session.validate();
-  await expect(session.read('/gateway/usage')).rejects.toBeInstanceOf(TypeError);
+  await expect(session.read('/api/usage')).rejects.toBeInstanceOf(TypeError);
   expect(nav).not.toHaveBeenCalled(); expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '인증 상태를 확인할 수 없습니다.' });
   expect(fetcher).toHaveBeenCalledTimes(4);
 });

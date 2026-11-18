@@ -157,7 +157,7 @@ impl http_body::Body for HeadGatedBody {
 }
 
 fn response_deadline(path: &str, limits: &Limits) -> Instant {
-    let ms = if path.starts_with("/ui") {
+    let ms = if path.starts_with("/dashboard") {
         limits.asset_timeout_ms
     } else if path.starts_with("/anthropic/")
         || path == "/v1/messages"

@@ -6,12 +6,12 @@ const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@exa
 const key = { id: '00000000-0000-4000-8000-000000000001', name: '현재 키', version: '7', created_command_id: 'original', validity: 'unlimited', expires_at: null, revoked_at: null, grants: [], limits: {} };
 const response = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
-afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/ui/'); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); });
 async function mount(write: (input: RequestInfo | URL, init: RequestInit) => Promise<Response>, items: () => unknown[] = () => [key], read?: () => Promise<Response>) {
-  history.replaceState(null, '', '/ui/keys');
+  history.replaceState(null, '', '/dashboard/keys');
   const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input) === '/gateway/me') return Promise.resolve(response(me));
-    if (String(input) === '/gateway/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (String(input) === '/api/me') return Promise.resolve(response(me));
+    if (String(input) === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
     if (init?.method) return write(input, init);
     if (read) return read();
     return Promise.resolve(response({ items: items(), next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
@@ -74,13 +74,13 @@ test('late_committed_issue_is_not_consumed_after_explicit_revalidation', async (
 });
 
 test('same_human_key_refresh_preserves_filter_and_has_one_read_retry', async () => {
-  history.replaceState(null, '', '/ui/keys'); let reads = 0;
+  history.replaceState(null, '', '/dashboard/keys'); let reads = 0;
   const refresh = deferred<Response>();
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const path = String(input);
-    if (path === '/gateway/me') return Promise.resolve(response(me));
+    if (path === '/api/me') return Promise.resolve(response(me));
     if (path === me.sso.refresh_url) return refresh.promise;
-    if (path === '/gateway/keys?status=revoked' && ++reads === 1) return Promise.resolve(response({ error: { code: 'invalid_credentials' } }, 401));
+    if (path === '/api/keys?status=revoked' && ++reads === 1) return Promise.resolve(response({ error: { code: 'invalid_credentials' } }, 401));
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
   });
   vi.stubGlobal('fetch', fetcher); render(<App />); await screen.findByText('키가 없습니다.');
@@ -91,7 +91,7 @@ test('same_human_key_refresh_preserves_filter_and_has_one_read_retry', async () 
   await screen.findByText('키가 없습니다.');
   expect((screen.getByLabelText('키 상태') as HTMLSelectElement).value).toBe('revoked');
   expect(reads).toBe(2);
-  expect(fetcher.mock.calls.filter(c => c[0] === '/gateway/keys')).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(c => c[0] === '/api/keys')).toHaveLength(1);
   expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
 });
 

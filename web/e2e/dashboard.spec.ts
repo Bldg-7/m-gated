@@ -11,22 +11,22 @@ test.beforeEach(async ({ context }) => {
 });
 test('Rust bundle serves precise usage, global block, keyboard and text-only identity', async ({ page, context }) => {
   await authenticate(context); const errors: string[] = []; page.on('pageerror', e => errors.push(e.name));
-  const response = await page.goto('/ui/'); expect(response?.status()).toBe(200); expect(response?.headers()['content-security-policy']).toContain("default-src 'none'");
+  const response = await page.goto('/dashboard/'); expect(response?.status()).toBe(200); expect(response?.headers()['content-security-policy']).toContain("default-src 'none'");
   await expect(page.getByText('0.000000000001 USD', { exact: true }).first()).toBeVisible(); await expect(page.getByText('확인 불가 (미정산)')).toBeVisible(); await expect(page.getByText(/전체 기간 미정산: 1/)).toBeVisible();
   await expect(page.getByText(/<img src=x onerror=window.__xss=1>/)).toBeVisible(); expect(await page.evaluate(() => Reflect.get(window, '__xss'))).toBeUndefined(); expect(await page.locator('main img').count()).toBe(0);
   await page.getByLabel('모델', { exact: true }).fill('historical-missing-model'); await page.getByRole('button', { name: '조회', exact: true }).focus(); await page.keyboard.press('Enter'); await expect(page.getByText(/그룹별 사용량이 없습니다/)).toBeVisible(); await expect(page.getByText(/전체 기간 미정산: 1/)).toBeVisible();
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]); expect(errors).toEqual([]);
-  for (const path of ['/ui/keys', '/ui/admin/principals', '/ui/admin/usage', '/ui/admin/requests']) { const r = await page.request.get(path); expect(r.status()).toBe(200); expect(r.headers()['content-type']).toContain('text/html'); }
-  for (const path of ['/ui/assets/missing.js', '/ui/assets/%2e%2e%2findex.html', '/gateway/missing']) { const r = await page.request.get(path); expect(r.status()).toBe(404); }
+  for (const path of ['/dashboard/keys', '/dashboard/admin/principals', '/dashboard/admin/usage', '/dashboard/admin/requests']) { const r = await page.request.get(path); expect(r.status()).toBe(200); expect(r.headers()['content-type']).toContain('text/html'); }
+  for (const path of ['/dashboard/assets/missing.js', '/dashboard/assets/%2e%2e%2findex.html', '/api/missing']) { const r = await page.request.get(path); expect(r.status()).toBe(404); }
   for (const path of ['/anthropic/v1/messages', '/anthropic/v1/messages/count_tokens', '/v1/messages', '/v1/messages/count_tokens']) { const inference = await page.request.post(path, { data: { model: 'synthetic-text', messages: [{ role: 'user', content: 'synthetic' }], max_tokens: 1 } }); expect(inference.status()).toBe(401); }
 });
 test('401 refresh is bounded and stale usage never re-enters after logout', async ({ page, context }) => {
   await authenticate(context);
-  await page.goto('/ui/');
+  await page.goto('/dashboard/');
   await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   let refresh = 0, usageReads = 0;
   const usageStatuses: number[] = [];
-  const matchesUsage = (url: string) => url.startsWith(`${base}/gateway/usage?`) && new URL(url).searchParams.get('model') === 'missing-after-refresh';
+  const matchesUsage = (url: string) => url.startsWith(`${base}/api/usage?`) && new URL(url).searchParams.get('model') === 'missing-after-refresh';
   page.on('request', request => { if (matchesUsage(request.url())) usageReads++; });
   page.on('response', response => { if (matchesUsage(response.url())) usageStatuses.push(response.status()); });
   await page.route('https://auth.example.test/sso/refresh', async route => {
@@ -38,7 +38,7 @@ test('401 refresh is bounded and stale usage never re-enters after logout', asyn
     await route.fulfill({ status: 200, headers: { 'Access-Control-Allow-Origin': base, 'Access-Control-Allow-Credentials': 'true' }, contentType: 'application/json', body: '{}' });
   });
   await context.addCookies([{name:cookie,value:process.env.E2E_EXPIRED_TOKEN!,url:base,httpOnly:true,sameSite:'Lax'}]);
-  const recovered = page.waitForResponse(r => r.url().startsWith(`${base}/gateway/usage?`) && new URL(r.url()).searchParams.get('model') === 'missing-after-refresh' && r.status() === 200);
+  const recovered = page.waitForResponse(r => r.url().startsWith(`${base}/api/usage?`) && new URL(r.url()).searchParams.get('model') === 'missing-after-refresh' && r.status() === 200);
   await page.getByLabel('모델', { exact: true }).fill('missing-after-refresh');
   await page.getByRole('button', { name: '조회', exact: true }).click();
   await recovered;
@@ -57,8 +57,8 @@ test('401 refresh is bounded and stale usage never re-enters after logout', asyn
   expect(refresh).toBe(1);
   let arrived!: () => void, released!: () => void;
   const held = new Promise<void>(r => { arrived = r; }); const release = new Promise<void>(r => { released = r; });
-  await page.unroute(`${base}/gateway/usage?**`);
-  await page.route(`${base}/gateway/usage?**`, async route => { arrived(); await release; try { await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ settled_usd: '999.999999999999' }) }); } catch {/* 이탈로 취소한 요청 */ } });
+  await page.unroute(`${base}/api/usage?**`);
+  await page.route(`${base}/api/usage?**`, async route => { arrived(); await release; try { await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ settled_usd: '999.999999999999' }) }); } catch {/* 이탈로 취소한 요청 */ } });
   await page.getByLabel('모델', { exact: true }).fill('held-before-logout');
   await page.getByRole('button', { name: '조회', exact: true }).click();
   await held;
@@ -73,14 +73,14 @@ test('401 refresh is bounded and stale usage never re-enters after logout', asyn
   expect(await page.getByText('999.999999999999 USD', { exact: true }).count()).toBe(0);
 });
 test('retention 409 removes previous figures without silently dropping filters', async ({ page, context }) => {
-  await authenticate(context); await page.goto('/ui/'); await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
-  await page.route(`${base}/gateway/usage?**`, route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'usage_detail_unavailable', details: { detail_available_from: '2026-01-01T00:00:00Z' } } }) }));
+  await authenticate(context); await page.goto('/dashboard/'); await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
+  await page.route(`${base}/api/usage?**`, route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'usage_detail_unavailable', details: { detail_available_from: '2026-01-01T00:00:00Z' } } }) }));
   await page.getByLabel('모델', { exact: true }).fill('old-model'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작: 2026-01-01'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0); expect(await page.getByText('0.000000000001 USD', { exact: true }).count()).toBe(0); await expect(page.getByLabel('모델', { exact: true })).toHaveValue('old-model');
 });
 test('cross_tab_logout_latch_blocks_visibility_pageshow_and_old_cookie_until_explicit_login', async ({ page, context }) => {
-  await authenticate(context); await page.goto('/ui/');
+  await authenticate(context); await page.goto('/dashboard/');
   await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
-  const other = await context.newPage(); await other.goto(`${base}/ui/`);
+  const other = await context.newPage(); await other.goto(`${base}/dashboard/`);
   await expect(other.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   let arrived!: () => void, released!: () => void;
   const held = new Promise<void>(r => { arrived = r; }), release = new Promise<void>(r => { released = r; });
@@ -95,7 +95,7 @@ test('cross_tab_logout_latch_blocks_visibility_pageshow_and_old_cookie_until_exp
       Reflect.set(window, '__authReads', 0);
       const original = window.fetch;
       window.fetch = (...args) => {
-        if (String(args[0]).startsWith('/gateway/')) Reflect.set(window, '__authReads', Reflect.get(window, '__authReads') + 1);
+        if (String(args[0]).startsWith('/api/')) Reflect.set(window, '__authReads', Reflect.get(window, '__authReads') + 1);
         return original(...args);
       };
     });
@@ -118,14 +118,14 @@ test('cross_tab_logout_latch_blocks_visibility_pageshow_and_old_cookie_until_exp
 });
 
 test('refresh_success_then_current_me403_stays_permission_error_without_login', async ({ page, context }) => {
-  await authenticate(context); await page.goto('/ui/');
+  await authenticate(context); await page.goto('/dashboard/');
   await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   const control = process.env.E2E_CONTROL_URL!; expect(new URL(control).hostname).toBe('127.0.0.1');
   let refresh = 0, meReads = 0, login = 0, usageReads = 0;
   page.on('request', request => {
     if (request.url() === `${base}/auth/login`) login++;
-    if (request.url() === `${base}/gateway/me`) meReads++;
-    if (request.url().startsWith(`${base}/gateway/usage?`)) usageReads++;
+    if (request.url() === `${base}/api/me`) meReads++;
+    if (request.url().startsWith(`${base}/api/usage?`)) usageReads++;
   });
   await page.route('https://auth.example.test/sso/refresh', async route => {
     if (route.request().method() === 'POST') refresh++;
@@ -137,7 +137,7 @@ test('refresh_success_then_current_me403_stays_permission_error_without_login', 
     await context.addCookies([{ name: cookie, value: process.env.E2E_EXPIRED_TOKEN!, url: base, httpOnly: true, sameSite: 'Lax' }]);
     await page.getByLabel('모델', { exact: true }).fill('refresh-denied'); await page.getByRole('button', { name: '조회', exact: true }).click();
     await expect(page.getByRole('alert')).toHaveText('접근 권한이 없습니다.');
-    expect(page.url()).toBe(`${base}/ui/`); expect(login).toBe(0); expect(refresh).toBe(1); expect(meReads).toBe(1); expect(usageReads).toBe(1);
+    expect(page.url()).toBe(`${base}/dashboard/`); expect(login).toBe(0); expect(refresh).toBe(1); expect(meReads).toBe(1); expect(usageReads).toBe(1);
     expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
     expect(await page.getByText(/<img src=x/).count()).toBe(0);
     expect(await page.getByText('0.000000000001 USD', { exact: true }).count()).toBe(0);
@@ -145,9 +145,9 @@ test('refresh_success_then_current_me403_stays_permission_error_without_login', 
 });
 
 test('verified_signed_identity_change_broadcasts_and_discards_other_window_old_payload', async ({ page, context }) => {
-  await authenticate(context); await page.goto('/ui/');
+  await authenticate(context); await page.goto('/dashboard/');
   await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
-  const other = await context.newPage(); await other.goto(`${base}/ui/`);
+  const other = await context.newPage(); await other.goto(`${base}/dashboard/`);
   await expect(other.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   await other.evaluate(() => {
     Reflect.set(window, '__authMessages', []);
@@ -158,12 +158,12 @@ test('verified_signed_identity_change_broadcasts_and_discards_other_window_old_p
   let oldArrived!: () => void, releaseOld!: () => void, meArrived!: () => void, releaseMe!: () => void;
   const oldHeld = new Promise<void>(r => { oldArrived = r; }), oldGate = new Promise<void>(r => { releaseOld = r; });
   const meHeld = new Promise<void>(r => { meArrived = r; }), meGate = new Promise<void>(r => { releaseMe = r; });
-  await other.route(`${base}/gateway/usage?**`, async route => {
+  await other.route(`${base}/api/usage?**`, async route => {
     if (new URL(route.request().url()).searchParams.get('model') !== 'old-private-filter') return route.continue();
     const oldResponse = await route.fetch(); oldArrived(); await oldGate;
     try { await route.fulfill({ response: oldResponse }); } catch { /* epoch 변경으로 취소한 이전 응답 */ }
   });
-  await other.route(`${base}/gateway/me`, async route => { meArrived(); await meGate; await route.continue(); });
+  await other.route(`${base}/api/me`, async route => { meArrived(); await meGate; await route.continue(); });
   try {
     await other.getByLabel('모델', { exact: true }).fill('old-private-filter'); await other.getByRole('button', { name: '조회', exact: true }).click(); await oldHeld;
     await context.addCookies([{ name: cookie, value: process.env.E2E_SECOND_TOKEN!, url: base, httpOnly: true, sameSite: 'Lax' }]);
@@ -183,10 +183,10 @@ test('verified_signed_identity_change_broadcasts_and_discards_other_window_old_p
   } finally { releaseOld(); releaseMe(); await other.close(); }
 });
 test('broadcast and bfcache revalidation conceal cached data; server stop returns403', async ({ page, context }) => {
-  await authenticate(context); await page.goto('/ui/'); await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
+  await authenticate(context); await page.goto('/dashboard/'); await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   let arrived!: () => void, released!: () => void;
   let held = new Promise<void>(r => { arrived = r; }); let release = new Promise<void>(r => { released = r; });
-  await page.route(`${base}/gateway/me`, async route => { arrived(); await release; await route.continue(); });
+  await page.route(`${base}/api/me`, async route => { arrived(); await release; await route.continue(); });
   await page.evaluate(() => { const c = new BroadcastChannel('m-gated-auth'); c.postMessage({ type: 'auth-change' }); c.close(); });
   await held;
   expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
@@ -198,7 +198,7 @@ test('broadcast and bfcache revalidation conceal cached data; server stop return
   expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
   released();
   await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
-  await page.unroute(`${base}/gateway/me`);
+  await page.unroute(`${base}/api/me`);
   const control = process.env.E2E_CONTROL_URL!; expect(new URL(control).hostname).toBe('127.0.0.1'); await page.request.post(`${control}/disable`);
   try {
     await page.getByLabel('모델', { exact: true }).fill('server-stopped'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('접근 권한이 없습니다.'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
@@ -209,7 +209,7 @@ test('s9_csp_blocks_inline_external_scripts_and_forms_have_keyboard_names', asyn
   await authenticate(context);
   let foreign = 0;
   await page.route('https://forbidden.invalid/**', route => { foreign++; return route.abort('blockedbyclient'); });
-  const response = await page.goto('/ui/');
+  const response = await page.goto('/dashboard/');
   const csp = response!.headers()['content-security-policy'];
   for (const directive of ["default-src 'none'", "script-src 'self'", "style-src 'self'", "object-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"]) expect(csp).toContain(directive);
   expect(csp).not.toContain('unsafe-inline'); expect(csp).not.toContain('unsafe-eval');

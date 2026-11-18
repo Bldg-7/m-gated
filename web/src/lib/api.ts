@@ -86,7 +86,7 @@ export class Session {
     this.revalidationEpoch = epoch;
     const job = (async () => {
       try {
-        this.accept(await this.json<Me>('/gateway/me', epoch), epoch, intent !== 'remote');
+        this.accept(await this.json<Me>('/api/me', epoch), epoch, intent !== 'remote');
       } catch (error) {
         if (epoch !== this.state.epoch || error instanceof StaleResponse) return;
         this.state = {
@@ -131,11 +131,11 @@ export class Session {
         if (epoch !== this.state.epoch) throw new StaleResponse();
         if (!response.ok) throw new Error('refresh_failed');
         refreshed = true;
-        const me = await this.json<Me>('/gateway/me', epoch);
+        const me = await this.json<Me>('/api/me', epoch);
         if (epoch !== this.state.epoch || this.logoutLatched) throw new StaleResponse();
         // refresh된 JWT와 결합된 CSRF를 확인한 뒤에만 읽기 재시도를 허용한다.
         // 원문 token은 보관하지 않으며 쓰기는 실행 시 다시 발급받는다.
-        await this.json<{ token: string; expires_at: string }>('/gateway/csrf', epoch);
+        await this.json<{ token: string; expires_at: string }>('/api/csrf', epoch);
         this.accept(me, epoch);
         return epoch;
       } catch (error) {
@@ -167,7 +167,7 @@ export class Session {
     }
   }
   async read<T>(url: string, isCurrent: () => boolean = () => true): Promise<T> {
-    if (!url.startsWith('/gateway/') || url.startsWith('//')) throw new Error('same-origin 관리 읽기만 허용');
+    if (!url.startsWith('/api/') || url.startsWith('//')) throw new Error('same-origin 관리 읽기만 허용');
     const previous = this.state.me;
     const epoch = this.state.epoch;
     if (!previous) throw new StaleResponse();
@@ -201,7 +201,7 @@ export class Session {
     }
   }
   async write<T>(url: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', commandId: string, body?: unknown): Promise<T | undefined> {
-    if (!url.startsWith('/gateway/') || url.startsWith('//')) throw new Error('same-origin 관리 쓰기만 허용');
+    if (!url.startsWith('/api/') || url.startsWith('//')) throw new Error('same-origin 관리 쓰기만 허용');
     const epoch = this.state.epoch, principal = this.state.me?.principal.id;
     const current = () => {
       if (!principal || epoch !== this.state.epoch || this.logoutLatched || this.state.me?.principal.id !== principal) throw new StaleResponse();
@@ -212,7 +212,7 @@ export class Session {
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
       // CSRF는 이 쓰기 작업에만 보관한다. 조회의 refresh/retry 경로를 쓰기에 사용하지 않는다.
-      const csrf = await this.json<{ token: string; expires_at: string }>('/gateway/csrf', epoch);
+      const csrf = await this.json<{ token: string; expires_at: string }>('/api/csrf', epoch);
       current();
       if (controller.signal.aborted) throw new DOMException('쓰기 기한 초과', 'AbortError');
       const headers: Record<string, string> = { Accept: 'application/json', 'X-CSRF-Token': csrf.token, 'X-Gateway-Command-ID': commandId };

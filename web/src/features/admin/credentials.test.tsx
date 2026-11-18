@@ -14,20 +14,20 @@ function stub(handle: (call: Call) => Response | undefined) {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const call = { url: String(input), method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined };
     calls.push(call);
-    if (call.url === '/gateway/me') return Promise.resolve(response(me));
-    if (call.url === '/gateway/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (call.url === '/api/me') return Promise.resolve(response(me));
+    if (call.url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
     return Promise.resolve(handle(call) ?? response({ error: { code: 'resource_not_found' } }, 404));
   }));
   return calls;
 }
-afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/ui/'); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); });
 
 test('first_key_is_added_with_a_label_and_the_secret_is_never_rendered', async () => {
-  history.replaceState(null, '', '/ui/admin/credentials');
+  history.replaceState(null, '', '/dashboard/admin/credentials');
   let registered = false;
   const calls = stub(c => {
     if (c.method === 'POST') { registered = true; return response({ command_id: 'cmd', operation: 'add_provider_credential', target: { kind: 'credential', id: 'credA' }, result_version: '1', effect: 'changed', replayed: false, credential: teamA }, 201); }
-    if (c.url === '/gateway/admin/provider-credentials') return response({ providers: [{ provider: 'anthropic', status: registered ? 'active' : 'missing', credentials: registered ? [teamA] : [], history: [] }] });
+    if (c.url === '/api/admin/provider-credentials') return response({ providers: [{ provider: 'anthropic', status: registered ? 'active' : 'missing', credentials: registered ? [teamA] : [], history: [] }] });
   });
   render(<App />);
   await screen.findByText(/미등록/);
@@ -47,18 +47,18 @@ test('first_key_is_added_with_a_label_and_the_secret_is_never_rendered', async (
   expect(item.textContent).toContain('연결된 가상 키 3개');
   const post = calls.filter(c => c.method === 'POST');
   expect(post).toHaveLength(1);
-  expect(post[0].url).toBe('/gateway/admin/provider-credentials/anthropic');
+  expect(post[0].url).toBe('/api/admin/provider-credentials/anthropic');
   expect(post[0].body).toEqual({ label: 'team-a', secret });
-  expect(calls.slice(calls.indexOf(post[0]) + 1).some(c => c.method === 'GET' && c.url === '/gateway/admin/provider-credentials')).toBe(true);
+  expect(calls.slice(calls.indexOf(post[0]) + 1).some(c => c.method === 'GET' && c.url === '/api/admin/provider-credentials')).toBe(true);
   expect(document.body.innerHTML).not.toContain(secret);
 });
 
 test('rejected_key_is_not_retried_and_default_key_retire_requires_a_key_to_move_to', async () => {
-  history.replaceState(null, '', '/ui/admin/credentials');
+  history.replaceState(null, '', '/dashboard/admin/credentials');
   const calls = stub(c => {
     if (c.method === 'POST') return response({ error: { code: 'provider_credential_rejected', message: 'x' } }, 422);
     if (c.method === 'PATCH' || c.method === 'DELETE') return response({ command_id: 'cmd', operation: 'x', target: { kind: 'credential', id: 'credA' }, result_version: '3', effect: 'changed', replayed: false });
-    if (c.url === '/gateway/admin/provider-credentials') return response({ providers: [{ provider: 'anthropic', status: 'active', credentials: [teamA, teamB], history: [] }] });
+    if (c.url === '/api/admin/provider-credentials') return response({ providers: [{ provider: 'anthropic', status: 'active', credentials: [teamA, teamB], history: [] }] });
   });
   render(<App />);
   await screen.findByRole('listitem', { name: '회사 키 team-b' });
@@ -72,7 +72,7 @@ test('rejected_key_is_not_retried_and_default_key_retire_requires_a_key_to_move_
   // 기본 키 지정은 지금 버전을 함께 보낸다.
   fireEvent.click(within(screen.getByRole('listitem', { name: '회사 키 team-b' })).getByRole('button', { name: '기본 키로 지정' }));
   await screen.findByText('team-b (…0002)를 기본 키로 지정했습니다.');
-  expect(calls.find(c => c.method === 'PATCH')).toMatchObject({ url: '/gateway/admin/provider-credentials/anthropic/credB', body: { expected_version: '1', default: true } });
+  expect(calls.find(c => c.method === 'PATCH')).toMatchObject({ url: '/api/admin/provider-credentials/anthropic/credB', body: { expected_version: '1', default: true } });
 
   // 기본 키(가상 키 3개 연결)를 해제하려면 옮길 키를 골라야 한다.
   const a = screen.getByRole('listitem', { name: '회사 키 team-a' });
@@ -87,17 +87,17 @@ test('rejected_key_is_not_retried_and_default_key_retire_requires_a_key_to_move_
   expect(confirm.textContent).toContain('team-b (…0002)로 옮겨집니다');
   fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
   await screen.findByText('team-a (…0001)를 해제하고 연결을 team-b (…0002)로 옮겼습니다.');
-  expect(calls.find(c => c.method === 'DELETE')?.url).toBe('/gateway/admin/provider-credentials/anthropic/credA?expected_version=2&move_to=credB');
+  expect(calls.find(c => c.method === 'DELETE')?.url).toBe('/api/admin/provider-credentials/anthropic/credA?expected_version=2&move_to=credB');
 });
 
 test('admin_chooses_a_company_key_when_issuing_and_keys_show_their_binding', async () => {
-  history.replaceState(null, '', '/ui/keys');
+  history.replaceState(null, '', '/dashboard/keys');
   const issued = { id: 'key1', principal_id: 'admin1', name: '새 키', key_hint: 'mgw_v1_x', created_at: '2026-11-13T00:00:00Z', created_by: 'admin1', created_command_id: 'c1', validity: 'unlimited', expires_at: null, revoked_at: null, version: '1', grants: [], limits: {}, provider_credentials: [{ provider: 'anthropic', credential_id: 'credB', label: 'team-b', hint: '0002', state: 'active' }] };
   let items: unknown[] = [];
   const calls = stub(c => {
-    if (c.url === '/gateway/admin/provider-credentials') return response({ providers: [{ provider: 'anthropic', status: 'active', credentials: [teamA, teamB], history: [] }] });
-    if (c.method === 'POST' && c.url === '/gateway/keys') { items = [issued]; return response({ key: 'mgw_v1_secret', metadata: issued }, 201); }
-    if (c.url.startsWith('/gateway/keys')) return response({ items, next_cursor: null, as_of: '2026-11-13T00:00:00Z' });
+    if (c.url === '/api/admin/provider-credentials') return response({ providers: [{ provider: 'anthropic', status: 'active', credentials: [teamA, teamB], history: [] }] });
+    if (c.method === 'POST' && c.url === '/api/keys') { items = [issued]; return response({ key: 'mgw_v1_secret', metadata: issued }, 201); }
+    if (c.url.startsWith('/api/keys')) return response({ items, next_cursor: null, as_of: '2026-11-13T00:00:00Z' });
   });
   render(<App />);
   const select = await screen.findByLabelText('Anthropic 회사 키') as HTMLSelectElement;
@@ -110,5 +110,5 @@ test('admin_chooses_a_company_key_when_issuing_and_keys_show_their_binding', asy
   fireEvent.click(screen.getByRole('button', { name: '발급 확인' }));
   const binding = await screen.findByLabelText('새 키 회사 키 연결');
   expect(binding.textContent).toContain('회사 키: Anthropic · team-b (…0002)');
-  expect(calls.find(c => c.method === 'POST' && c.url === '/gateway/keys')?.body?.provider_credentials).toEqual({ anthropic: 'credB' });
+  expect(calls.find(c => c.method === 'POST' && c.url === '/api/keys')?.body?.provider_credentials).toEqual({ anthropic: 'credB' });
 });

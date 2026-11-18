@@ -13,11 +13,11 @@ afterEach(() => { cleanup(); session.clear(); vi.unstubAllGlobals(); });
 
 test('app_refresh_retries_the_same_usage_url_once_and_preserves_explicit_queries', async () => {
   const refresh = deferred<Response>();
-  const url = '/gateway/usage?model=same-human&group_by=provider';
+  const url = '/api/usage?model=same-human&group_by=provider';
   let reads = 0;
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const path = String(input);
-    if (path === '/gateway/me') return Promise.resolve(response(me));
+    if (path === '/api/me') return Promise.resolve(response(me));
     if (path === me.sso.refresh_url) return refresh.promise;
     if (path === url && ++reads === 1) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
     return Promise.resolve(response(usage));
@@ -47,7 +47,7 @@ test('app_refresh_to_another_principal_discards_the_old_query_and_payload', asyn
   const paths: string[] = [];
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const path = String(input); paths.push(path);
-    if (path === '/gateway/me') return Promise.resolve(response(++meReads === 1 ? me : other));
+    if (path === '/api/me') return Promise.resolve(response(++meReads === 1 ? me : other));
     if (path === me.sso.refresh_url) return refresh.promise;
     if (path.includes('old-private-filter')) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
     return Promise.resolve(response(usage));
@@ -62,7 +62,7 @@ test('app_refresh_to_another_principal_discards_the_old_query_and_payload', asyn
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
   expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('');
   expect(paths.filter(path => path.includes('old-private-filter'))).toHaveLength(1);
-  expect(paths.filter(path => path === '/gateway/usage?group_by=provider')).toHaveLength(2);
+  expect(paths.filter(path => path === '/api/usage?group_by=provider')).toHaveLength(2);
 });
 
 test.each(['validate', 'refresh'] as const)('app_discards_final_me_after_microtask_remote_logout_%s', async path => {
@@ -81,7 +81,7 @@ test.each(['validate', 'refresh'] as const)('app_discards_final_me_after_microta
   const paths: string[] = [];
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input); paths.push(url);
-    if (url === '/gateway/me') return Promise.resolve(path === 'validate' || ++meReads === 2 ? held : response(me));
+    if (url === '/api/me') return Promise.resolve(path === 'validate' || ++meReads === 2 ? held : response(me));
     if (url === me.sso.refresh_url) return Promise.resolve(response({}));
     if (url.includes('private-query')) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
     return Promise.resolve(response(usage));
@@ -93,7 +93,7 @@ test.each(['validate', 'refresh'] as const)('app_discards_final_me_after_microta
     fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   }
   await enteredJson.promise;
-  const reads = paths.filter(url => url.startsWith('/gateway/usage')).length;
+  const reads = paths.filter(url => url.startsWith('/api/usage')).length;
   await act(async () => {
     body.resolve(me);
     queueMicrotask(() => channel.onmessage!({ data: { type: 'logout' } }));
@@ -102,7 +102,7 @@ test.each(['validate', 'refresh'] as const)('app_discards_final_me_after_microta
   expect(screen.queryByText('Synthetic')).toBeNull();
   expect(screen.queryByRole('heading', { name: '조회 기간 사용량' })).toBeNull();
   expect(screen.queryByText('0.000000000001')).toBeNull();
-  expect(paths.filter(url => url.startsWith('/gateway/usage'))).toHaveLength(reads);
+  expect(paths.filter(url => url.startsWith('/api/usage'))).toHaveLength(reads);
   expect(paths.filter(url => url === me.sso.refresh_url)).toHaveLength(path === 'refresh' ? 1 : 0);
 });
 
@@ -122,7 +122,7 @@ test.each(['initial', 'retry'] as const)('app_stale_401_after_logout_never_resto
   const paths: string[] = [];
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input); paths.push(url);
-    if (url === '/gateway/me') return Promise.resolve(response(me));
+    if (url === '/api/me') return Promise.resolve(response(me));
     if (url === me.sso.refresh_url) return Promise.resolve(response({}));
     if (url.includes('private-query')) {
       reads++;
@@ -165,7 +165,7 @@ test.each(['initial', 'retry'] as const)('app_discards_delayed_success_after_mic
   const paths: string[] = [];
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input); paths.push(url);
-    if (url === '/gateway/me') return Promise.resolve(response(me));
+    if (url === '/api/me') return Promise.resolve(response(me));
     if (url === me.sso.refresh_url) return Promise.resolve(response({}));
     if (url.includes('private-query')) {
       reads++;
@@ -205,7 +205,7 @@ test.each(['logout', 'auth-change'] as const)('app_consumer_discards_already_com
   const other: Me = { ...me, principal: { ...me.principal, id: 'human2', display_name: 'Second' } };
   let meReads = 0, usageReads = 0;
   const fetcher = vi.fn((input: RequestInfo | URL) => {
-    if (String(input) === '/gateway/me') return Promise.resolve(response(++meReads === 1 ? me : other));
+    if (String(input) === '/api/me') return Promise.resolve(response(++meReads === 1 ? me : other));
     return Promise.resolve(response({ ...usage, settled_usd: ++usageReads === 1 ? '123.000000000001' : '2.000000000002' }));
   });
   vi.stubGlobal('fetch', fetcher);

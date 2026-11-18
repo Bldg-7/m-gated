@@ -36,7 +36,7 @@ test.each((['validate', 'refresh'] as const).flatMap(path =>
     if (state.status === 'ready' && state.me) readyIdentities.push(state.me.principal.id);
   });
   try {
-    const operation = path === 'validate' ? session.validate() : session.read('/gateway/usage');
+    const operation = path === 'validate' ? session.validate() : session.read('/api/usage');
     // refresh의 stale 거부도 즉시 관찰해 unhandled rejection을 만들지 않는다.
     const settled = operation.then(() => null, error => error);
     await enteredJson.promise;
@@ -51,7 +51,7 @@ test.each((['validate', 'refresh'] as const).flatMap(path =>
     expect.soft(beforeReplacement.me, `${path}/${boundary}: 이전 me 수용 금지`).toBeNull();
     expect.soft(readyIdentities, `${path}/${boundary}: 이전 ready 통지 금지`).toEqual([]);
     expect.soft(sent, `${path}/${boundary}: 이전 auth-change 발행 금지`).toEqual(boundary === 'local-logout' ? [{ type: 'logout' }] : []);
-    expect.soft(fetcher.mock.calls.filter(c => c[0] === '/gateway/usage'), `${path}/${boundary}: 이전 읽기 retry 금지`).toHaveLength(path === 'refresh' ? 1 : 0);
+    expect.soft(fetcher.mock.calls.filter(c => c[0] === '/api/usage'), `${path}/${boundary}: 이전 읽기 retry 금지`).toHaveLength(path === 'refresh' ? 1 : 0);
     if (path === 'refresh') expect.soft(error).toBeInstanceOf(StaleResponse);
     if (boundary === 'auth-change') {
       expect.soft(beforeReplacement.status).toBe('checking');
@@ -67,7 +67,7 @@ test.each((['validate', 'refresh'] as const).flatMap(path =>
       await session.validate('remote');
       expect.soft(fetcher).toHaveBeenCalledTimes(calls);
       expect(session.snapshot().me).toBeNull();
-      await expect(session.read('/gateway/usage')).rejects.toBeInstanceOf(StaleResponse);
+      await expect(session.read('/api/usage')).rejects.toBeInstanceOf(StaleResponse);
       replacement.resolve(response(me));
       await session.validate();
       expect.soft(session.snapshot().me?.principal.id).toBe('human1');
@@ -95,8 +95,8 @@ test.each((['initial', 'retry'] as const).flatMap(path => [401, 403].flatMap(sta
   let meReads = 0, reads = 0;
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
-    if (url === '/gateway/me') {
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
+    if (url === '/api/me') {
       meReads++;
       return boundary === 'auth-change' && meReads === (path === 'retry' ? 3 : 2)
         ? replacement.promise : Promise.resolve(response(me));
@@ -111,7 +111,7 @@ test.each((['initial', 'retry'] as const).flatMap(path => [401, 403].flatMap(sta
   const detach = session.attach(), ready: string[] = [];
   const unsubscribe = session.subscribe(() => { if (session.snapshot().me) ready.push(session.snapshot().me!.principal.id); });
   try {
-    const operation = session.read('/gateway/usage').then(() => null, error => error);
+    const operation = session.read('/api/usage').then(() => null, error => error);
     await enteredJson.promise;
     ready.length = 0;
     body.resolve({ error: { code: status === 401 ? 'expired' : 'access_denied' } });
@@ -159,16 +159,16 @@ test.each(['remote-logout', 'auth-change'] as const)('superseded_refresh_cannot_
   let meReads = 0, reads = 0;
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
-    if (url === '/gateway/me') return Promise.resolve(response(++meReads === 1 ? me : newMe));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
+    if (url === '/api/me') return Promise.resolve(response(++meReads === 1 ? me : newMe));
     if (url === me.sso.refresh_url) { enteredRefresh.resolve(); return refresh.promise; }
     return ++reads === 1 ? Promise.resolve(response({ error: { code: 'expired' } }, 401)) : late.promise;
   });
   const nav = vi.fn(), session = new Session(fetcher, nav);
   await session.validate(); const detach = session.attach();
   try {
-    const first = session.read('/gateway/usage?a').then(() => null, error => error);
-    const second = session.read('/gateway/usage?b').then(() => null, error => error);
+    const first = session.read('/api/usage?a').then(() => null, error => error);
+    const second = session.read('/api/usage?b').then(() => null, error => error);
     await enteredRefresh.promise;
     channel.onmessage!({ data: { type: boundary === 'remote-logout' ? 'logout' : 'auth-change' } });
     if (boundary === 'auth-change') await session.validate('remote');
@@ -189,20 +189,20 @@ test('current_refresh_owns_concurrent_reads_and_each_retries_only_once', async (
   const counts = new Map<string, number>();
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
-    if (url === '/gateway/me') return Promise.resolve(response(me));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
+    if (url === '/api/me') return Promise.resolve(response(me));
     if (url === me.sso.refresh_url) { enteredRefresh.resolve(); return refresh.promise; }
     const count = (counts.get(url) ?? 0) + 1; counts.set(url, count);
     return count === 1 ? (url.endsWith('?a') ? a.promise : b.promise) : Promise.resolve(response({ value: url }));
   });
   const session = new Session(fetcher, vi.fn()); await session.validate();
-  const first = session.read('/gateway/usage?a'), second = session.read('/gateway/usage?b');
+  const first = session.read('/api/usage?a'), second = session.read('/api/usage?b');
   a.resolve(response({ error: { code: 'expired' } }, 401));
   await enteredRefresh.promise;
   // 이전 epoch 오류는 진행 중인 refresh가 현재도 소유할 때만 합류한다.
   b.resolve(response({ error: { code: 'expired' } }, 401));
   refresh.resolve(response({}));
-  expect(await Promise.all([first, second])).toEqual([{ value: '/gateway/usage?a' }, { value: '/gateway/usage?b' }]);
+  expect(await Promise.all([first, second])).toEqual([{ value: '/api/usage?a' }, { value: '/api/usage?b' }]);
   expect([...counts.values()]).toEqual([2, 2]);
   expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
 });
@@ -214,8 +214,8 @@ test('new_epoch_refresh_does_not_join_or_get_cleared_by_superseded_flight', asyn
   const counts = new Map<string, number>();
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
-    if (url === '/gateway/me') return Promise.resolve(response(me));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
+    if (url === '/api/me') return Promise.resolve(response(me));
     if (url === me.sso.refresh_url) {
       if (++refreshes === 1) { oldEntered.resolve(); return oldRefresh.promise; }
       newEntered.resolve(); return newRefresh.promise;
@@ -224,16 +224,16 @@ test('new_epoch_refresh_does_not_join_or_get_cleared_by_superseded_flight', asyn
     return Promise.resolve(response(count === 1 ? { error: { code: 'expired' } } : { value: url }, count === 1 ? 401 : 200));
   });
   const session = new Session(fetcher, vi.fn()); await session.validate();
-  const old = session.read('/gateway/usage?old').then(() => null, error => error);
+  const old = session.read('/api/usage?old').then(() => null, error => error);
   await oldEntered.promise;
   await session.validate();
-  const current = session.read('/gateway/usage?current');
+  const current = session.read('/api/usage?current');
   await newEntered.promise;
   oldRefresh.resolve(response({}));
   expect(await old).toBeInstanceOf(StaleResponse);
   expect(session.snapshot()).toMatchObject({ me: null, status: 'checking', refreshing: true });
   newRefresh.resolve(response({}));
-  expect(await current).toEqual({ value: '/gateway/usage?current' });
+  expect(await current).toEqual({ value: '/api/usage?current' });
   expect(refreshes).toBe(2);
   expect([...counts.values()]).toEqual([1, 2]);
   expect(session.snapshot()).toMatchObject({ me: { principal: { id: 'human1' } }, status: 'ready' });
@@ -257,8 +257,8 @@ test.each((['initial', 'retry'] as const).flatMap(path =>
   let meReads = 0, reads = 0, fulfilled = 0;
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
-    if (url === '/gateway/me') {
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
+    if (url === '/api/me') {
       meReads++;
       return boundary === 'auth-change' && meReads === (path === 'retry' ? 3 : 2)
         ? replacement.promise : Promise.resolve(response(me));
@@ -272,7 +272,7 @@ test.each((['initial', 'retry'] as const).flatMap(path =>
   await session.validate(); const detach = session.attach(), ready: string[] = [];
   const unsubscribe = session.subscribe(() => { if (session.snapshot().me) ready.push(session.snapshot().me!.principal.id); });
   try {
-    const operation = session.read('/gateway/usage').then(() => { fulfilled++; return null; }, error => error);
+    const operation = session.read('/api/usage').then(() => { fulfilled++; return null; }, error => error);
     await enteredJson.promise;
     ready.length = 0;
     body.resolve({ private: 'old-usage' });

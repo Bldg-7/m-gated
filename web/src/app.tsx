@@ -23,7 +23,7 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
     let current = true; setUsage(null); setError(null); setLoading(true);
     // 같은 사용자의 refresh 동안 App이 이 화면을 유지하며 Session만 읽기를 재시도한다.
     // 그 밖의 인증 변경은 App의 unmount/key 변경으로 이전 결과를 폐기한다.
-    void session.read<Usage>(`/gateway/${admin ? 'admin/' : ''}usage?${query}`).then(data => { if (current) { setUsage(data); setLoading(false); } }).catch(e => { if (!current || e instanceof StaleResponse) return; setUsage(null); setLoading(false); setError(e instanceof ApiError && e.status === 409 ? t('상세 사용량을 제공할 수 없습니다. 상세 가용 시작: {{from}}', { from: String(e.details.detail_available_from ?? t('미확인')) }) : e instanceof ApiError && e.status === 403 ? t('현재 권한으로 조회할 수 없습니다.') : t('사용량을 가져올 수 없습니다. 다시 조회하세요.')); });
+    void session.read<Usage>(`/api/${admin ? 'admin/' : ''}usage?${query}`).then(data => { if (current) { setUsage(data); setLoading(false); } }).catch(e => { if (!current || e instanceof StaleResponse) return; setUsage(null); setLoading(false); setError(e instanceof ApiError && e.status === 409 ? t('상세 사용량을 제공할 수 없습니다. 상세 가용 시작: {{from}}', { from: String(e.details.detail_available_from ?? t('미확인')) }) : e instanceof ApiError && e.status === 403 ? t('현재 권한으로 조회할 수 없습니다.') : t('사용량을 가져올 수 없습니다. 다시 조회하세요.')); });
     return () => { current = false; };
   }, [query, revision]);
   const submit = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const data = new FormData(event.currentTarget); const q = new URLSearchParams(); const from = String(data.get('from') ?? ''); const to = String(data.get('to') ?? ''); if (Boolean(from) !== Boolean(to)) { setUsage(null); setError(t('시작과 종료를 모두 지정하세요.')); return; } if (from && to) { q.set('from', new Date(from).toISOString()); q.set('to', new Date(to).toISOString()); } for (const name of [...(admin ? ['principal_id'] : []), 'provider', 'model', 'key_id', 'group_by']) { const value = String(data.get(name) ?? ''); if (value) q.set(name, value); } setFilters(q.toString()); setQuery(q.toString()); setRevision(v => v + 1); };
@@ -45,18 +45,18 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
   </>;
 }
 const pages: Record<Screen, { nav: string; title: string; lead?: string }> = {
-  '/ui/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 관측한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
-  '/ui/keys': { nav: msgid('내 키'), title: msgid('내 API 키') },
-  '/ui/admin/principals': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 · 정책 · 키'), lead: msgid('사용자와 서비스 계정의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
-  '/ui/admin/principals/detail': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 상세'), lead: msgid('사용자 하나의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
-  '/ui/admin/usage': { nav: msgid('전체 사용량'), title: msgid('전체 사용량'), lead: msgid('사용자·키별 사용량을 조회합니다. 사용자를 지정하지 않은 전체 합계에는 예산 잔액이 없습니다.') },
-  '/ui/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
-  '/ui/admin/models': { nav: msgid('모델·가격'), title: msgid('모델 · 가격 카탈로그'), lead: msgid('공급사 모델과 가격을 공개 가격 목록 models.dev 에서 불러옵니다. 동기화는 변경안만 만들고, 관리자가 이전 값과 비교해 승인해야 적용됩니다. 이미 기록된 요청의 금액은 바뀌지 않습니다.') },
-  '/ui/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 회사 키'), lead: msgid('Provider마다 회사 키를 여러 개 등록하고, 키마다 알아볼 이름을 붙입니다. 가상 키는 발급할 때 Provider별로 회사 키 하나에 연결되고, 따로 고르지 않으면 그 Provider의 기본 키에 연결됩니다. 키는 DB에 암호화해 저장하며, 저장 전에 Provider의 모델 목록 API로 실제 확인을 1회 거칩니다. 저장한 키는 다시 볼 수 없고 끝 4자리만 표시합니다. 다른 서버 인스턴스에는 상태 점검 주기(수 초) 안에 반영되고, 진행 중인 요청은 시작할 때의 키를 끝까지 씁니다.') },
+  '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 관측한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
+  '/dashboard/keys': { nav: msgid('내 키'), title: msgid('내 API 키') },
+  '/dashboard/admin/principals': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 · 정책 · 키'), lead: msgid('사용자와 서비스 계정의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
+  '/dashboard/admin/principals/detail': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 상세'), lead: msgid('사용자 하나의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
+  '/dashboard/admin/usage': { nav: msgid('전체 사용량'), title: msgid('전체 사용량'), lead: msgid('사용자·키별 사용량을 조회합니다. 사용자를 지정하지 않은 전체 합계에는 예산 잔액이 없습니다.') },
+  '/dashboard/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
+  '/dashboard/admin/models': { nav: msgid('모델·가격'), title: msgid('모델 · 가격 카탈로그'), lead: msgid('공급사 모델과 가격을 공개 가격 목록 models.dev 에서 불러옵니다. 동기화는 변경안만 만들고, 관리자가 이전 값과 비교해 승인해야 적용됩니다. 이미 기록된 요청의 금액은 바뀌지 않습니다.') },
+  '/dashboard/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 회사 키'), lead: msgid('Provider마다 회사 키를 여러 개 등록하고, 키마다 알아볼 이름을 붙입니다. 가상 키는 발급할 때 Provider별로 회사 키 하나에 연결되고, 따로 고르지 않으면 그 Provider의 기본 키에 연결됩니다. 키는 DB에 암호화해 저장하며, 저장 전에 Provider의 모델 목록 API로 실제 확인을 1회 거칩니다. 저장한 키는 다시 볼 수 없고 끝 4자리만 표시합니다. 다른 서버 인스턴스에는 상태 점검 주기(수 초) 안에 반영되고, 진행 중인 요청은 시작할 때의 키를 끝까지 씁니다.') },
 };
-/** 서버가 내준 경로를 화면으로. 등록되지 않은 /ui/admin/* 는 전체 사용량, 그 밖은 내 사용량(기존 동작과 같음). */
+/** 서버가 내준 경로를 화면으로. 등록되지 않은 /dashboard/admin/* 는 전체 사용량, 그 밖은 내 사용량(기존 동작과 같음). */
 function screenOf(path: string): Screen {
-  return isScreen(path) ? path : path.startsWith('/ui/admin/') ? '/ui/admin/usage' : '/ui/';
+  return isScreen(path) ? path : path.startsWith('/dashboard/admin/') ? '/dashboard/admin/usage' : '/dashboard/';
 }
 /** 언어 선택. 각 언어 이름은 그 언어로 적는다. */
 function LanguageSwitch() {
@@ -89,7 +89,7 @@ export function App() {
   }, [route.href]);
   // 하위 페이지(사용자 상세)에 있을 때도 상위 메뉴를 현재 위치로 표시한다.
   const link = (path: Screen) => <Link href={path} aria-current={screen === path || screen.startsWith(`${path}/`) ? 'page' : undefined}>{t(pages[path].nav)}</Link>;
-  const content = screen.startsWith('/ui/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p> : screen === '/ui/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/ui/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/ui/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/ui/keys' ? <KeysScreen key={principal.current} /> : <UsageScreen key={principal.current} />;
+  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p> : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : <UsageScreen key={principal.current} />;
   return <div className="app">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark" aria-hidden="true">mg</span>m-gated</div>
@@ -99,8 +99,8 @@ export function App() {
         <div className="actions"><button className="btn-sm" onClick={() => session.logout()}>{t('로그아웃')}</button></div>
       </section>}
       <nav aria-label={t('기본')} className="nav">
-        <div className="nav-group"><span className="nav-label">{t('내 계정')}</span>{link('/ui/')}{link('/ui/keys')}</div>
-        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/ui/admin/principals')}{link('/ui/admin/usage')}{link('/ui/admin/requests')}{link('/ui/admin/credentials')}{link('/ui/admin/models')}</div>}
+        <div className="nav-group"><span className="nav-label">{t('내 계정')}</span>{link('/dashboard/')}{link('/dashboard/keys')}</div>
+        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/dashboard/admin/principals')}{link('/dashboard/admin/usage')}{link('/dashboard/admin/requests')}{link('/dashboard/admin/credentials')}{link('/dashboard/admin/models')}</div>}
       </nav>
       <LanguageSwitch />
     </aside>

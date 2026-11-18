@@ -14,7 +14,7 @@ async fn static_routes_assets_and_csp_are_explicit() {
     let response = router
         .oneshot(
             Request::builder()
-                .uri("/ui?return_to=https://evil.invalid")
+                .uri("/dashboard?return_to=https://evil.invalid")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -23,9 +23,36 @@ async fn static_routes_assets_and_csp_are_explicit() {
     assert_eq!(
         response.status(),
         308,
-        "고정 /ui redirect는 query를 반사하지 않는다"
+        "고정 /dashboard redirect는 query를 반사하지 않는다"
     );
-    assert_eq!(response.headers()["location"], "/ui/");
+    assert_eq!(response.headers()["location"], "/dashboard/");
+}
+
+#[tokio::test]
+async fn root_redirects_to_dashboard_and_old_prefixes_are_gone() {
+    let router = http::router(AppState {
+        runtime: Runtime::new(Limits::default()).unwrap(),
+    });
+    let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let root = router.clone().oneshot(get("/")).await.unwrap();
+    assert_eq!(root.status(), 308);
+    assert_eq!(root.headers()["location"], "/dashboard/");
+    let post = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 405);
+    for old in ["/ui", "/ui/", "/gateway/me"] {
+        let response = router.clone().oneshot(get(old)).await.unwrap();
+        assert_eq!(response.status(), 404, "{old}");
+    }
 }
 
 struct BundleFixture(std::path::PathBuf);
@@ -35,7 +62,7 @@ impl BundleFixture {
         std::fs::create_dir_all(path.join(".vite")).unwrap();
         std::fs::create_dir(path.join("assets")).unwrap();
         std::fs::write(path.join(".vite/manifest.json"),r#"{"index.html":{"file":"assets/index-12345678.js","name":"index","src":"index.html","isEntry":true,"css":["assets/index-12345678.css"]}}"#).unwrap();
-        std::fs::write(path.join("index.html"),r#"<!doctype html><script type="module" src="/ui/assets/index-12345678.js"></script><link rel="stylesheet" href="/ui/assets/index-12345678.css">"#).unwrap();
+        std::fs::write(path.join("index.html"),r#"<!doctype html><script type="module" src="/dashboard/assets/index-12345678.js"></script><link rel="stylesheet" href="/dashboard/assets/index-12345678.css">"#).unwrap();
         std::fs::write(
             path.join("assets/index-12345678.js"),
             "document.title='m-gated';",
@@ -88,10 +115,13 @@ async fn fixed_vite_manifest_is_loaded_without_accepting_unknown_manifest_fields
     }
     for (path, mime) in [
         (
-            "/ui/assets/index-12345678.js",
+            "/dashboard/assets/index-12345678.js",
             "text/javascript; charset=utf-8",
         ),
-        ("/ui/assets/index-12345678.css", "text/css; charset=utf-8"),
+        (
+            "/dashboard/assets/index-12345678.css",
+            "text/css; charset=utf-8",
+        ),
     ] {
         let r = router
             .clone()
@@ -106,13 +136,13 @@ async fn fixed_vite_manifest_is_loaded_without_accepting_unknown_manifest_fields
         );
     }
     for path in [
-        "/ui/missing",
-        "/ui/assets/missing.js",
-        "/ui/assets/%2e%2e/index.html",
-        "/ui/assets/%2findex-12345678.js",
-        "/ui/assets/../index.html",
-        "/ui/admin/missing",
-        "/gateway/missing",
+        "/dashboard/missing",
+        "/dashboard/assets/missing.js",
+        "/dashboard/assets/%2e%2e/index.html",
+        "/dashboard/assets/%2findex-12345678.js",
+        "/dashboard/assets/../index.html",
+        "/dashboard/admin/missing",
+        "/api/missing",
         "/auth/login/missing",
     ] {
         let r = router
@@ -128,7 +158,7 @@ async fn fixed_vite_manifest_is_loaded_without_accepting_unknown_manifest_fields
             .oneshot(
                 Request::builder()
                     .method(method)
-                    .uri("/ui/")
+                    .uri("/dashboard/")
                     .body(Body::empty())
                     .unwrap(),
             )

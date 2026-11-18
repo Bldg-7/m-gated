@@ -199,7 +199,7 @@ impl Harness {
     async fn sync(&self, command: Uuid) -> (u16, Value) {
         self.call(
             "POST",
-            "/gateway/admin/model-catalog/sync",
+            "/api/admin/model-catalog/sync",
             &self.alice,
             Some(command),
             None,
@@ -213,7 +213,7 @@ impl Harness {
             .collect();
         self.call(
             "POST",
-            "/gateway/admin/model-catalog/approve",
+            "/api/admin/model-catalog/approve",
             &self.alice,
             Some(Uuid::new_v4()),
             Some(json!({"proposal_id":proposal,"expected_version":expected,"items":items})),
@@ -236,7 +236,7 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
     let h = Harness::new().await;
     // 승인 전: 카탈로그 모델로는 추론할 수 없다.
     let (status, view) = h
-        .call("GET", "/gateway/admin/model-catalog", &h.alice, None, None)
+        .call("GET", "/api/admin/model-catalog", &h.alice, None, None)
         .await;
     assert_eq!(status, 200);
     assert_eq!(view["version"], "0");
@@ -285,7 +285,7 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
     assert_eq!(replay["proposal_id"], synced["proposal_id"]);
     assert_eq!(replay["proposal"], synced["proposal"]);
     let (status, view) = h
-        .call("GET", "/gateway/admin/model-catalog", &h.alice, None, None)
+        .call("GET", "/api/admin/model-catalog", &h.alice, None, None)
         .await;
     assert_eq!(
         (status, view["version"].clone()),
@@ -424,7 +424,7 @@ async fn admin_sync_shows_diff_and_only_approved_items_become_billable_models() 
     .unwrap();
     assert_eq!(audits, ["approve_model_catalog"; 3]);
     let (status, view) = h
-        .call("GET", "/gateway/admin/model-catalog", &h.alice, None, None)
+        .call("GET", "/api/admin/model-catalog", &h.alice, None, None)
         .await;
     assert_eq!(
         (
@@ -440,7 +440,7 @@ impl Harness {
     async fn sync_as_bob(&self) -> (u16, Value) {
         self.call(
             "POST",
-            "/gateway/admin/model-catalog/sync",
+            "/api/admin/model-catalog/sync",
             &self.bob,
             Some(Uuid::new_v4()),
             None,

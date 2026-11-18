@@ -152,10 +152,10 @@ async fn cookie_login_me_usage_and_current_server_access() {
         .await
         .unwrap();
     assert_eq!(r.status(), 303);
-    assert_eq!(r.headers()["location"], "/ui/");
+    assert_eq!(r.headers()["location"], "/dashboard/");
     let r = router
         .clone()
-        .oneshot(request("/gateway/me", Some(&cookie), None))
+        .oneshot(request("/api/me", Some(&cookie), None))
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
@@ -165,7 +165,7 @@ async fn cookie_login_me_usage_and_current_server_access() {
     assert_eq!(me["role"], "user");
     let keys = router
         .clone()
-        .oneshot(request("/gateway/keys", Some(&cookie), None))
+        .oneshot(request("/api/keys", Some(&cookie), None))
         .await
         .unwrap();
     assert_eq!(keys.status(), 200, "S5: 본인 키 목록은 실제 인증된 경로다");
@@ -175,7 +175,7 @@ async fn cookie_login_me_usage_and_current_server_access() {
     assert_eq!(keys["next_cursor"], Value::Null);
     let id = uuid::Uuid::parse_str(me["principal"]["id"].as_str().unwrap()).unwrap();
     assert!(me["principal"].get("effective_grants").is_none());
-    for path in ["/gateway/me", "/gateway/usage", "/auth/login"] {
+    for path in ["/api/me", "/api/usage", "/auth/login"] {
         let r = router
             .clone()
             .oneshot(request(path, Some(&cookie), Some("Basic invalid")))
@@ -185,11 +185,7 @@ async fn cookie_login_me_usage_and_current_server_access() {
     }
     let r = router
         .clone()
-        .oneshot(request(
-            "/gateway/usage?group_by=provider",
-            Some(&cookie),
-            None,
-        ))
+        .oneshot(request("/api/usage?group_by=provider", Some(&cookie), None))
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
@@ -205,11 +201,7 @@ async fn cookie_login_me_usage_and_current_server_access() {
     ] {
         let r = router
             .clone()
-            .oneshot(request(
-                &format!("/gateway/usage?{query}"),
-                Some(&cookie),
-                None,
-            ))
+            .oneshot(request(&format!("/api/usage?{query}"), Some(&cookie), None))
             .await
             .unwrap();
         assert_eq!(r.status(), 400, "{query}");
@@ -218,7 +210,7 @@ async fn cookie_login_me_usage_and_current_server_access() {
     let r = router
         .clone()
         .oneshot(request(
-            &format!("/gateway/usage?key_id={other}"),
+            &format!("/api/usage?key_id={other}"),
             Some(&cookie),
             None,
         ))
@@ -226,7 +218,7 @@ async fn cookie_login_me_usage_and_current_server_access() {
         .unwrap();
     assert_eq!(r.status(), 404);
     sqlx::query("UPDATE gw_principals SET disabled_at=clock_timestamp(),disabled_reason='test_stop' WHERE id=$1").bind(id).execute(db.store.pool()).await.unwrap();
-    for path in ["/gateway/me", "/gateway/usage", "/auth/login"] {
+    for path in ["/api/me", "/api/usage", "/auth/login"] {
         let r = router
             .clone()
             .oneshot(request(path, Some(&cookie), None))

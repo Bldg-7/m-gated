@@ -40,7 +40,7 @@ function message(error: unknown) {
 /** Provider 회사 키 관리. 키 원문은 입력칸에서 전송 직전까지만 들고 있고 화면에 다시 보여 주지 않는다. */
 export function CredentialsScreen() {
   const { t } = useTranslation();
-  const list = useResource<CredentialList>('/gateway/admin/provider-credentials');
+  const list = useResource<CredentialList>('/api/admin/provider-credentials');
   const secret = useRef<string | null>(null), mounted = useRef(true);
   const [pending, setPending] = useState<Pending | null>(null), [editing, setEditing] = useState<Editing | null>(null);
   const [busy, setBusy] = useState(false), [status, setStatus] = useState<string | null>(null), [formKey, setFormKey] = useState(0);
@@ -64,7 +64,7 @@ export function CredentialsScreen() {
   };
   const execute = async () => {
     if (!pending || busy) return;
-    const action = pending, value = secret.current, base = `/gateway/admin/provider-credentials/${action.provider}`, name = providerNames[action.provider];
+    const action = pending, value = secret.current, base = `/api/admin/provider-credentials/${action.provider}`, name = providerNames[action.provider];
     secret.current = null; setPending(null); setFormKey(v => v + 1);
     if (action.kind === 'add') await send(base, 'POST', { label: action.label, secret: value }, t('{{provider}} 키 {{label}}(…{{hint}})를 확인하고 저장했습니다.', { provider: name, label: action.label, hint: action.hint }));
     else if (action.kind === 'replace') await send(`${base}/${action.target.id}`, 'PUT', { secret: value, expected_version: action.target.version }, t('{{label}}의 원문을 …{{hint}}로 바꿨습니다. 연결된 가상 키는 새 원문을 씁니다.', { label: action.target.label, hint: action.hint }));
@@ -98,13 +98,13 @@ export function CredentialsScreen() {
               <div className="row"><strong>{c.label}</strong>{c.default && <Badge tone="info">{t('기본 키')}</Badge>}{!c.decryptable && <Badge tone="critical">{t('복호화 불가')}</Badge>}<span className="mono meta"><span aria-hidden="true">••••</span>{c.hint}</span></div>
               <div className="actions">
                 <button className="btn-sm" disabled={locked} onClick={() => setEditing(open === 'rename' ? null : { id: c.id, kind: 'rename' })}>{t('이름 변경')}</button>
-                {!c.default && <button className="btn-sm" disabled={locked} onClick={() => void send(`/gateway/admin/provider-credentials/${p.provider}/${c.id}`, 'PATCH', { expected_version: c.version, default: true }, t('{{label}}를 기본 키로 지정했습니다.', { label: credentialLabel(c) }))}>{t('기본 키로 지정')}</button>}
+                {!c.default && <button className="btn-sm" disabled={locked} onClick={() => void send(`/api/admin/provider-credentials/${p.provider}/${c.id}`, 'PATCH', { expected_version: c.version, default: true }, t('{{label}}를 기본 키로 지정했습니다.', { label: credentialLabel(c) }))}>{t('기본 키로 지정')}</button>}
                 <button className="btn-sm" disabled={locked} onClick={() => setEditing(open === 'replace' ? null : { id: c.id, kind: 'replace' })}>{t('원문 교체')}</button>
                 <button className="btn-sm btn-danger-outline" disabled={locked} onClick={() => setEditing(open === 'retire' ? null : { id: c.id, kind: 'retire' })}>{t('해제')}</button>
               </div>
             </div>
             <p className="meta">{t('연결된 가상 키 {{count}}개', { count: Number(c.bound_keys) })} · {t('버전 {{version}}', { version: c.version })} · {t('등록 {{at}} ({{by}}) · Provider 확인 {{verified}}', { at: c.created_at, by: c.created_by_email ?? c.created_by, verified: c.verified_at })}</p>
-            {open === 'rename' && <form aria-label={t('{{label}} 이름 변경', { label: c.label })} className="row" onSubmit={e => { const label = String(fields(e).get('label') ?? ''); if (label === c.label) { setEditing(null); return; } void send(`/gateway/admin/provider-credentials/${p.provider}/${c.id}`, 'PATCH', { expected_version: c.version, label }, t('이름을 {{label}}로 바꿨습니다.', { label })); }}>
+            {open === 'rename' && <form aria-label={t('{{label}} 이름 변경', { label: c.label })} className="row" onSubmit={e => { const label = String(fields(e).get('label') ?? ''); if (label === c.label) { setEditing(null); return; } void send(`/api/admin/provider-credentials/${p.provider}/${c.id}`, 'PATCH', { expected_version: c.version, label }, t('이름을 {{label}}로 바꿨습니다.', { label })); }}>
               <label>{t('새 이름')}<input name="label" defaultValue={c.label} required maxLength={60} autoFocus /></label><div className="actions"><button className="btn-primary" disabled={locked}>{t('저장')}</button><button type="button" className="btn-quiet" onClick={() => setEditing(null)}>{t('취소')}</button></div>
             </form>}
             {open === 'replace' && <form key={formKey} aria-label={t('{{label}} 원문 교체', { label: c.label })} className="row" onSubmit={e => { const value = String(fields(e).get('secret') ?? ''); setStatus(null); if (value.length < 20) { setStatus(message(new ApiError(400, 'invalid_request'))); return; } secret.current = value; setPending({ kind: 'replace', provider: p.provider, target: c, hint: value.slice(-4) }); }}>

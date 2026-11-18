@@ -31,7 +31,7 @@ export async function measureLoad({ caseName, token, adminToken, db, schema, sta
       release();
       if(caseName==='mixed'){
         const management=(async()=>{for(let i=0;i<60;i++){
-          for(const path of ['/livez','/readyz','/ui/','/gateway/admin/principals?limit=100','/gateway/admin/usage']){
+          for(const path of ['/livez','/readyz','/dashboard/','/api/admin/principals?limit=100','/api/admin/usage']){
             const r=await fetch(`http://127.0.0.1:4000${path}`,{headers:{authorization:`Bearer ${adminToken}`},signal:AbortSignal.timeout(5000)});assert.equal(r.status,200);await r.arrayBuffer();adminCompleted++;
           }
           await new Promise(resolve=>setTimeout(resolve,1000));

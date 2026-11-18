@@ -13,19 +13,19 @@ const proposal = { base_version: 1, source: { source: 'models_dev', models: 3 },
   { provider: 'anthropic', model: 'claude-haiku-5-5', status: 'new', current: null, proposed: haiku },
   { provider: 'anthropic', model: 'claude-sonnet-5-5', status: 'unchanged', current: opusOld, proposed: opusOld },
 ] };
-afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/ui/'); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); });
 
 test('sync_shows_old_and_new_values_and_approves_only_checked_items', async () => {
-  history.replaceState(null, '', '/ui/admin/models');
+  history.replaceState(null, '', '/dashboard/admin/models');
   const calls: { url: string; method: string; body?: Record<string, unknown> }[] = [];
   let version = '1';
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input); calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
-    if (url === '/gateway/me') return Promise.resolve(response(me));
-    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'csrf' }));
-    if (url === '/gateway/admin/model-catalog/sync') return Promise.resolve(response({ command_id: 'c1', operation: 'sync_model_catalog', proposal_id: 'p1', result_version: '1', effect: 'changed', replayed: false, proposal }, 201));
-    if (url === '/gateway/admin/model-catalog/approve') { version = '2'; return Promise.resolve(response({ command_id: 'c2', operation: 'approve_model_catalog', proposal_id: 'p1', result_version: '2', effect: 'changed', replayed: false })); }
-    if (url === '/gateway/admin/model-catalog') return Promise.resolve(response({ version, approved_at: '2026-11-13T00:00:00Z', approved_by_email: 'admin@example.test', entries: version === '1' ? [opusOld] : [opusNew, haiku], providers: [{ provider: 'anthropic', api: 'messages', model_prefixes: ['claude-'], required_rates: ['input'] }] }));
+    if (url === '/api/me') return Promise.resolve(response(me));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (url === '/api/admin/model-catalog/sync') return Promise.resolve(response({ command_id: 'c1', operation: 'sync_model_catalog', proposal_id: 'p1', result_version: '1', effect: 'changed', replayed: false, proposal }, 201));
+    if (url === '/api/admin/model-catalog/approve') { version = '2'; return Promise.resolve(response({ command_id: 'c2', operation: 'approve_model_catalog', proposal_id: 'p1', result_version: '2', effect: 'changed', replayed: false })); }
+    if (url === '/api/admin/model-catalog') return Promise.resolve(response({ version, approved_at: '2026-11-13T00:00:00Z', approved_by_email: 'admin@example.test', entries: version === '1' ? [opusOld] : [opusNew, haiku], providers: [{ provider: 'anthropic', api: 'messages', model_prefixes: ['claude-'], required_rates: ['input'] }] }));
     return Promise.resolve(response({ error: { code: 'resource_not_found' } }, 404));
   }));
   render(<App />);
@@ -64,12 +64,12 @@ test('sync_shows_old_and_new_values_and_approves_only_checked_items', async () =
 });
 
 test('stale_proposal_is_reported_and_not_retried', async () => {
-  history.replaceState(null, '', '/ui/admin/models');
+  history.replaceState(null, '', '/dashboard/admin/models');
   let approves = 0;
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === '/gateway/me') return Promise.resolve(response(me));
-    if (url === '/gateway/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (url === '/api/me') return Promise.resolve(response(me));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
     if (url.endsWith('/sync')) return Promise.resolve(response({ proposal_id: 'p1', proposal }, 201));
     if (url.endsWith('/approve')) { approves++; return Promise.resolve(response({ error: { code: 'catalog_proposal_stale' } }, 409)); }
     return Promise.resolve(response({ version: '1', approved_at: null, approved_by_email: null, entries: [], providers: [] }));

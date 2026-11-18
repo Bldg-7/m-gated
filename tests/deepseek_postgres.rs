@@ -558,7 +558,7 @@ async fn key(h: &Harness, service: Option<uuid::Uuid>) -> (String, uuid::Uuid) {
     if let Some(service) = service {
         input["service_principal_id"] = service.to_string().into();
     }
-    let (status, v) = api(h, reqwest::Method::POST, "/gateway/keys", Some(input)).await;
+    let (status, v) = api(h, reqwest::Method::POST, "/api/keys", Some(input)).await;
     assert_eq!(status, 201);
     (
         v["key"].as_str().unwrap().to_owned(),
@@ -597,10 +597,10 @@ async fn deepseek_personal_and_service_keys_apply_both_scopes_owner_and_revoke()
     .unwrap();
         assert_eq!(b.get::<i64, _>("n"), 2);
         assert_eq!(b.get::<String, _>("held"), "0.000000000000");
-        let(status,v)=api(&h,reqwest::Method::POST,"/gateway/admin/principals",Some(serde_json::json!({"display_name":"합성 DeepSeek service","management_owner_id":h.principal}))).await;
+        let(status,v)=api(&h,reqwest::Method::POST,"/api/admin/principals",Some(serde_json::json!({"display_name":"합성 DeepSeek service","management_owner_id":h.principal}))).await;
         assert_eq!(status, 201);
         let service: uuid::Uuid = v["target"]["id"].as_str().unwrap().parse().unwrap();
-        let service_path = format!("/gateway/admin/principals/{service}");
+        let service_path = format!("/api/admin/principals/{service}");
         let(status,_)=api(&h,reqwest::Method::PUT,&format!("{service_path}/policy"),Some(serde_json::json!({"expected_version":"1","disabled":false,"grants":grants(),"limits":limits(),"reason":"합성 허용"}))).await;
         assert_eq!(status, 200);
         let (service_key, _) = key(&h, Some(service)).await;
@@ -631,7 +631,7 @@ async fn deepseek_personal_and_service_keys_apply_both_scopes_owner_and_revoke()
         let (status, _) = api(
             &h,
             reqwest::Method::DELETE,
-            &format!("/gateway/keys/{personal_id}?expected_version=1"),
+            &format!("/api/keys/{personal_id}?expected_version=1"),
             None,
         )
         .await;

@@ -29,7 +29,7 @@ const durationName = (value: Validity) => durations.find(([key]) => key === valu
 export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipal?: { id: string; service: boolean; grants: Grant[] }; adminAll?: boolean } = {}) {
   const { t } = useTranslation();
   const prefix = useId(), isAdmin = !!adminPrincipal || adminAll;
-  const listUrl = adminPrincipal ? `/gateway/admin/keys?principal_id=${encodeURIComponent(adminPrincipal.id)}` : adminAll ? '/gateway/admin/keys' : '/gateway/keys';
+  const listUrl = adminPrincipal ? `/api/admin/keys?principal_id=${encodeURIComponent(adminPrincipal.id)}` : adminAll ? '/api/admin/keys' : '/api/keys';
   const availableGrants = adminPrincipal?.grants;
   const auth = useSyncExternalStore(session.subscribe, session.snapshot);
   const [page, setPage] = useState<Page<KeyMetadata> | null>(null);
@@ -66,7 +66,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
   useEffect(() => {
     if (auth.status !== 'ready' || !canChoose) return;
     let current = true;
-    void session.read<CredentialList>('/gateway/admin/provider-credentials', () => current).then(data => { if (current) setCompanyKeys(data); }).catch(() => { /* 고를 수 없으면 기본 키로 발급된다 */ });
+    void session.read<CredentialList>('/api/admin/provider-credentials', () => current).then(data => { if (current) setCompanyKeys(data); }).catch(() => { /* 고를 수 없으면 기본 키로 발급된다 */ });
     return () => { current = false; };
     // 회사 키 목록은 키 목록을 다시 읽을 때마다 바뀌지 않으므로 화면을 열 때 한 번만 읽는다.
   }, [canChoose]);
@@ -105,13 +105,13 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
     setConfirmation(null);
     try {
       if (action.kind === 'issue') {
-        const issued = await session.write<IssuedKey>('/gateway/keys', 'POST', commandId, { ...action.input, ...(adminPrincipal ? { service_principal_id: adminPrincipal.id } : {}) });
+        const issued = await session.write<IssuedKey>('/api/keys', 'POST', commandId, { ...action.input, ...(adminPrincipal ? { service_principal_id: adminPrincipal.id } : {}) });
         if (!current()) return;
         if (!issued) throw new Error('invalid_issue_response');
         setSecret({ value: issued.key, epoch });
         setNotice(i18n.t('발급되었습니다. 원문은 지금 한 번만 표시합니다. 닫은 뒤 다시 볼 수 없습니다.'));
       } else {
-        await session.write(`/gateway/keys/${action.key.id}?expected_version=${encodeURIComponent(action.key.version)}`, 'DELETE', commandId);
+        await session.write(`/api/keys/${action.key.id}?expected_version=${encodeURIComponent(action.key.version)}`, 'DELETE', commandId);
         if (!current()) return;
         setNotice(i18n.t('회수되었습니다. 서버 상태를 다시 조회합니다.'));
       }
@@ -134,7 +134,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
     lock.current = true; setBusy(true); setError(null); setNotice(null);
     const epoch = auth.epoch, commandId = crypto.randomUUID();
     try {
-      await session.write(`/gateway/admin/keys/${key.id}/provider-credential`, 'PUT', commandId, { provider: binding.provider, credential_id: to, expected_credential_id: binding.credential_id });
+      await session.write(`/api/admin/keys/${key.id}/provider-credential`, 'PUT', commandId, { provider: binding.provider, credential_id: to, expected_credential_id: binding.credential_id });
       if (session.snapshot().epoch !== epoch) return;
       const target = credentialsOf(binding.provider).find(c => c.id === to);
       setNotice(i18n.t('{{name}} 키의 회사 키를 {{label}}로 바꿨습니다.', { name: key.name, label: target ? credentialLabel(target) : to }));

@@ -14,14 +14,14 @@ use serde::Deserialize;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 pub const SCREENS: &[&str] = &[
-    "/ui/",
-    "/ui/keys",
-    "/ui/admin/principals",
-    "/ui/admin/principals/detail",
-    "/ui/admin/usage",
-    "/ui/admin/requests",
-    "/ui/admin/credentials",
-    "/ui/admin/models",
+    "/dashboard/",
+    "/dashboard/keys",
+    "/dashboard/admin/principals",
+    "/dashboard/admin/principals/detail",
+    "/dashboard/admin/usage",
+    "/dashboard/admin/requests",
+    "/dashboard/admin/credentials",
+    "/dashboard/admin/models",
 ];
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,7 +78,7 @@ impl UiBundle {
                 return Err(invalid());
             }
             assets.insert(
-                format!("/ui/{name}"),
+                format!("/dashboard/{name}"),
                 Asset {
                     bytes: read(name, 2 * 1024 * 1024)?,
                     mime,
@@ -87,8 +87,8 @@ impl UiBundle {
         }
         let html = read("index.html", 64 * 1024)?;
         let text = std::str::from_utf8(&html).map_err(|_| invalid())?;
-        if !text.contains(&format!("src=\"/ui/{}\"", entry.file))
-            || !text.contains(&format!("href=\"/ui/{}\"", entry.css[0]))
+        if !text.contains(&format!("src=\"/dashboard/{}\"", entry.file))
+            || !text.contains(&format!("href=\"/dashboard/{}\"", entry.css[0]))
             || text.contains("<script>")
             || text.contains("<style>")
         {
@@ -103,7 +103,7 @@ impl UiBundle {
             router = router.route(path, any(serve));
         }
         router
-            .route("/ui/assets/{*path}", any(serve))
+            .route("/dashboard/assets/{*path}", any(serve))
             .with_state(StaticState {
                 bundle: self,
                 runtime,
@@ -185,7 +185,7 @@ pub async fn redirect(method: Method) -> Response {
     let mut response = StatusCode::PERMANENT_REDIRECT.into_response();
     response
         .headers_mut()
-        .insert(header::LOCATION, HeaderValue::from_static("/ui/"));
+        .insert(header::LOCATION, HeaderValue::from_static("/dashboard/"));
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

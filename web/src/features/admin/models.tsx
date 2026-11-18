@@ -38,7 +38,7 @@ function tokens(value: number | null | undefined) {
 /** 모델·가격 카탈로그. 동기화는 변경안만 만들고, 관리자가 비교해 보고 승인해야 적용된다. */
 export function ModelsScreen() {
   const { t } = useTranslation();
-  const view = useResource<CatalogView>('/gateway/admin/model-catalog');
+  const view = useResource<CatalogView>('/api/admin/model-catalog');
   const [proposal, setProposal] = useState<{ id: string; body: CatalogProposal } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<'sync' | 'approve' | null>(null), [status, setStatus] = useState<string | null>(null);
@@ -52,14 +52,14 @@ export function ModelsScreen() {
     setBusy(kind); setStatus(null);
     try {
       if (kind === 'sync') {
-        const ack = await session.write<{ proposal_id: string; proposal: CatalogProposal }>('/gateway/admin/model-catalog/sync', 'POST', commandId, {});
+        const ack = await session.write<{ proposal_id: string; proposal: CatalogProposal }>('/api/admin/model-catalog/sync', 'POST', commandId, {});
         if (!current() || !ack) return;
         setProposal({ id: ack.proposal_id, body: ack.proposal });
         setSelected(new Set(ack.proposal.items.filter(i => i.status === 'changed' || i.status === 'missing').map(key)));
         setStatus(t('변경안을 만들었습니다. 아직 적용되지 않았습니다. 확인 후 승인하세요.'));
       } else if (proposal) {
         const items = proposal.body.items.filter(i => selected.has(key(i))).map(i => ({ provider: i.provider, model: i.model }));
-        const ack = await session.write<{ result_version: string }>('/gateway/admin/model-catalog/approve', 'POST', commandId, { proposal_id: proposal.id, expected_version: view.data.version, items });
+        const ack = await session.write<{ result_version: string }>('/api/admin/model-catalog/approve', 'POST', commandId, { proposal_id: proposal.id, expected_version: view.data.version, items });
         if (!current() || !ack) return;
         setProposal(null); setSelected(new Set());
         setStatus(t('카탈로그 버전 {{version}}을 적용했습니다.', { version: ack.result_version }));

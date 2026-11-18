@@ -4,13 +4,13 @@ import { App } from '../../app';
 import { session } from '../../lib/api';
 const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/ui/'); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); });
 test('personal_keys_direct_route_requires_explicit_duration_and_clears_one_time_secret', async () => {
-  history.replaceState(null, '', '/ui/keys');
+  history.replaceState(null, '', '/dashboard/keys');
   const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input) === '/gateway/me') return Promise.resolve(response(me));
-    if (String(input).startsWith('/gateway/usage')) return Promise.resolve(response({ error: { code: 'synthetic' } }, 503));
-    if (String(input) === '/gateway/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2099-01-01T00:00:00Z' }));
+    if (String(input) === '/api/me') return Promise.resolve(response(me));
+    if (String(input).startsWith('/api/usage')) return Promise.resolve(response({ error: { code: 'synthetic' } }, 503));
+    if (String(input) === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2099-01-01T00:00:00Z' }));
     if (init?.method === 'POST') return Promise.resolve(response({ key: 'one-time-synthetic-secret', metadata: { id: 'key1' } }, 201));
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
   });

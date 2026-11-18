@@ -742,7 +742,7 @@ async fn asset_deadline_releases_hyper_owned_frame_on_stalled_http1_socket() {
     let (tx, released) = oneshot::channel();
     let flag = Arc::new(std::sync::Mutex::new(Some(tx)));
     let extra = axum::Router::new().route(
-        "/ui/assets/slow",
+        "/dashboard/assets/slow",
         axum::routing::get(move || {
             let flag = flag.clone();
             async move {
@@ -764,7 +764,7 @@ async fn asset_deadline_releases_hyper_owned_frame_on_stalled_http1_socket() {
     .await;
     let mut socket = server.connect().await;
     socket
-        .write_all(b"GET /ui/assets/slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(b"GET /dashboard/assets/slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
         .unwrap();
     assert!(read_head(&mut socket).await.starts_with(b"HTTP/1.1 200"));
@@ -783,7 +783,7 @@ async fn http2_flow_control_deadline_releases_asset_permit_and_isolates_other_st
     let runtime_slot = Arc::new(std::sync::OnceLock::<Arc<Runtime>>::new());
     let slot = runtime_slot.clone();
     let extra = axum::Router::new().route(
-        "/ui/assets/slow",
+        "/dashboard/assets/slow",
         axum::routing::any(move |_: Request| {
             let runtime = slot.get().unwrap().clone();
             async move {
@@ -815,7 +815,7 @@ async fn http2_flow_control_deadline_releases_asset_permit_and_isolates_other_st
         .unwrap();
     let connection = tokio::spawn(connection);
     let request = axum::http::Request::builder()
-        .uri("http://localhost/ui/assets/slow")
+        .uri("http://localhost/dashboard/assets/slow")
         .body(())
         .unwrap();
     let (response, _) = sender.send_request(request, true).unwrap();
@@ -875,9 +875,9 @@ async fn response_class_deadline_case(h2: bool, asset: bool, full_deadline: bool
         RouteClass::ManagementRead
     };
     let path = if asset {
-        "/ui/assets/slow"
+        "/dashboard/assets/slow"
     } else {
-        "/gateway/slow"
+        "/api/slow"
     };
     let mut limits = Limits {
         assets: 1,

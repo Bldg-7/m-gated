@@ -9,15 +9,15 @@ import { KeysScreen } from '../keys/keys';
 import type { Policy, PrincipalDetail, PrincipalSummary } from './types';
 import { directId, fields, ReadState, useCommand, useResource } from './shared';
 /** 사용자 상세 하위 페이지 주소. */
-export const principalHref = (id: string) => `/ui/admin/principals/detail?principal_id=${encodeURIComponent(id)}`;
+export const principalHref = (id: string) => `/dashboard/admin/principals/detail?principal_id=${encodeURIComponent(id)}`;
 
-/** 사용자 목록. 상세는 하위 페이지(/ui/admin/principals/detail)에서 연다. */
+/** 사용자 목록. 상세는 하위 페이지(/dashboard/admin/principals/detail)에서 연다. */
 export function PrincipalsScreen() {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
-  // 예전 주소(/ui/admin/principals?principal_id=…)로 들어오면 상세 페이지로 옮긴다.
+  // 예전 주소(/dashboard/admin/principals?principal_id=…)로 들어오면 상세 페이지로 옮긴다.
   useEffect(() => { const id = directId('principal_id'); if (id) navigate(principalHref(id), { replace: true }); }, []);
-  const page = useResource<Page<PrincipalSummary>>(`/gateway/admin/principals${query ? `?${query}` : ''}`);
+  const page = useResource<Page<PrincipalSummary>>(`/api/admin/principals${query ? `?${query}` : ''}`);
   const create = useCommand(async ack => { if (ack) { navigate(principalHref(ack.target.id)); return; } await page.reload(); });
   return <div className="stack-lg">
     <p className="callout callout-neutral">{t('owner는 책임자 메타데이터이며 서비스 접근·관리 권한을 자동 부여하지 않습니다.')}</p>
@@ -46,7 +46,7 @@ export function PrincipalsScreen() {
     <div className="grid-2">
       <form aria-label={t('사용자 ID 조회')} className="card" onSubmit={e => navigate(principalHref(String(fields(e).get('id')).trim()))}><label>{t('사용자 ID')}<input name="id" className="mono" spellCheck={false} required /></label><div className="actions"><button>{t('상세 조회')}</button></div></form>
       <div className="stack">
-        <form aria-label={t('서비스 생성')} onSubmit={e => { const f = fields(e); create.prepare({ label: msgid('deny-all 서비스 생성 확인'), url: '/gateway/admin/principals', method: 'POST', body: { display_name: String(f.get('display_name')), management_owner_id: String(f.get('owner')) } }); }}><fieldset disabled={create.busy} className="group"><legend>{t('서비스 생성 (초기 deny-all)')}</legend><label>{t('새 서비스 이름')}<input name="display_name" required maxLength={100} /></label><label>{t('새 서비스 owner ID')}<input name="owner" className="mono" spellCheck={false} required /></label><div className="actions"><button className="btn-primary">{t('서비스 생성 확인')}</button></div></fieldset></form>{create.view}
+        <form aria-label={t('서비스 생성')} onSubmit={e => { const f = fields(e); create.prepare({ label: msgid('deny-all 서비스 생성 확인'), url: '/api/admin/principals', method: 'POST', body: { display_name: String(f.get('display_name')), management_owner_id: String(f.get('owner')) } }); }}><fieldset disabled={create.busy} className="group"><legend>{t('서비스 생성 (초기 deny-all)')}</legend><label>{t('새 서비스 이름')}<input name="display_name" required maxLength={100} /></label><label>{t('새 서비스 owner ID')}<input name="owner" className="mono" spellCheck={false} required /></label><div className="actions"><button className="btn-primary">{t('서비스 생성 확인')}</button></div></fieldset></form>{create.view}
       </div>
     </div>
     <details><summary>{t('전체 키 조회·회수')}</summary><KeysScreen adminAll /></details>
@@ -57,13 +57,13 @@ export function PrincipalDetailScreen() {
   const { t } = useTranslation();
   const id = new URLSearchParams(useRoute().search).get('principal_id') ?? '';
   return <div className="stack-lg">
-    <p><Link href="/ui/admin/principals">{t('← 사용자 목록')}</Link></p>
+    <p><Link href="/dashboard/admin/principals">{t('← 사용자 목록')}</Link></p>
     {id ? <PrincipalEditor key={id} id={id} /> : <p role="alert">{t('사용자 ID가 없습니다. 사용자 목록에서 상세를 여세요.')}</p>}
   </div>;
 }
 function PrincipalEditor({ id }: { id: string }) {
   const { t } = useTranslation();
-  const detail = useResource<PrincipalDetail>(`/gateway/admin/principals/${encodeURIComponent(id)}`);
+  const detail = useResource<PrincipalDetail>(`/api/admin/principals/${encodeURIComponent(id)}`);
   const command = useCommand(async () => { await detail.reload(); });
   const [formError, setFormError] = useState<string | null>(null), p = detail.data?.principal;
   return <section aria-label={t('사용자 상세')} className="stack">
@@ -75,13 +75,13 @@ function PrincipalEditor({ id }: { id: string }) {
         <p className="meta">owner: <span className="mono">{p.management_owner_id ?? t('없음')}</span> · {t('과금 차단')}: {p.block_state.reasons.join(', ') || t('없음')} · {t('전체 미정산 {{count}}', { count: p.block_state.global_unknown_count })}</p>
       </div>
       <details><summary>{t('실행 설정 상한 (편집 불가)')}</summary><pre>{JSON.stringify(detail.data!.execution_ceiling, null, 2)}</pre></details>
-      <div className="actions"><Link className="btn btn-sm" href={`/ui/admin/usage?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 사용량·현재 잔액')}</Link><Link className="btn btn-sm" href={`/ui/admin/requests?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 미정산')}</Link></div>
+      <div className="actions"><Link className="btn btn-sm" href={`/dashboard/admin/usage?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 사용량·현재 잔액')}</Link><Link className="btn btn-sm" href={`/dashboard/admin/requests?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 미정산')}</Link></div>
     </div>
     <div className="grid-2">
-      {p.kind === 'service' && <form key={`principal-${p.version}`} aria-label={t('서비스 변경')} onSubmit={e => { const f = fields(e); command.prepare({ label: msgid('서비스 변경 확인'), url: `/gateway/admin/principals/${p.id}`, method: 'PATCH', body: { expected_version: p.version, display_name: String(f.get('display_name')), management_owner_id: String(f.get('owner')) } }); }}><fieldset disabled={command.busy} className="group"><legend>{t('서비스 변경')}</legend><label>{t('서비스 이름')}<input name="display_name" defaultValue={p.display_name} required maxLength={100} /></label><label>{t('서비스 owner ID')}<input name="owner" className="mono" spellCheck={false} defaultValue={p.management_owner_id ?? ''} required /></label><div className="actions"><button className="btn-primary">{t('서비스 변경 확인')}</button></div></fieldset></form>}
-      <section aria-label={t('자동 안전차단')} className={p.inference_safety.paused ? 'card card-critical' : 'card'}><h3>{t('자동 과금 안전차단')}</h3><p className="meta">{t('{{state}} · 안전 버전 {{version}} · 사유 {{reason}} · 시각 {{at}} · 원인 요청 {{request}}', { state: p.inference_safety.paused ? t('차단 중') : t('해제 상태'), version: p.inference_safety.version, reason: p.inference_safety.reason ?? t('없음'), at: p.inference_safety.paused_at ?? t('없음'), request: p.inference_safety.trigger_request_id ?? t('없음') })}</p><p className="meta">{t('별도 해제는 unknown·계정 정지·fence·예산·키 회수를 해제하지 않습니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/gateway/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>
+      {p.kind === 'service' && <form key={`principal-${p.version}`} aria-label={t('서비스 변경')} onSubmit={e => { const f = fields(e); command.prepare({ label: msgid('서비스 변경 확인'), url: `/api/admin/principals/${p.id}`, method: 'PATCH', body: { expected_version: p.version, display_name: String(f.get('display_name')), management_owner_id: String(f.get('owner')) } }); }}><fieldset disabled={command.busy} className="group"><legend>{t('서비스 변경')}</legend><label>{t('서비스 이름')}<input name="display_name" defaultValue={p.display_name} required maxLength={100} /></label><label>{t('서비스 owner ID')}<input name="owner" className="mono" spellCheck={false} defaultValue={p.management_owner_id ?? ''} required /></label><div className="actions"><button className="btn-primary">{t('서비스 변경 확인')}</button></div></fieldset></form>}
+      <section aria-label={t('자동 안전차단')} className={p.inference_safety.paused ? 'card card-critical' : 'card'}><h3>{t('자동 과금 안전차단')}</h3><p className="meta">{t('{{state}} · 안전 버전 {{version}} · 사유 {{reason}} · 시각 {{at}} · 원인 요청 {{request}}', { state: p.inference_safety.paused ? t('차단 중') : t('해제 상태'), version: p.inference_safety.version, reason: p.inference_safety.reason ?? t('없음'), at: p.inference_safety.paused_at ?? t('없음'), request: p.inference_safety.trigger_request_id ?? t('없음') })}</p><p className="meta">{t('별도 해제는 unknown·계정 정지·fence·예산·키 회수를 해제하지 않습니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/api/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>
     </div>
-    <PolicyForm key={`policy-${p.policy.version}`} principalId={p.id} policy={p.policy} ceiling={detail.data!.execution_ceiling.grants} busy={command.busy} onSubmit={body => command.prepare({ label: msgid('정책 전체 교체 확인'), url: `/gateway/admin/principals/${p.id}/policy`, method: 'PUT', body })} onError={setFormError} />
+    <PolicyForm key={`policy-${p.policy.version}`} principalId={p.id} policy={p.policy} ceiling={detail.data!.execution_ceiling.grants} busy={command.busy} onSubmit={body => command.prepare({ label: msgid('정책 전체 교체 확인'), url: `/api/admin/principals/${p.id}/policy`, method: 'PUT', body })} onError={setFormError} />
     <div className="card"><KeysScreen key={`${p.id}:${session.snapshot().epoch}`} adminPrincipal={{ id: p.id, service: p.kind === 'service', grants: p.policy.grants }} /></div>
   </>}</section>;
 }

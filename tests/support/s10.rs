@@ -458,7 +458,7 @@ async fn retention_preserves_manual_null_tokens_in_both_scopes_and_latest_event_
         actor: principal,
         command_id: uuid::Uuid::new_v4(),
         method: "POST",
-        path: "/gateway/keys",
+        path: "/api/keys",
         settings: &settings,
         grants: &grants,
         digest: [1; 32],
@@ -514,7 +514,7 @@ async fn retention_preserves_manual_null_tokens_in_both_scopes_and_latest_event_
     let settle = CommandContext {
         command_id: uuid::Uuid::new_v4(),
         method: "PUT",
-        path: "/gateway/admin/requests/settlement",
+        path: "/api/admin/requests/settlement",
         ..ctx
     };
     ledger
@@ -702,7 +702,7 @@ async fn retention_protects_entire_safety_family_then_deletes_child_before_root(
     let release = CommandContext {
         command_id: uuid::Uuid::new_v4(),
         method: "POST",
-        path: "/gateway/admin/principals/inference-pause/release",
+        path: "/api/admin/principals/inference-pause/release",
         ..ctx
     };
     ledger
@@ -1057,7 +1057,7 @@ async fn handoff_unknown_key_fixture(alarm_fault: Option<bool>, historical: bool
         actor: old_user,
         command_id: uuid::Uuid::new_v4(),
         method: "POST",
-        path: "/gateway/keys",
+        path: "/api/keys",
         settings: &settings,
         grants: &grants,
         digest: [1; 32],
@@ -1145,7 +1145,7 @@ async fn handoff_unknown_key_fixture(alarm_fault: Option<bool>, historical: bool
                 &CommandContext {
                     command_id: uuid::Uuid::new_v4(),
                     method: "PUT",
-                    path: "/gateway/admin/requests/settlement",
+                    path: "/api/admin/requests/settlement",
                     ..admin_ctx
                 },
                 Command::Settle(
@@ -1166,7 +1166,7 @@ async fn handoff_unknown_key_fixture(alarm_fault: Option<bool>, historical: bool
                 &CommandContext {
                     command_id: uuid::Uuid::new_v4(),
                     method: "POST",
-                    path: "/gateway/admin/principals/inference-pause/release",
+                    path: "/api/admin/principals/inference-pause/release",
                     ..admin_ctx
                 },
                 Command::Release(
@@ -1760,9 +1760,7 @@ async fn usage_http(
     let response = router
         .oneshot(
             axum::http::Request::builder()
-                .uri(format!(
-                    "/gateway/admin/usage?principal_id={target}&{query}"
-                ))
+                .uri(format!("/api/admin/usage?principal_id={target}&{query}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),

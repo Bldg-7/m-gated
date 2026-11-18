@@ -8,7 +8,7 @@ import i18n, { changeLanguage } from './i18n';
 const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
 const usage = { currency: 'USD', from: '2026-01-01T00:00:00Z', to: '2026-02-01T00:00:00Z', as_of: '2026-02-01T00:00:00Z', detail_available_from: null, aggregation: 'detail', settled_usd: '0.000000000001', held_reservation_usd: '0.000000000000', period_unknown_count: '0', global_unknown_count: '1', global_expired_dispatch_count: '0', block_state: null, balance_context: 'current_principal', budget_balances: [], buckets: { items: [], next_cursor: null, as_of: '2026-02-01T00:00:00Z' } };
 const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
-afterEach(() => { cleanup(); session.clear(); act(() => changeLanguage('ko')); history.replaceState(null, '', '/ui/'); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); session.clear(); act(() => changeLanguage('ko')); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); });
 
 /** Session이 state.error로 내보내는 문구. 화면에서 t(auth.error)로 번역한다. */
 const sessionMessages = ['접근 권한이 없습니다.', '인증 상태를 확인할 수 없습니다.', '인증이 만료되었습니다. 다시 확인한 뒤 명령 결과를 조회하세요. 쓰기는 재전송하지 않았습니다.', '로그아웃되었습니다.'];
@@ -30,7 +30,7 @@ test('korean_is_the_default_and_the_source_text_is_returned_with_values', () => 
 });
 
 test('language_switch_renders_english_and_only_remembers_an_explicit_english_choice', async () => {
-  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input) === '/gateway/me' ? me : usage))));
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input) === '/api/me' ? me : usage))));
   render(<App />);
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
   expect(localStorage.length).toBe(0);

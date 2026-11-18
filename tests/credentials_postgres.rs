@@ -139,7 +139,7 @@ async fn provider_credentials_rotate_replay_shred_and_refresh_across_instances()
         actor,
         command_id,
         method: "PUT",
-        path: "/gateway/admin/provider-credentials/anthropic",
+        path: "/api/admin/provider-credentials/anthropic",
         settings: &settings,
         grants: &grants,
         digest: [1; 32],
@@ -545,10 +545,10 @@ fn id_of(v: &serde_json::Value) -> Uuid {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     let h = Http::new().await;
-    const CREDS: &str = "/gateway/admin/provider-credentials";
+    const CREDS: &str = "/api/admin/provider-credentials";
     // 주체를 만들고 둘 다 synthetic-text를 쓸 수 있게 한다.
     for token in [&h.alice, &h.bob] {
-        assert_eq!(h.call("GET", "/gateway/me", token, None).await.0, 200);
+        assert_eq!(h.call("GET", "/api/me", token, None).await.0, 200);
     }
     sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE key_id IS NULL")
         .bind(
@@ -633,12 +633,10 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         body
     };
     let (status, _) = h
-        .call("POST", "/gateway/keys", &h.bob, Some(issue(Some(b_id))))
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(b_id))))
         .await;
     assert_eq!(status, 403);
-    let (status, bob_key) = h
-        .call("POST", "/gateway/keys", &h.bob, Some(issue(None)))
-        .await;
+    let (status, bob_key) = h.call("POST", "/api/keys", &h.bob, Some(issue(None))).await;
     assert_eq!(status, 201, "{bob_key}");
     assert_eq!(
         bob_key["metadata"]["provider_credentials"][0]["label"],
@@ -650,14 +648,14 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     let (status, _) = h
         .call(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             &h.alice,
             Some(issue(Some(Uuid::new_v4()))),
         )
         .await;
     assert_eq!(status, 400);
     let (status, alice_key) = h
-        .call("POST", "/gateway/keys", &h.alice, Some(issue(Some(b_id))))
+        .call("POST", "/api/keys", &h.alice, Some(issue(Some(b_id))))
         .await;
     assert_eq!(status, 201, "{alice_key}");
     assert_eq!(
@@ -667,7 +665,7 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     let alice_secret = alice_key["key"].as_str().unwrap().to_owned();
     let alice_key_id = id_of(&alice_key["metadata"]["id"]);
     // 키 목록에도 연결된 회사 키 이름이 보인다.
-    let (_, keys) = h.call("GET", "/gateway/keys", &h.bob, None).await;
+    let (_, keys) = h.call("GET", "/api/keys", &h.bob, None).await;
     assert_eq!(
         keys["items"][0]["provider_credentials"][0]["label"],
         "team-a"
@@ -695,7 +693,7 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     let (_, detail) = h
         .call(
             "GET",
-            &format!("/gateway/admin/requests/{request}"),
+            &format!("/api/admin/requests/{request}"),
             &h.alice,
             None,
         )
@@ -753,7 +751,7 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
 
     // 관리자는 가상 키 하나의 연결을 바꾼다. 지금 연결을 잘못 알고 있으면 거부한다.
     let bind = |credential: Uuid, expected: Uuid| json!({"provider":"anthropic","credential_id":credential,"expected_credential_id":expected});
-    let path = format!("/gateway/admin/keys/{alice_key_id}/provider-credential");
+    let path = format!("/api/admin/keys/{alice_key_id}/provider-credential");
     let (status, err) = h.call("PUT", &path, &h.alice, Some(bind(a_id, a_id))).await;
     assert_eq!(
         (status, err["error"]["code"].clone()),
@@ -810,7 +808,7 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
         h.infer(&bob_secret).await,
         (200, Some(KEY_A.into()), Some(c_id))
     );
-    let (_, keys) = h.call("GET", "/gateway/keys", &h.bob, None).await;
+    let (_, keys) = h.call("GET", "/api/keys", &h.bob, None).await;
     assert_eq!(
         keys["items"][0]["provider_credentials"][0]["credential_id"],
         json!(c_id)

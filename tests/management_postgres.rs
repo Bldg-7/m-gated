@@ -108,15 +108,7 @@ async fn lost_key_issue_response_has_one_effect_and_no_secret_replay() {
     let actor = finance::human(db.store.pool()).await;
     let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
     let command = Uuid::new_v4();
-    let c = ctx(
-        actor,
-        command,
-        &settings,
-        &g,
-        &ceiling,
-        "POST",
-        "/gateway/keys",
-    );
+    let c = ctx(actor, command, &settings, &g, &ceiling, "POST", "/api/keys");
     let first = ledger.management_command(&c, issue()).await.unwrap();
     assert_eq!(first.status, 201);
     let body = first.body.unwrap();
@@ -199,7 +191,7 @@ async fn lost_key_issue_response_has_one_effect_and_no_secret_replay() {
         &g,
         &ceiling,
         "DELETE",
-        "/gateway/keys/id",
+        "/api/keys/id",
     );
     assert!(matches!(
         ledger
@@ -234,7 +226,7 @@ async fn lost_key_issue_response_has_one_effect_and_no_secret_replay() {
         &g,
         &ceiling,
         "DELETE",
-        "/gateway/keys/id",
+        "/api/keys/id",
     );
     assert_eq!(
         ledger
@@ -282,7 +274,7 @@ async fn command_cas_and_audit_are_atomic() {
         &g,
         &ceiling,
         "POST",
-        "/gateway/keys",
+        "/api/keys",
     );
     sqlx::raw_sql("CREATE FUNCTION gw_test_audit_fail() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'synthetic'; END$$;CREATE TRIGGER gw_test_audit_fail BEFORE INSERT ON gw_audit_events FOR EACH ROW EXECUTE FUNCTION gw_test_audit_fail();").execute(db.store.pool()).await.unwrap();
     assert!(ledger.management_command(&c, issue()).await.is_err());
@@ -305,15 +297,7 @@ async fn command_cas_and_audit_are_atomic() {
     );
     // 같은 actor/command를 barrier로 두 실제 연결에서 동시에 시작한다.
     let command = Uuid::new_v4();
-    let c = ctx(
-        actor,
-        command,
-        &settings,
-        &g,
-        &ceiling,
-        "POST",
-        "/gateway/keys",
-    );
+    let c = ctx(actor, command, &settings, &g, &ceiling, "POST", "/api/keys");
     let barrier = tokio::sync::Barrier::new(2);
     let a = async {
         barrier.wait().await;
@@ -357,7 +341,7 @@ async fn principal_summary_and_resource_cursors_are_distinct() {
             &g,
             &ceiling,
             "POST",
-            "/gateway/keys",
+            "/api/keys",
         );
         ledger.management_command(&c, issue()).await.unwrap();
     }
@@ -490,7 +474,7 @@ async fn manual_settlement_records_admin_entry_and_late_final_without_repricing(
         &g,
         &ceiling,
         "PUT",
-        "/gateway/admin/requests/id/settlement",
+        "/api/admin/requests/id/settlement",
     );
     assert!(matches!(
         ledger
@@ -511,7 +495,7 @@ async fn manual_settlement_records_admin_entry_and_late_final_without_repricing(
         &g,
         &ceiling,
         "PUT",
-        "/gateway/admin/requests/id/settlement",
+        "/api/admin/requests/id/settlement",
     );
     let noop = ledger
         .management_command(&c, settlement(id, "1", "관리자 입력", false))
@@ -528,7 +512,7 @@ async fn manual_settlement_records_admin_entry_and_late_final_without_repricing(
                     &g,
                     &ceiling,
                     "PUT",
-                    "/gateway/admin/requests/id/settlement"
+                    "/api/admin/requests/id/settlement"
                 ),
                 settlement(id, "1", "상충", true)
             )
@@ -756,15 +740,7 @@ fn key_input() -> Value {
 async fn every_cookie_write_requires_origin_and_bound_csrf_and_virtual_is_inference_only() {
     let h = Harness::new().await;
     let (s, v, _) = h
-        .request(
-            "GET",
-            "/gateway/csrf",
-            Some(&h.token),
-            true,
-            None,
-            None,
-            &[],
-        )
+        .request("GET", "/api/csrf", Some(&h.token), true, None, None, &[])
         .await;
     assert_eq!(s, 200);
     let csrf = v["token"].as_str().unwrap();
@@ -779,7 +755,7 @@ async fn every_cookie_write_requires_origin_and_bound_csrf_and_virtual_is_infere
         let (s, _, _) = h
             .request(
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
                 Some(&h.token),
                 true,
                 Some(key_input()),
@@ -792,7 +768,7 @@ async fn every_cookie_write_requires_origin_and_bound_csrf_and_virtual_is_infere
     let (s, body, headers) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             true,
             Some(key_input()),
@@ -807,7 +783,7 @@ async fn every_cookie_write_requires_origin_and_bound_csrf_and_virtual_is_infere
     let (s, replay, headers) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(key_input()),
@@ -821,12 +797,12 @@ async fn every_cookie_write_requires_origin_and_bound_csrf_and_virtual_is_infere
     assert_eq!(headers["x-gateway-command-id"], command.to_string());
     assert_eq!(headers["x-gateway-command-replayed"], "true");
     for path in [
-        "/gateway/me",
-        "/gateway/keys",
-        "/gateway/usage",
-        "/gateway/admin/principals",
-        "/gateway/admin/requests",
-        "/gateway/csrf",
+        "/api/me",
+        "/api/keys",
+        "/api/usage",
+        "/api/admin/principals",
+        "/api/admin/requests",
+        "/api/csrf",
     ] {
         let (s, _, _) = h
             .request("GET", path, Some(raw), false, None, None, &[])
@@ -847,7 +823,7 @@ async fn every_cookie_write_requires_origin_and_bound_csrf_and_virtual_is_infere
         .await;
     assert_eq!(s, 200);
     assert_eq!(h.provider.calls.lock().await.len(), 1);
-    let path = format!("/gateway/keys/{id}?expected_version=1");
+    let path = format!("/api/keys/{id}?expected_version=1");
     let (s, _, _) = h
         .request(
             "DELETE",
@@ -874,7 +850,7 @@ async fn every_cookie_write_requires_origin_and_bound_csrf_and_virtual_is_infere
     assert_eq!(s, 204);
     assert_eq!(headers["x-gateway-command-replayed"], "false");
     let (s, _, _) = h
-        .request("GET", "/gateway/me", Some(raw), false, None, None, &[])
+        .request("GET", "/api/me", Some(raw), false, None, None, &[])
         .await;
     assert_eq!(s, 401);
     h.close().await;
@@ -900,7 +876,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         &g,
         &ceiling,
         "POST",
-        "/gateway/admin/principals",
+        "/api/admin/principals",
     );
     let create = || {
         Command::Create(
@@ -932,7 +908,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         &g,
         &ceiling,
         "POST",
-        "/gateway/keys",
+        "/api/keys",
     );
     assert!(matches!(
         ledger.management_command(&c, input).await,
@@ -945,7 +921,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         &g,
         &ceiling,
         "PUT",
-        "/gateway/admin/principals/id/policy",
+        "/api/admin/principals/id/policy",
     );
     ledger
         .management_command(&c, policy(service, "1", false, "서비스 허용"))
@@ -958,7 +934,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         &g,
         &ceiling,
         "POST",
-        "/gateway/keys",
+        "/api/keys",
     );
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
@@ -991,7 +967,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         &g,
         &ceiling,
         "PATCH",
-        "/gateway/admin/principals/id",
+        "/api/admin/principals/id",
     );
     ledger
         .management_command(
@@ -1074,7 +1050,7 @@ async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
         &g,
         &ceiling,
         "PUT",
-        "/gateway/admin/principals/id/policy",
+        "/api/admin/principals/id/policy",
     );
     assert!(matches!(
         ledger
@@ -1094,7 +1070,7 @@ async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
                     &g,
                     &ceiling,
                     "PUT",
-                    "/gateway/admin/principals/id/policy",
+                    "/api/admin/principals/id/policy",
                 ),
                 policy(bob, "1", true, "security_config_fence:change-1"),
             )
@@ -1111,7 +1087,7 @@ async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
                     &g,
                     &ceiling,
                     "PUT",
-                    "/gateway/admin/principals/id/policy",
+                    "/api/admin/principals/id/policy",
                 ),
                 policy(alice, "1", true, "security_config_fence:change-1"),
             )
@@ -1140,7 +1116,7 @@ async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
         &g,
         &ceiling,
         "PUT",
-        "/gateway/admin/principals/id/policy",
+        "/api/admin/principals/id/policy",
     );
     assert!(matches!(
         ledger
@@ -1176,7 +1152,7 @@ async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
         &g,
         &ceiling,
         "POST",
-        "/gateway/admin/principals/id/inference-pause/release",
+        "/api/admin/principals/id/inference-pause/release",
     );
     assert!(matches!(
         ledger.management_command(&c, release("3")).await,
@@ -1200,7 +1176,7 @@ async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
         &g,
         &ceiling,
         "POST",
-        "/gateway/admin/principals/id/inference-pause/release",
+        "/api/admin/principals/id/inference-pause/release",
     );
     assert!(matches!(
         ledger.management_command(&c, release("7")).await,
@@ -1247,7 +1223,7 @@ async fn key_quota_validity_and_month_end_use_first_database_creation_time() {
             &g,
             &ceiling,
             "POST",
-            "/gateway/keys",
+            "/api/keys",
         );
         let body = ledger
             .management_command(&c, input)
@@ -1270,7 +1246,7 @@ async fn key_quota_validity_and_month_end_use_first_database_creation_time() {
                     &g,
                     &ceiling,
                     "POST",
-                    "/gateway/keys",
+                    "/api/keys",
                 ),
                 issue(),
             )
@@ -1287,7 +1263,7 @@ async fn key_quota_validity_and_month_end_use_first_database_creation_time() {
                     &g,
                     &ceiling,
                     "POST",
-                    "/gateway/keys"
+                    "/api/keys"
                 ),
                 issue()
             )
@@ -1327,7 +1303,7 @@ async fn key_dto_requires_all_limits_fields_and_rejects_client_computed_expiry()
         let (s, _, _) = h
             .request(
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
                 Some(&h.token),
                 false,
                 Some(v),
@@ -1343,7 +1319,7 @@ async fn key_dto_requires_all_limits_fields_and_rejects_client_computed_expiry()
         results.push(
             h.request(
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
                 Some(&h.token),
                 false,
                 Some(v),
@@ -1373,7 +1349,7 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     let (s, ack, headers) = h
         .request(
             "POST",
-            "/gateway/admin/principals",
+            "/api/admin/principals",
             Some(token),
             false,
             Some(service_input.clone()),
@@ -1389,7 +1365,7 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     let (s, replay, headers) = h
         .request(
             "POST",
-            "/gateway/admin/principals",
+            "/api/admin/principals",
             Some(token),
             false,
             Some(service_input),
@@ -1400,7 +1376,7 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     assert_eq!(s, 201);
     assert_eq!(replay["target"]["id"], service);
     assert_eq!(headers["x-gateway-command-replayed"], "true");
-    let path = format!("/gateway/admin/principals/{service}");
+    let path = format!("/api/admin/principals/{service}");
     let (s, detail, _) = h
         .request("GET", &path, Some(token), false, None, None, &[])
         .await;
@@ -1452,7 +1428,7 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     let (s, key, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(token),
             false,
             Some(key),
@@ -1477,7 +1453,7 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     let (s, list, _) = h
         .request(
             "GET",
-            "/gateway/admin/requests?accounting_state=settled",
+            "/api/admin/requests?accounting_state=settled",
             Some(token),
             false,
             None,
@@ -1490,7 +1466,7 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     let (s, detail, _) = h
         .request(
             "GET",
-            &format!("/gateway/admin/requests/{request}"),
+            &format!("/api/admin/requests/{request}"),
             Some(token),
             false,
             None,
@@ -1502,9 +1478,9 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     assert_eq!(detail["principal_id"], service);
     assert!(detail.get("usage").is_some());
     for route in [
-        format!("/gateway/admin/usage?principal_id={service}&group_by=key"),
-        format!("/gateway/admin/keys?principal_id={service}"),
-        "/gateway/admin/principals?kind=service&disabled=false".into(),
+        format!("/api/admin/usage?principal_id={service}&group_by=key"),
+        format!("/api/admin/keys?principal_id={service}"),
+        "/api/admin/principals?kind=service&disabled=false".into(),
     ] {
         assert_eq!(
             h.request("GET", &route, Some(token), false, None, None, &[])
@@ -1557,14 +1533,14 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
         api.routes(h.runtime.clone()),
     );
     let routes = [
-        ("GET", "/gateway/admin/principals"),
-        ("POST", "/gateway/admin/principals"),
+        ("GET", "/api/admin/principals"),
+        ("POST", "/api/admin/principals"),
         ("GET", &path),
         ("PATCH", &path),
         ("PUT", &policy_path),
-        ("GET", "/gateway/admin/keys"),
-        ("GET", "/gateway/admin/usage"),
-        ("GET", "/gateway/admin/requests"),
+        ("GET", "/api/admin/keys"),
+        ("GET", "/api/admin/usage"),
+        ("GET", "/api/admin/requests"),
     ];
     for (method, path) in routes {
         let r = router
@@ -1722,7 +1698,7 @@ async fn keys_freeze_their_issued_policy_at_the_database_boundary() {
                 &g,
                 &ceiling,
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
             ),
             issue(),
         )
@@ -1759,7 +1735,7 @@ async fn virtual_owner_inactive_has_specific_wire_code_and_blocks_current_balanc
         &g,
         &ceiling,
         "POST",
-        "/gateway/admin/principals",
+        "/api/admin/principals",
     );
     let service = ledger
         .management_command(
@@ -1788,7 +1764,7 @@ async fn virtual_owner_inactive_has_specific_wire_code_and_blocks_current_balanc
                 &g,
                 &ceiling,
                 "PUT",
-                "/gateway/admin/principals/id/policy",
+                "/api/admin/principals/id/policy",
             ),
             policy(service, "1", false, "허용"),
         )
@@ -1807,7 +1783,7 @@ async fn virtual_owner_inactive_has_specific_wire_code_and_blocks_current_balanc
                 &g,
                 &ceiling,
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
             ),
             input,
         )
@@ -1905,7 +1881,7 @@ async fn audit_failure_rolls_back_every_management_effect_and_financial_settleme
             &g,
             &ceiling,
             "POST",
-            "/gateway/admin/principals",
+            "/api/admin/principals",
         );
         let service = ledger
             .management_command(&c, create())
@@ -1978,7 +1954,7 @@ async fn manual_settlement_runtime_stop_known_running_and_two_admin_races() {
             &g,
             &ceiling,
             "PUT",
-            "/gateway/admin/requests/id/settlement",
+            "/api/admin/requests/id/settlement",
         );
         c.execution_running = true;
         assert!(matches!(
@@ -2000,7 +1976,7 @@ async fn manual_settlement_runtime_stop_known_running_and_two_admin_races() {
                         &g,
                         &ceiling,
                         "PUT",
-                        "/gateway/admin/requests/id/settlement",
+                        "/api/admin/requests/id/settlement",
                     ),
                     settlement(id, "4", "경합", false),
                 )
@@ -2017,7 +1993,7 @@ async fn manual_settlement_runtime_stop_known_running_and_two_admin_races() {
                         &g,
                         &ceiling,
                         "PUT",
-                        "/gateway/admin/requests/id/settlement",
+                        "/api/admin/requests/id/settlement",
                     ),
                     settlement(id, "4", if same { "경합" } else { "상충" }, false),
                 )
@@ -2086,9 +2062,9 @@ async fn command_commit_ack_loss_never_reissues_secret_or_settlement_cost() {
             &ceiling,
             if id.is_some() { "PUT" } else { "POST" },
             if id.is_some() {
-                "/gateway/admin/requests/id/settlement"
+                "/api/admin/requests/id/settlement"
             } else {
-                "/gateway/keys"
+                "/api/keys"
             },
         );
         proxy.armed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2164,15 +2140,7 @@ async fn command_commit_ack_loss_never_reissues_secret_or_settlement_cost() {
 async fn every_cookie_write_route_and_delete_rejects_old_jwt_bound_csrf() {
     let h = Harness::new().await;
     let (_, csrf, _) = h
-        .request(
-            "GET",
-            "/gateway/csrf",
-            Some(&h.token),
-            true,
-            None,
-            None,
-            &[],
-        )
+        .request("GET", "/api/csrf", Some(&h.token), true, None, None, &[])
         .await;
     let csrf = csrf["token"].as_str().unwrap();
     let origin = h.cfg.public_origin().as_str().trim_end_matches('/');
@@ -2180,22 +2148,14 @@ async fn every_cookie_write_route_and_delete_rejects_old_jwt_bound_csrf() {
     claims["exp"] = json!(2000000001);
     let refreshed = sso::Signer::shared().sign(&claims, "key1");
     let (s, current_csrf, _) = h
-        .request(
-            "GET",
-            "/gateway/csrf",
-            Some(&refreshed),
-            true,
-            None,
-            None,
-            &[],
-        )
+        .request("GET", "/api/csrf", Some(&refreshed), true, None, None, &[])
         .await;
     assert_eq!(s, 200);
     let current_csrf = current_csrf["token"].as_str().unwrap();
     let (_, key, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(key_input()),
@@ -2206,16 +2166,16 @@ async fn every_cookie_write_route_and_delete_rejects_old_jwt_bound_csrf() {
     let key = key["metadata"]["id"].as_str().unwrap();
     let id = h.actor;
     let writes = [
-        ("POST", "/gateway/keys".to_owned()),
-        ("DELETE", format!("/gateway/keys/{key}?expected_version=1")),
-        ("POST", "/gateway/admin/principals".into()),
-        ("PATCH", format!("/gateway/admin/principals/{id}")),
-        ("PUT", format!("/gateway/admin/principals/{id}/policy")),
+        ("POST", "/api/keys".to_owned()),
+        ("DELETE", format!("/api/keys/{key}?expected_version=1")),
+        ("POST", "/api/admin/principals".into()),
+        ("PATCH", format!("/api/admin/principals/{id}")),
+        ("PUT", format!("/api/admin/principals/{id}/policy")),
         (
             "POST",
-            format!("/gateway/admin/principals/{id}/inference-pause/release"),
+            format!("/api/admin/principals/{id}/inference-pause/release"),
         ),
-        ("PUT", format!("/gateway/admin/requests/{id}/settlement")),
+        ("PUT", format!("/api/admin/requests/{id}/settlement")),
     ];
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_commands")
         .fetch_one(h.db.store.pool())
@@ -2292,15 +2252,7 @@ async fn every_cookie_write_route_and_delete_rejects_old_jwt_bound_csrf() {
         .await
         .unwrap();
     let header_csrf = h
-        .request(
-            "GET",
-            "/gateway/csrf",
-            Some(&h.token),
-            false,
-            None,
-            None,
-            &[],
-        )
+        .request("GET", "/api/csrf", Some(&h.token), false, None, None, &[])
         .await
         .0;
     h.close().await;
@@ -2331,7 +2283,7 @@ async fn foreign_key_ownership_precedes_new_command_schema_and_replay() {
                 &g,
                 &ceiling,
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
             ),
             issue(),
         )
@@ -2380,7 +2332,7 @@ async fn foreign_key_ownership_precedes_new_command_schema_and_replay() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/gateway/keys/{key}?expected_version=bad"))
+                .uri(format!("/api/keys/{key}?expected_version=bad"))
                 .header("authorization", format!("Bearer {}", h.token))
                 .header("x-gateway-command-id", Uuid::new_v4().to_string())
                 .body(Body::empty())
@@ -2415,7 +2367,7 @@ async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
                     &g,
                     &ceiling,
                     "POST",
-                    "/gateway/keys",
+                    "/api/keys",
                 ),
                 issue(),
             )
@@ -2434,7 +2386,7 @@ async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
                     &g,
                     &ceiling,
                     "POST",
-                    "/gateway/keys",
+                    "/api/keys",
                 ),
                 issue(),
             )
@@ -2451,7 +2403,7 @@ async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
                     &g,
                     &ceiling,
                     "POST",
-                    "/gateway/keys",
+                    "/api/keys",
                 ),
                 issue(),
             )
@@ -2472,7 +2424,7 @@ async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
                     &g,
                     &ceiling,
                     "POST",
-                    "/gateway/keys"
+                    "/api/keys"
                 ),
                 issue()
             )
@@ -2495,7 +2447,7 @@ async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
                     &g,
                     &ceiling,
                     "PUT",
-                    "/gateway/admin/principals/id/policy",
+                    "/api/admin/principals/id/policy",
                 ),
                 p,
             )
@@ -2516,7 +2468,7 @@ async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
                     &g,
                     &ceiling,
                     "PUT",
-                    "/gateway/admin/principals/id/policy",
+                    "/api/admin/principals/id/policy",
                 ),
                 p,
             )
@@ -2576,7 +2528,7 @@ async fn manual_and_late_final_races_preserve_money_and_separate_safety_cas() {
             &g,
             &ceiling,
             "PUT",
-            "/gateway/admin/requests/id/settlement",
+            "/api/admin/requests/id/settlement",
         );
         let manual = ledger.management_command(&c, settlement(id, "3", "수동과 late", true));
         let (_, _) = if late_first {
@@ -2630,7 +2582,7 @@ async fn manual_and_late_final_races_preserve_money_and_separate_safety_cas() {
             &g,
             &ceiling,
             "POST",
-            "/gateway/admin/principals/id/inference-pause/release",
+            "/api/admin/principals/id/inference-pause/release",
         );
         assert!(matches!(
             ledger
@@ -2673,7 +2625,7 @@ async fn known_live_native_sender_cannot_be_settled_by_admin_confirmation() {
         ledger.recover_expired(id).await.unwrap(),
         Some(m_gated::ledger::finance::Finalized::Unknown)
     );
-    let path = format!("/gateway/admin/requests/{id}/settlement");
+    let path = format!("/api/admin/requests/{id}/settlement");
     let input = json!({"expected_version":"3","decision":"no_charge","cost_usd":"0.000000000000","reason":"관리자 종료 확인 주장","execution_stopped_confirmed":true});
     let (status, body, _) = h
         .request(
@@ -2700,7 +2652,7 @@ async fn known_live_native_sender_cannot_be_settled_by_admin_confirmation() {
     let (_, detail, _) = h
         .request(
             "GET",
-            &format!("/gateway/admin/requests/{id}"),
+            &format!("/api/admin/requests/{id}"),
             Some(&h.token),
             false,
             None,
@@ -2801,7 +2753,7 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
                 &g,
                 &ceiling,
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
             ),
             input,
         )
@@ -2884,7 +2836,7 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
                 &g,
                 &ceiling,
                 "PUT",
-                "/gateway/admin/requests/id/settlement",
+                "/api/admin/requests/id/settlement",
             ),
             settlement(roots[0].id, "3", "원래 기간의 수동 입력", true),
         )
@@ -2997,12 +2949,12 @@ async fn old_and_new_configuration_servers_keep_fence_until_explicit_stop_confir
     };
     let r = router
         .clone()
-        .oneshot(request("GET", "/gateway/me".into(), Value::Null))
+        .oneshot(request("GET", "/api/me".into(), Value::Null))
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
     drop(to_bytes(r.into_body(), 1024 * 1024).await.unwrap());
-    let path = format!("/gateway/admin/principals/{}/policy", h.actor);
+    let path = format!("/api/admin/principals/{}/policy", h.actor);
     let mut p = json!({"expected_version":"1","disabled":true,"grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null},"reason":"security_config_fence:rollout-1"});
     let r = router
         .clone()
@@ -3013,13 +2965,10 @@ async fn old_and_new_configuration_servers_keep_fence_until_explicit_stop_confir
     drop(to_bytes(r.into_body(), 1024 * 1024).await.unwrap());
     let mut statuses = Vec::new();
     for (method, path) in [
-        ("GET", "/gateway/me".into()),
-        ("POST", "/gateway/keys".into()),
+        ("GET", "/api/me".into()),
+        ("POST", "/api/keys".into()),
         ("PUT", path.clone()),
-        (
-            "PUT",
-            format!("/gateway/admin/requests/{}/settlement", h.actor),
-        ),
+        ("PUT", format!("/api/admin/requests/{}/settlement", h.actor)),
     ] {
         statuses.push(
             h.request(
@@ -3067,7 +3016,7 @@ async fn newly_issued_keys_cannot_escape_money_unknown_but_free_count_is_indepen
     let (s, key, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(key_input()),
@@ -3105,15 +3054,7 @@ async fn newly_issued_keys_cannot_escape_money_unknown_but_free_count_is_indepen
     assert_eq!(s, 200);
     assert_eq!(h.provider.calls.lock().await.len(), 2);
     let (s, usage, _) = h
-        .request(
-            "GET",
-            "/gateway/usage",
-            Some(&h.token),
-            false,
-            None,
-            None,
-            &[],
-        )
+        .request("GET", "/api/usage", Some(&h.token), false, None, None, &[])
         .await;
     h.close().await;
     assert_eq!(s, 200);
@@ -3138,7 +3079,7 @@ async fn issued_grants_do_not_expand_with_principal_policy_and_expired_key_is_40
     let (s, key, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(input),
@@ -3148,7 +3089,7 @@ async fn issued_grants_do_not_expand_with_principal_policy_and_expired_key_is_40
         .await;
     assert_eq!(s, 201);
     let raw = key["key"].as_str().unwrap();
-    let(s,_,_)=h.request("PUT",&format!("/gateway/admin/principals/{}/policy",h.actor),Some(&h.token),false,Some(json!({"expected_version":"1","disabled":false,"grants":grants(),"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null},"reason":"확대해도 기존키상한은고정"})),Some(Uuid::new_v4()),&[]).await;
+    let(s,_,_)=h.request("PUT",&format!("/api/admin/principals/{}/policy",h.actor),Some(&h.token),false,Some(json!({"expected_version":"1","disabled":false,"grants":grants(),"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null},"reason":"확대해도 기존키상한은고정"})),Some(Uuid::new_v4()),&[]).await;
     assert_eq!(s, 200);
     let(s,_,_)=h.request("POST","/anthropic/v1/messages/count_tokens",Some(raw),false,Some(json!({"model":"synthetic-text","messages":[{"role":"user","content":"synthetic-only"}]})),None,&[("anthropic-version","2023-06-01")]).await;
     assert_eq!(s, 403);
@@ -3162,12 +3103,12 @@ async fn issued_grants_do_not_expand_with_principal_policy_and_expired_key_is_40
     tx.commit().await.unwrap();
     let raw = expired.expose_once();
     let (s, _, _) = h
-        .request("GET", "/gateway/me", Some(&raw), false, None, None, &[])
+        .request("GET", "/api/me", Some(&raw), false, None, None, &[])
         .await;
     let (_, list, _) = h
         .request(
             "GET",
-            "/gateway/keys?status=expired",
+            "/api/keys?status=expired",
             Some(&h.token),
             false,
             None,
@@ -3303,7 +3244,7 @@ async fn new_late_cost_cause_and_safety_release_serialize_without_unpausing_new_
                         &g,
                         &ceiling,
                         "POST",
-                        "/gateway/admin/principals/id/inference-pause/release",
+                        "/api/admin/principals/id/inference-pause/release",
                     ),
                     Command::Release(
                         actor,
@@ -3366,7 +3307,7 @@ async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_bac
                         &g,
                         &ceiling,
                         "PUT",
-                        "/gateway/admin/principals/id/policy"
+                        "/api/admin/principals/id/policy"
                     ),
                     p
                 )
@@ -3395,7 +3336,7 @@ async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_bac
                 &g,
                 &ceiling,
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
             ),
             issue(),
         )
@@ -3415,7 +3356,7 @@ async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_bac
         &g,
         &ceiling,
         "DELETE",
-        "/gateway/keys/id",
+        "/api/keys/id",
     );
     assert!(
         ledger
@@ -3468,7 +3409,7 @@ async fn command_lock_wait_is_bounded_without_pending_command_or_effect() {
         &g,
         &ceiling,
         "POST",
-        "/gateway/keys",
+        "/api/keys",
     );
     let result = ledger.management_command(&c, issue()).await;
     holder.rollback().await.unwrap();
@@ -3487,7 +3428,7 @@ async fn same_email_new_sso_subject_never_inherits_issued_keys_or_usage_scope() 
     let (_, key, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(key_input()),
@@ -3500,14 +3441,14 @@ async fn same_email_new_sso_subject_never_inherits_issued_keys_or_usage_scope() 
     claims["sub"] = json!("different-subject-same-email");
     let token = sso::Signer::shared().sign(&claims, "key1");
     let (s, me, _) = h
-        .request("GET", "/gateway/me", Some(&token), false, None, None, &[])
+        .request("GET", "/api/me", Some(&token), false, None, None, &[])
         .await;
     assert_eq!(s, 200);
     assert_eq!(me["role"], "admin");
     let new = me["principal"]["id"].as_str().unwrap();
     assert_ne!(new, h.actor.to_string());
     let (s, keys, _) = h
-        .request("GET", "/gateway/keys", Some(&token), false, None, None, &[])
+        .request("GET", "/api/keys", Some(&token), false, None, None, &[])
         .await;
     assert_eq!(s, 200);
     assert_eq!(keys["items"], json!([]));
@@ -3531,7 +3472,7 @@ async fn admin_aggregate_key_filter_checks_existence_without_computing_balance()
     let (status, issued, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(key_input()),
@@ -3544,7 +3485,7 @@ async fn admin_aggregate_key_filter_checks_existence_without_computing_balance()
     let (status, aggregate, _) = h
         .request(
             "GET",
-            &format!("/gateway/admin/usage?key_id={key}"),
+            &format!("/api/admin/usage?key_id={key}"),
             Some(&h.token),
             false,
             None,
@@ -3560,7 +3501,7 @@ async fn admin_aggregate_key_filter_checks_existence_without_computing_balance()
     let (status, usage, _) = h
         .request(
             "GET",
-            &format!("/gateway/admin/usage?principal_id={}&key_id={key}", h.actor),
+            &format!("/api/admin/usage?principal_id={}&key_id={key}", h.actor),
             Some(&h.token),
             false,
             None,
@@ -3572,8 +3513,8 @@ async fn admin_aggregate_key_filter_checks_existence_without_computing_balance()
     assert_eq!(usage["budget_balances"].as_array().unwrap().len(), 2);
     let other = bob(&h.db).await;
     for path in [
-        format!("/gateway/admin/usage?key_id={}", Uuid::new_v4()),
-        format!("/gateway/admin/usage?principal_id={other}&key_id={key}"),
+        format!("/api/admin/usage?key_id={}", Uuid::new_v4()),
+        format!("/api/admin/usage?principal_id={other}&key_id={key}"),
     ] {
         assert_eq!(
             h.request("GET", &path, Some(&h.token), false, None, None, &[])
@@ -3589,7 +3530,7 @@ async fn admin_aggregate_key_filter_checks_existence_without_computing_balance()
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn admin_usage_missing_principal_is_404_not_self_access_denied() {
     let h = Harness::new().await;
-    let missing = format!("/gateway/admin/usage?principal_id={}", Uuid::new_v4());
+    let missing = format!("/api/admin/usage?principal_id={}", Uuid::new_v4());
     let missing_status = h
         .request("GET", &missing, Some(&h.token), false, None, None, &[])
         .await
@@ -3597,7 +3538,7 @@ async fn admin_usage_missing_principal_is_404_not_self_access_denied() {
     assert_eq!(
         h.request(
             "GET",
-            &format!("/gateway/admin/usage?principal_id={}", h.actor),
+            &format!("/api/admin/usage?principal_id={}", h.actor),
             Some(&h.token),
             false,
             None,
@@ -3796,10 +3737,10 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
             json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]);
         let policy = json!({"expected_version":"1","disabled":false,"grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":limits,"reason":"비호환 상한"});
         for (method, path, input) in [
-            ("POST", "/gateway/keys".to_owned(), input),
+            ("POST", "/api/keys".to_owned(), input),
             (
                 "PUT",
-                format!("/gateway/admin/principals/{}/policy", h.actor),
+                format!("/api/admin/principals/{}/policy", h.actor),
                 policy,
             ),
         ] {
@@ -3832,7 +3773,7 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
     let (status, _, headers) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(key_input()),
@@ -3868,7 +3809,7 @@ async fn late_token_only_bound_violation_pauses_unknown_and_manual_without_repri
                         &g,
                         &ceiling,
                         "PUT",
-                        "/gateway/admin/requests/id/settlement",
+                        "/api/admin/requests/id/settlement",
                     ),
                     settlement(id, "3", "관리자 금액 보존", true),
                 )
@@ -4044,7 +3985,7 @@ async fn late_token_only_violation_audit_failure_rolls_back_unknown_and_manual_o
                         &g,
                         &ceiling,
                         "PUT",
-                        "/gateway/admin/requests/id/settlement",
+                        "/api/admin/requests/id/settlement",
                     ),
                     settlement(id, "3", "late 감사 rollback", true),
                 )
@@ -4104,7 +4045,7 @@ async fn late_token_only_violation_and_release_serialize_for_unknown_and_manual(
                         &g,
                         &ceiling,
                         "PUT",
-                        "/gateway/admin/requests/id/settlement",
+                        "/api/admin/requests/id/settlement",
                     ),
                     settlement(id, "3", "release 경합", true),
                 )
@@ -4136,7 +4077,7 @@ async fn late_token_only_violation_and_release_serialize_for_unknown_and_manual(
                             &g,
                             &ceiling,
                             "POST",
-                            "/gateway/admin/principals/id/inference-pause/release",
+                            "/api/admin/principals/id/inference-pause/release",
                         ),
                         Command::Release(
                             actor,
@@ -4225,7 +4166,7 @@ async fn cookie_csrf_actual_expiry_and_explicit_headers_never_fall_back_on_write
     let (status, value, _) = h
         .request(
             "GET",
-            "/gateway/csrf",
+            "/api/csrf",
             Some(&expired_in_leeway),
             true,
             None,
@@ -4248,7 +4189,7 @@ async fn cookie_csrf_actual_expiry_and_explicit_headers_never_fall_back_on_write
         let (status, _, _) = h
             .request(
                 "POST",
-                "/gateway/keys",
+                "/api/keys",
                 Some(&h.token),
                 true,
                 Some(key_input()),
@@ -4266,7 +4207,7 @@ async fn cookie_csrf_actual_expiry_and_explicit_headers_never_fall_back_on_write
     let (status, issued, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(&h.token),
             false,
             Some(key_input()),
@@ -4287,7 +4228,7 @@ async fn cookie_csrf_actual_expiry_and_explicit_headers_never_fall_back_on_write
     let (status, _, _) = h
         .request(
             "POST",
-            "/gateway/keys",
+            "/api/keys",
             Some(raw),
             false,
             Some(key_input()),
@@ -4297,15 +4238,7 @@ async fn cookie_csrf_actual_expiry_and_explicit_headers_never_fall_back_on_write
         .await;
     assert_eq!(status, 403, "virtual 관리 거부를 cookie로 우회하지 않는다");
     let (status, csrf, headers) = h
-        .request(
-            "GET",
-            "/gateway/csrf",
-            Some(&h.token),
-            true,
-            None,
-            None,
-            &[],
-        )
+        .request("GET", "/api/csrf", Some(&h.token), true, None, None, &[])
         .await;
     assert_eq!(status, 200);
     assert_eq!(headers["cache-control"], "no-store");
@@ -4313,7 +4246,7 @@ async fn cookie_csrf_actual_expiry_and_explicit_headers_never_fall_back_on_write
     let (status, _, _) = h
         .request(
             "DELETE",
-            &format!("/gateway/keys/{key}?expected_version=1"),
+            &format!("/api/keys/{key}?expected_version=1"),
             Some(&h.token),
             true,
             None,
@@ -4347,36 +4280,19 @@ async fn cookie_csrf_actual_expiry_and_explicit_headers_never_fall_back_on_write
 async fn every_body_cookie_write_rejects_form_even_with_valid_origin_and_csrf() {
     let h = Harness::new().await;
     let (_, csrf, _) = h
-        .request(
-            "GET",
-            "/gateway/csrf",
-            Some(&h.token),
-            true,
-            None,
-            None,
-            &[],
-        )
+        .request("GET", "/api/csrf", Some(&h.token), true, None, None, &[])
         .await;
     let origin = h.cfg.public_origin().as_str().trim_end_matches('/');
     for (method, path) in [
-        ("POST", "/gateway/keys".to_owned()),
-        ("POST", "/gateway/admin/principals".to_owned()),
-        ("PATCH", format!("/gateway/admin/principals/{}", h.actor)),
-        (
-            "PUT",
-            format!("/gateway/admin/principals/{}/policy", h.actor),
-        ),
+        ("POST", "/api/keys".to_owned()),
+        ("POST", "/api/admin/principals".to_owned()),
+        ("PATCH", format!("/api/admin/principals/{}", h.actor)),
+        ("PUT", format!("/api/admin/principals/{}/policy", h.actor)),
         (
             "POST",
-            format!(
-                "/gateway/admin/principals/{}/inference-pause/release",
-                h.actor
-            ),
+            format!("/api/admin/principals/{}/inference-pause/release", h.actor),
         ),
-        (
-            "PUT",
-            format!("/gateway/admin/requests/{}/settlement", h.actor),
-        ),
+        ("PUT", format!("/api/admin/requests/{}/settlement", h.actor)),
     ] {
         let response = h
             .router
@@ -4415,7 +4331,7 @@ async fn s9_command_busy_has_503_retry_after_and_no_mutation_or_success_audit() 
     let (status, ack, _) = h
         .request(
             "POST",
-            "/gateway/admin/principals",
+            "/api/admin/principals",
             Some(&h.token),
             false,
             Some(json!({"display_name":"S9 busy service","management_owner_id":h.actor})),
@@ -4432,7 +4348,7 @@ async fn s9_command_busy_has_503_retry_after_and_no_mutation_or_success_audit() 
         .fetch_one(&mut *holder)
         .await
         .unwrap();
-    let path = format!("/gateway/admin/principals/{id}");
+    let path = format!("/api/admin/principals/{id}");
     let (status, body, headers) = h
         .request(
             "PATCH",
@@ -4586,7 +4502,7 @@ async fn management_body_limit_applies_to_content_length_and_chunked_wire_at_bou
                 reqwest::Body::from(bytes)
             };
             let response = client
-                .post(format!("http://{addr}/gateway/admin/principals"))
+                .post(format!("http://{addr}/api/admin/principals"))
                 .bearer_auth(&h.token)
                 .header("content-type", "application/json")
                 .header("x-gateway-command-id", command.to_string())

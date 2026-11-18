@@ -17,10 +17,10 @@ use axum::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-const CREDENTIALS: &str = "/gateway/admin/provider-credentials";
-const KEYS_ADMIN: &str = "/gateway/admin/keys/";
+const CREDENTIALS: &str = "/api/admin/provider-credentials";
+const KEYS_ADMIN: &str = "/api/admin/keys/";
 const KEY_BINDING: &str = "/provider-credential";
-const CATALOG: &str = "/gateway/admin/model-catalog";
+const CATALOG: &str = "/api/admin/model-catalog";
 fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
 }
@@ -103,10 +103,9 @@ pub(super) fn error(e: ManagementError) -> Response {
 }
 pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> Response {
     let path = request.uri().path();
-    let allowed = if path == "/gateway/csrf" || path == CREDENTIALS || path == CATALOG {
+    let allowed = if path == "/api/csrf" || path == CREDENTIALS || path == CATALOG {
         vec![Method::GET]
-    } else if path == "/gateway/admin/model-catalog/sync"
-        || path == "/gateway/admin/model-catalog/approve"
+    } else if path == "/api/admin/model-catalog/sync" || path == "/api/admin/model-catalog/approve"
     {
         vec![Method::POST]
     } else if let Some(rest) = path.strip_prefix(CREDENTIALS) {
@@ -117,15 +116,15 @@ pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> R
         }
     } else if path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING) {
         vec![Method::PUT]
-    } else if path == "/gateway/keys" || path == "/gateway/admin/principals" {
+    } else if path == "/api/keys" || path == "/api/admin/principals" {
         vec![Method::GET, Method::POST]
-    } else if path.starts_with("/gateway/keys/") {
+    } else if path.starts_with("/api/keys/") {
         vec![Method::DELETE]
     } else if path.ends_with("/policy") || path.ends_with("/settlement") {
         vec![Method::PUT]
     } else if path.ends_with("/inference-pause/release") {
         vec![Method::POST]
-    } else if path.starts_with("/gateway/admin/principals/") {
+    } else if path.starts_with("/api/admin/principals/") {
         vec![Method::GET, Method::PATCH]
     } else {
         vec![Method::GET]
@@ -187,7 +186,7 @@ async fn execute(
         .auth
         .authenticate(
             &head.headers,
-            if path == "/gateway/csrf" {
+            if path == "/api/csrf" {
                 AuthRoute::CookieOnly
             } else {
                 AuthRoute::Management
@@ -202,11 +201,11 @@ async fn execute(
     if let Err(e) = lease.identify(human.current.id) {
         return crate::http::admission_error(e);
     }
-    let admin = path.starts_with("/gateway/admin/");
+    let admin = path.starts_with("/api/admin/");
     if admin && !human.current.admin {
         return error(ManagementError::Forbidden);
     }
-    if head.method == Method::DELETE && path.starts_with("/gateway/keys/") {
+    if head.method == Method::DELETE && path.starts_with("/api/keys/") {
         let Some(id) = path
             .rsplit('/')
             .next()
@@ -251,7 +250,7 @@ async fn execute(
             return failure(StatusCode::FORBIDDEN, "csrf_invalid");
         }
     }
-    if path == "/gateway/csrf" {
+    if path == "/api/csrf" {
         if head.uri.query().is_some() {
             return error(ManagementError::Invalid);
         }
@@ -292,25 +291,25 @@ async fn execute(
         signing_key: &state.api.signing_key,
     };
     if !write {
-        let result = if path == "/gateway/keys" || path == "/gateway/admin/keys" {
+        let result = if path == "/api/keys" || path == "/api/admin/keys" {
             state
                 .api
                 .store
                 .management_list(&ctx, "keys", head.uri.query())
                 .await
-        } else if path == "/gateway/admin/principals" {
+        } else if path == "/api/admin/principals" {
             state
                 .api
                 .store
                 .management_list(&ctx, "principals", head.uri.query())
                 .await
-        } else if path == "/gateway/admin/requests" {
+        } else if path == "/api/admin/requests" {
             state
                 .api
                 .store
                 .management_list(&ctx, "requests", head.uri.query())
                 .await
-        } else if path == "/gateway/admin/usage" {
+        } else if path == "/api/admin/usage" {
             state
                 .api
                 .store
@@ -331,7 +330,7 @@ async fn execute(
                 .store
                 .management_detail(
                     &ctx,
-                    if path.starts_with("/gateway/admin/principals/") {
+                    if path.starts_with("/api/admin/principals/") {
                         "principals"
                     } else {
                         "requests"
@@ -437,11 +436,11 @@ async fn execute(
     let segments: Vec<_> = path.split('/').collect();
     let id = segments.get(4).and_then(|s| Uuid::parse_str(s).ok());
     let parse = || -> Result<Command, ManagementError> {
-        if path == "/gateway/keys" {
+        if path == "/api/keys" {
             Ok(Command::Issue(
                 serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
             ))
-        } else if path.starts_with("/gateway/keys/") {
+        } else if path.starts_with("/api/keys/") {
             let id = segments
                 .get(3)
                 .and_then(|s| Uuid::parse_str(s).ok())
@@ -454,7 +453,7 @@ async fn execute(
                 return Err(ManagementError::Invalid);
             }
             Ok(Command::Revoke { id, expected })
-        } else if path == "/gateway/admin/principals" {
+        } else if path == "/api/admin/principals" {
             Ok(Command::Create(
                 serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
             ))
@@ -492,7 +491,7 @@ async fn execute(
     };
     let normalized_path = if head.method == Method::DELETE {
         format!(
-            "/gateway/keys/{}",
+            "/api/keys/{}",
             segments
                 .get(3)
                 .and_then(|s| Uuid::parse_str(s).ok())
@@ -592,7 +591,7 @@ async fn provider_credentials(
             Err(e) => error(e),
         };
     }
-    // 경로: {CREDENTIALS}/{provider}[/{id}] 또는 /gateway/admin/keys/{key}/provider-credential
+    // 경로: {CREDENTIALS}/{provider}[/{id}] 또는 /api/admin/keys/{key}/provider-credential
     let (provider, id, key) = if let Some(rest) = path
         .strip_prefix(KEYS_ADMIN)
         .and_then(|p| p.strip_suffix(KEY_BINDING))
@@ -893,7 +892,7 @@ async fn model_catalog(
         ceiling: &state.api.ceiling,
         execution_running: false,
     };
-    let result = if path == "/gateway/admin/model-catalog/sync" {
+    let result = if path == "/api/admin/model-catalog/sync" {
         if input.as_object().is_some_and(|o| !o.is_empty()) {
             return error(ManagementError::Invalid);
         }

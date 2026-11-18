@@ -13,7 +13,7 @@
 # variables: DB_PASSWORD, CSRF_SIGNING_KEY and CREDENTIAL_ENCRYPTION_KEY
 # (each of the last two: 64 lowercase hex chars, different values).
 # Provider API keys are registered by an admin in the dashboard
-# (/ui/admin/credentials) and stored encrypted in Postgres.
+# (/dashboard/admin/credentials) and stored encrypted in Postgres.
 
 # Public HTTPS origin of the gateway (scheme + host only, no path, no port).
 # Browser writes from the dashboard must carry exactly this Origin.

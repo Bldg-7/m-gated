@@ -203,11 +203,11 @@ async fn unknown_routes_never_become_spa_or_proxy() {
         "/v1/messages",
         "/deepseek/v1/chat/completions",
         "/bedrock/v1/messages",
-        "/gateway/me",
+        "/api/me",
         "/auth/login",
-        "/ui/",
-        "/ui/assets/missing.js",
-        "/ui/%2e%2e/path-sentinel",
+        "/dashboard/",
+        "/dashboard/assets/missing.js",
+        "/dashboard/%2e%2e/path-sentinel",
         "/livez/",
     ] {
         for method in ["GET", "POST", "HEAD", "OPTIONS"] {

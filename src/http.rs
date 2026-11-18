@@ -47,7 +47,8 @@ struct HeaderState {
 fn assemble_router(state: AppState, routes: Router, native_paths: Vec<&'static str>) -> Router {
     // get의 HEAD 자동 성공을 피하고 GET 외 method를 명시적으로 거부한다.
     Router::new()
-        .route("/ui", any(crate::dashboard::redirect))
+        .route("/", any(crate::dashboard::redirect))
+        .route("/dashboard", any(crate::dashboard::redirect))
         .route("/livez", any(livez))
         .route("/readyz", any(readyz))
         .fallback(route_not_found)

@@ -98,50 +98,41 @@ impl DashboardApi {
     }
     pub fn routes(self: Arc<Self>, runtime: Arc<Runtime>) -> Router {
         Router::new()
-            .route("/gateway/me", any(read))
-            .route("/gateway/usage", any(read))
+            .route("/api/me", any(read))
+            .route("/api/usage", any(read))
             .route("/auth/login", any(read))
-            .route("/gateway/csrf", any(management::handle))
-            .route("/gateway/keys", any(management::handle))
-            .route("/gateway/keys/{id}", any(management::handle))
-            .route("/gateway/admin/principals", any(management::handle))
-            .route("/gateway/admin/principals/{id}", any(management::handle))
+            .route("/api/csrf", any(management::handle))
+            .route("/api/keys", any(management::handle))
+            .route("/api/keys/{id}", any(management::handle))
+            .route("/api/admin/principals", any(management::handle))
+            .route("/api/admin/principals/{id}", any(management::handle))
+            .route("/api/admin/principals/{id}/policy", any(management::handle))
             .route(
-                "/gateway/admin/principals/{id}/policy",
+                "/api/admin/principals/{id}/inference-pause/release",
+                any(management::handle),
+            )
+            .route("/api/admin/keys", any(management::handle))
+            .route("/api/admin/provider-credentials", any(management::handle))
+            .route("/api/admin/model-catalog", any(management::handle))
+            .route("/api/admin/model-catalog/sync", any(management::handle))
+            .route("/api/admin/model-catalog/approve", any(management::handle))
+            .route(
+                "/api/admin/provider-credentials/{provider}",
                 any(management::handle),
             )
             .route(
-                "/gateway/admin/principals/{id}/inference-pause/release",
-                any(management::handle),
-            )
-            .route("/gateway/admin/keys", any(management::handle))
-            .route(
-                "/gateway/admin/provider-credentials",
-                any(management::handle),
-            )
-            .route("/gateway/admin/model-catalog", any(management::handle))
-            .route("/gateway/admin/model-catalog/sync", any(management::handle))
-            .route(
-                "/gateway/admin/model-catalog/approve",
+                "/api/admin/provider-credentials/{provider}/{id}",
                 any(management::handle),
             )
             .route(
-                "/gateway/admin/provider-credentials/{provider}",
+                "/api/admin/keys/{id}/provider-credential",
                 any(management::handle),
             )
+            .route("/api/admin/usage", any(management::handle))
+            .route("/api/admin/requests", any(management::handle))
+            .route("/api/admin/requests/{id}", any(management::handle))
             .route(
-                "/gateway/admin/provider-credentials/{provider}/{id}",
-                any(management::handle),
-            )
-            .route(
-                "/gateway/admin/keys/{id}/provider-credential",
-                any(management::handle),
-            )
-            .route("/gateway/admin/usage", any(management::handle))
-            .route("/gateway/admin/requests", any(management::handle))
-            .route("/gateway/admin/requests/{id}", any(management::handle))
-            .route(
-                "/gateway/admin/requests/{id}/settlement",
+                "/api/admin/requests/{id}/settlement",
                 any(management::handle),
             )
             .with_state(ApiState { api: self, runtime })
@@ -179,8 +170,8 @@ async fn read(State(state): State<ApiState>, request: Request) -> Response {
             Err(error)=>return crate::http::authentication_error(error),
         };
         if let Err(error)=lease.identify(human.current.id) { return crate::http::admission_error(error); }
-        if login { return redirect(StatusCode::SEE_OTHER,"/ui/"); }
-        if request.uri.path()=="/gateway/me" {
+        if login { return redirect(StatusCode::SEE_OTHER,"/dashboard/"); }
+        if request.uri.path()=="/api/me" {
             if request.uri.query().is_some() { return query_error(QueryError::InvalidFilter); }
             let grants=state.api.grants();
             match state.api.store.dashboard_me(human.current.id,&grants,&state.api.digest).await {

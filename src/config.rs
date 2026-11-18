@@ -399,7 +399,7 @@ impl AuthConfig {
         if let Some(param) = &self.return_param {
             url.query_pairs_mut().append_pair(
                 param,
-                &format!("{}/ui/", origin.as_str().trim_end_matches('/')),
+                &format!("{}/dashboard/", origin.as_str().trim_end_matches('/')),
             );
         }
         url.to_string()
