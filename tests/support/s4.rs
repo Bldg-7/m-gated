@@ -31,8 +31,9 @@ use m_gated::ledger::{
 fn limits(value: serde_json::Value) -> PolicyLimits {
     serde_json::from_value(value).unwrap()
 }
-fn budget(mode: &str, amount: &str, tz: &str) -> serde_json::Value {
-    serde_json::json!({"budget":{"mode":mode,"limit_usd":amount,"period":{"kind":"calendar_month","timezone":tz}}})
+/// 예산 기간의 시간대는 관리자 설정(gw_budget_timezones) 하나로 정한다. 정책 한도에는 시간대가 없다.
+fn budget(mode: &str, amount: &str, _tz: &str) -> serde_json::Value {
+    serde_json::json!({"budget":{"mode":mode,"limit_usd":amount,"period":{"kind":"calendar_month"}}})
 }
 async fn key(
     pool: &sqlx::PgPool,
@@ -316,7 +317,8 @@ async fn s4_policy_period_and_mode_transition_keeps_stable_scope_and_cost() {
         )
         .await
         .err(),
-        Some(LedgerError::Conflict)
+        None,
+        "시간대는 정책마다 두지 않으므로 사용 중인 정책의 전환을 막지 않는다"
     );
     assert_eq!(
         validate_policy_transition(
@@ -1082,10 +1084,10 @@ async fn s4_iana_dst_month_and_fixed_sixty_second_windows_survive_next_month_fin
             .await
             .unwrap();
         let id = finance::human(store.pool()).await;
+        // 예산 기간의 시간대는 관리자 설정 하나다. 이 시험은 그 설정을 뉴욕 시간으로 둔다.
         sqlx::query(
-            "UPDATE gw_policies SET period_timezone='America/New_York' WHERE principal_id=$1",
+            "UPDATE gw_budget_timezones SET timezone='America/New_York' WHERE effective_from='-infinity'",
         )
-        .bind(id)
         .execute(store.pool())
         .await
         .unwrap();
@@ -1791,7 +1793,7 @@ async fn s4_zero_budget_count_native_wire_and_free_rate_access_checks() {
             for free in [false, true] {
                 let mut yaml = zero_rate_count_yaml(free);
                 if ceiling {
-                    yaml.push_str(&format!("execution_ceiling: {{budget: {{mode: {mode}, limit_usd: '0.000000000000', period: {{kind: calendar_month, timezone: UTC}}}}, count_rpm: 1}}\n"));
+                    yaml.push_str(&format!("execution_ceiling: {{budget: {{mode: {mode}, limit_usd: '0.000000000000', period: {{kind: calendar_month}}}}, count_rpm: 1}}\n"));
                 }
                 let h = Harness::with_clock(configuration_from_yaml(&yaml)).await;
                 h.provider

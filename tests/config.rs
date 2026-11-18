@@ -902,12 +902,12 @@ fn execution_ceiling_is_strict_and_changes_access_digest() {
         "execution_ceiling: {rpm: 0}",
         "execution_ceiling: {tpm: 1000000001}",
         "execution_ceiling: {unexpected: 1}",
-        "execution_ceiling: {budget: {mode: actual, limit_usd: '1.000000000000', period: {kind: calendar_month, timezone: Not/A_Zone}}}",
-        "execution_ceiling: {budget: {mode: actual, limit_usd: '0.0000000000001', period: {kind: calendar_month, timezone: UTC}}}",
+        "execution_ceiling: {budget: {mode: actual, limit_usd: '1.000000000000', period: {kind: calendar_month, timezone: UTC}}}",
+        "execution_ceiling: {budget: {mode: actual, limit_usd: '0.0000000000001', period: {kind: calendar_month}}}",
     ] {
         assert!(load(&format!("{}{suffix}\n", support::YAML)).is_err());
     }
-    let valid=load(&format!("{}execution_ceiling: {{budget: {{mode: reserved, limit_usd: '1.000000000000', period: {{kind: calendar_month, timezone: America/New_York}}}}, rpm: 2, tpm: 4096, count_rpm: 3}}\n",support::YAML)).unwrap();
+    let valid=load(&format!("{}execution_ceiling: {{budget: {{mode: reserved, limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}, rpm: 2, tpm: 4096, count_rpm: 3}}\n",support::YAML)).unwrap();
     assert_ne!(auth_config_digest(&original), auth_config_digest(&valid));
     assert_eq!(valid.execution_ceiling().rpm, Some(2));
     let without=load(&support::YAML.replace("        input_bound_contract:\n          kind: anthropic_context_v1\n          context_tokens: 4096\n          input_categories: [input, cache_read, cache_write]\n","")).unwrap();

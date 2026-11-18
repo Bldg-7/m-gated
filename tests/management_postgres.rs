@@ -2742,7 +2742,7 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
     let ledger = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
-        v.limits=serde_json::from_value(json!({"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month","timezone":"UTC"}},"tpm":10000})).unwrap();
+        v.limits=serde_json::from_value(json!({"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"tpm":10000})).unwrap();
     }
     let key = ledger
         .management_command(
@@ -3292,28 +3292,42 @@ async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_bac
     let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
     let id = unknown(&db, &ledger, &cfg, actor).await;
     let scope = finance::current(db.store.pool(), actor).await.policy_id;
-    for (mode, tz) in [("reserved", "UTC"), ("actual", "Asia/Seoul")] {
+    // 미정산 요청이 있는 동안 예산 모드는 바꿀 수 없다. 시간대는 정책 입력이 아니므로 넣으면 400이다.
+    for (period, want_invalid) in [
+        (json!({"kind":"calendar_month"}), false),
+        (
+            json!({"kind":"calendar_month","timezone":"Asia/Seoul"}),
+            true,
+        ),
+    ] {
         let mut p = policy(actor, "1", false, "이전 scope 유지");
         if let Command::Policy(_, p) = &mut p {
-            p.limits.budget=Some(serde_json::from_value(json!({"mode":mode,"limit_usd":"1.000000000000","period":{"kind":"calendar_month","timezone":tz}})).unwrap());
-        }
-        assert!(matches!(
-            ledger
-                .management_command(
-                    &ctx(
-                        actor,
-                        Uuid::new_v4(),
-                        &settings,
-                        &g,
-                        &ceiling,
-                        "PUT",
-                        "/api/admin/principals/id/policy"
-                    ),
-                    p
+            p.limits.budget = Some(
+                serde_json::from_value(
+                    json!({"mode":"reserved","limit_usd":"1.000000000000","period":period}),
                 )
-                .await,
-            Err(ManagementError::PolicyPeriod)
-        ));
+                .unwrap(),
+            );
+        }
+        let result = ledger
+            .management_command(
+                &ctx(
+                    actor,
+                    Uuid::new_v4(),
+                    &settings,
+                    &g,
+                    &ceiling,
+                    "PUT",
+                    "/api/admin/principals/id/policy",
+                ),
+                p,
+            )
+            .await;
+        if want_invalid {
+            assert!(matches!(result, Err(ManagementError::Invalid)));
+            continue;
+        }
+        assert!(matches!(result, Err(ManagementError::PolicyPeriod)));
     }
     assert_eq!(
         finance::current(db.store.pool(), actor).await.policy_id,
@@ -3714,7 +3728,7 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
         "alice@example.test,bob@example.test".into(),
     );
     let yaml = format!(
-        "{}execution_ceiling: {{budget: {{mode: actual, limit_usd: '1.000000000000', period: {{kind: calendar_month, timezone: UTC}}}}}}\n",
+        "{}execution_ceiling: {{budget: {{mode: actual, limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}}}\n",
         support::YAML
     );
     let cfg = config::load(ConfigInputs {
@@ -3729,8 +3743,22 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
             .fetch_one(h.db.store.pool())
             .await
             .unwrap();
-    for (mode, timezone) in [("reserved", "UTC"), ("actual", "Asia/Seoul")] {
-        let limits = json!({"budget":{"mode":mode,"limit_usd":"2.000000000000","period":{"kind":"calendar_month","timezone":timezone}},"rpm":null,"tpm":null,"count_rpm":null});
+    // 예산 모드가 상한과 다르면 409다. 시간대는 관리자 설정 하나로 정하므로 입력에 넣으면 400이다.
+    for (mode, period, want_status, want_code) in [
+        (
+            "reserved",
+            json!({"kind":"calendar_month"}),
+            409,
+            "configuration_conflict",
+        ),
+        (
+            "actual",
+            json!({"kind":"calendar_month","timezone":"Asia/Seoul"}),
+            400,
+            "invalid_request",
+        ),
+    ] {
+        let limits = json!({"budget":{"mode":mode,"limit_usd":"2.000000000000","period":period},"rpm":null,"tpm":null,"count_rpm":null});
         let mut input = key_input();
         input["limits"] = limits.clone();
         input["grants"] =
@@ -3755,8 +3783,8 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
                     &[],
                 )
                 .await;
-            assert_eq!(status, 409);
-            assert_eq!(body["error"]["code"], "configuration_conflict");
+            assert_eq!(status, want_status);
+            assert_eq!(body["error"]["code"], want_code);
             assert!(!headers.contains_key("retry-after"));
         }
     }

@@ -726,11 +726,9 @@ impl PgLedger {
             }
             let effective = stored.effective(&ceiling)?;
             let scope: Uuid = policy.get("id");
-            let timezone: String = policy.get("period_timezone");
             if let Some(budget) = &effective.budget
                 && spec.billing_class != BillingClass::GuaranteedFree
-                && (budget.period.timezone != timezone
-                    || budget.mode != policy.get::<String, _>("budget_mode"))
+                && budget.mode != policy.get::<String, _>("budget_mode")
             {
                 return Err(LedgerError::ConfigurationConflict);
             }
@@ -746,8 +744,10 @@ impl PgLedger {
             {
                 return Err(LedgerError::UnsupportedStrictPolicy);
             }
-            let period=sqlx::query("SELECT (date_trunc('month',$1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2)::text AS start, ((date_trunc('month',$1::timestamptz AT TIME ZONE $2)+interval '1 month') AT TIME ZONE $2)::text AS finish,to_timestamp(floor(extract(epoch FROM $1::timestamptz)/60)*60)::text AS rate")
-                .bind(&provisional).bind(&timezone).fetch_one(&mut *tx).await?;
+            // 예산 기간은 관리자가 정한 예산 시간대 하나로 정한다(정책마다 따로 두지 않는다).
+            let period=sqlx::query("SELECT b.period_start::text AS start,b.period_end::text AS finish,b.timezone,to_timestamp(floor(extract(epoch FROM $1::timestamptz)/60)*60)::text AS rate FROM gw_budget_period($1::timestamptz) b")
+                .bind(&provisional).fetch_one(&mut *tx).await?;
+            let timezone: String = period.get("timezone");
             let start: String = period.get("start");
             let end: String = period.get("finish");
             let rate: String = period.get("rate");
@@ -1144,8 +1144,7 @@ impl PgLedger {
                 let limits = stored.effective(&self.ceiling)?;
                 let mode: String = b.get("budget_mode");
                 if let Some(budget) = &limits.budget
-                    && (budget.mode != mode
-                        || budget.period.timezone != b.get::<String, _>("timezone_snapshot"))
+                    && budget.mode != mode
                 {
                     return Err(LedgerError::ConfigurationConflict);
                 }

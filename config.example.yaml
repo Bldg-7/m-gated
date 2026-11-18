@@ -169,7 +169,7 @@ retention:
 #   budget:
 #     mode: actual
 #     limit_usd: '500.000000000000'
-#     period: {kind: calendar_month, timezone: UTC}
+#     period: {kind: calendar_month}  # the time zone is set on the dashboard (Settings)
 
 # Optional. Process limits. Defaults are also the maximums; values may only
 # be lowered. See the README for the full list.

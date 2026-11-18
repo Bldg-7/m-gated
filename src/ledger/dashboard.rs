@@ -290,7 +290,11 @@ impl PgIdentityStore {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut *tx)
                 .await?;
-            let (p, _, _) = principal(&mut tx, id, grants, digest).await?;
+            let (mut p, _, _) = principal(&mut tx, id, grants, digest).await?;
+            // 화면에서 예산 기준 시간대와, 키를 발급할 때 고를 수 있는 회사 키를 보여 주는 데 쓴다.
+            p["budget_timezone"] = super::settings::budget_timezone_view(&mut tx).await?;
+            p["provider_credentials"] =
+                super::credentials::principal_authorization(&mut tx, id).await?;
             tx.commit().await?;
             Ok(p)
         })
@@ -488,10 +492,8 @@ impl PgIdentityStore {
                     boundary.clone().ok_or(QueryError::Invariant)?,
                 ));
             }
-            let timezone = balances[0]["timezone"]
-                .as_str()
-                .ok_or(QueryError::Invariant)?;
-            let complete:bool=sqlx::query_scalar("SELECT ($1::timestamptz AT TIME ZONE $3)=date_trunc('month',$1::timestamptz AT TIME ZONE $3) AND ($2::timestamptz AT TIME ZONE $3)=date_trunc('month',$2::timestamptz AT TIME ZONE $3)").bind(from).bind(to).bind(timezone).fetch_one(&mut *tx).await?;
+            // 기간 경계(관리자가 정한 예산 시간대 기준)와 정확히 맞는 범위만 월 합계로 답한다.
+            let complete:bool=sqlx::query_scalar("SELECT (SELECT period_start FROM gw_budget_period($1::timestamptz))=$1::timestamptz AND (SELECT period_start FROM gw_budget_period($2::timestamptz))=$2::timestamptz").bind(from).bind(to).fetch_one(&mut *tx).await?;
             if !complete
                 || filter.provider.is_some()
                 || filter.model.is_some()
@@ -629,11 +631,12 @@ pub(crate) async fn principal(
     let effective = intersect_grants(&grants, configured_grants);
     let scope: Uuid = row.get("scope");
     let version = row.get::<i64, _>("pv").to_string();
-    let timezone: String = row.get("period_timezone");
     let mode: String = row.get("budget_mode");
     let limit: Option<String> = row.get("budget");
     let block = json!({"blocked":!reasons.is_empty(),"reasons":reasons,"global_unknown_count":unknown,"expired_dispatch_count":expired});
-    let budget=limit.as_ref().map(|n|json!({"mode":mode,"limit_usd":n,"period":{"kind":"calendar_month","timezone":timezone}}));
+    let budget = limit
+        .as_ref()
+        .map(|n| json!({"mode":mode,"limit_usd":n,"period":{"kind":"calendar_month"}}));
     let p = json!({"id":id,"kind":row.get::<String,_>("kind"),"display_name":row.get::<String,_>("display_name"),"email":row.get::<Option<String>,_>("email"),"management_owner_id":row.get::<Option<Uuid>,_>("owner_principal_id"),"version":row.get::<i64,_>("version").to_string(),"policy":{"id":scope,"version":version,"disabled":row.get::<Option<String>,_>("disabled_reason").is_some(),"grants":grants,"limits":{"budget":budget,"rpm":row.get::<Option<i64>,_>("rpm_limit"),"tpm":row.get::<Option<i64>,_>("tpm_limit"),"count_rpm":row.get::<Option<i64>,_>("count_rpm_limit")}},"inference_safety":{"paused":paused.is_some(),"version":row.get::<i64,_>("inference_safety_version").to_string(),"reason":paused,"paused_at":null,"trigger_request_id":row.get::<Option<Uuid>,_>("inference_pause_request_id")},"block_state":block,"effective_grants":effective});
     let paused_at: Option<String> = sqlx::query_scalar(&format!(
         "SELECT {} FROM gw_principals WHERE id=$1",
@@ -649,7 +652,6 @@ pub(crate) async fn principal(
         scope,
         None,
         &version,
-        &timezone,
         &mode,
         limit.as_deref(),
         &p["block_state"],
@@ -691,7 +693,6 @@ async fn balance(
     scope: Uuid,
     key: Option<Uuid>,
     version: &str,
-    tz: &str,
     mode: &str,
     limit: Option<&str>,
     block: &Value,
@@ -700,14 +701,13 @@ async fn balance(
     extra: Vec<&str>,
 ) -> Result<Value, QueryError> {
     let sql = format!(
-        "WITH period AS(SELECT date_trunc('month',$2::timestamptz AT TIME ZONE $3) AT TIME ZONE $3 AS start,(date_trunc('month',$2::timestamptz AT TIME ZONE $3)+interval '1 month') AT TIME ZONE $3 AS finish) SELECT {} AS start,{} AS finish,COALESCE(t.cost_usd,0)::numeric(38,12)::text AS cost,COALESCE(t.reserved_usd,0)::numeric(38,12)::text AS reserved,COALESCE(t.unknown_count,0)::text AS unknown,CASE WHEN $4::numeric IS NULL THEN NULL ELSE greatest($4::numeric-COALESCE(t.cost_usd,0)-CASE WHEN $5='reserved' THEN COALESCE(t.reserved_usd,0) ELSE 0 END,0)::numeric(38,12)::text END AS remaining FROM period LEFT JOIN gw_usage_totals t ON t.scope_id=$1 AND t.period_start=period.start",
+        "WITH period AS(SELECT period_start AS start,period_end AS finish,timezone FROM gw_budget_period($2::timestamptz)) SELECT {} AS start,{} AS finish,period.timezone,COALESCE(t.cost_usd,0)::numeric(38,12)::text AS cost,COALESCE(t.reserved_usd,0)::numeric(38,12)::text AS reserved,COALESCE(t.unknown_count,0)::text AS unknown,CASE WHEN $3::numeric IS NULL THEN NULL ELSE greatest($3::numeric-COALESCE(t.cost_usd,0)-CASE WHEN $4='reserved' THEN COALESCE(t.reserved_usd,0) ELSE 0 END,0)::numeric(38,12)::text END AS remaining FROM period LEFT JOIN gw_usage_totals t ON t.scope_id=$1 AND t.period_start=period.start",
         stamp_sql("period.start"),
         stamp_sql("period.finish")
     );
     let row = sqlx::query(&sql)
         .bind(scope)
         .bind(now)
-        .bind(tz)
         .bind(limit)
         .bind(mode)
         .fetch_one(c)
@@ -723,7 +723,7 @@ async fn balance(
         reasons.push(json!("budget_exhausted"));
     }
     Ok(
-        json!({"scope_id":scope,"scope_kind":if key.is_some(){"key"}else{"principal"},"key_id":key,"period_start":row.get::<String,_>("start"),"period_end":row.get::<String,_>("finish"),"timezone":tz,"policy_version":version,"config_digest":digest,"mode":mode,"limit_usd":limit,"settled_usd":row.get::<String,_>("cost"),"reserved_usd":row.get::<String,_>("reserved"),"scope_unknown_count":row.get::<String,_>("unknown"),"principal_unknown_count":block["global_unknown_count"],"balance_state":if unresolved{"unresolved"}else if limit.is_none(){"unlimited"}else{"limited"},"remaining_usd":if unresolved {None}else{remaining},"blocked":!reasons.is_empty(),"reasons":reasons,"as_of":now}),
+        json!({"scope_id":scope,"scope_kind":if key.is_some(){"key"}else{"principal"},"key_id":key,"period_start":row.get::<String,_>("start"),"period_end":row.get::<String,_>("finish"),"timezone":row.get::<String,_>("timezone"),"policy_version":version,"config_digest":digest,"mode":mode,"limit_usd":limit,"settled_usd":row.get::<String,_>("cost"),"reserved_usd":row.get::<String,_>("reserved"),"scope_unknown_count":row.get::<String,_>("unknown"),"principal_unknown_count":block["global_unknown_count"],"balance_state":if unresolved{"unresolved"}else if limit.is_none(){"unlimited"}else{"limited"},"remaining_usd":if unresolved {None}else{remaining},"blocked":!reasons.is_empty(),"reasons":reasons,"as_of":now}),
     )
 }
 pub(crate) async fn key_balance(
@@ -747,7 +747,6 @@ pub(crate) async fn key_balance(
         row.get("id"),
         Some(key),
         &row.get::<i64, _>("version").to_string(),
-        &row.get::<String, _>("period_timezone"),
         &row.get::<String, _>("budget_mode"),
         row.get::<Option<String>, _>("budget").as_deref(),
         &p["block_state"],
@@ -768,17 +767,13 @@ pub(crate) async fn apply_balance_ceiling(
         .as_str()
         .ok_or(QueryError::Invariant)?
         .to_owned();
-    let tz = balance["timezone"]
-        .as_str()
-        .ok_or(QueryError::Invariant)?
-        .to_owned();
     let stored = PolicyLimits {
         budget: balance["limit_usd"].as_str().map(|s| BudgetLimit {
             mode: mode.clone(),
             limit_usd: s.into(),
             period: BudgetPeriod {
                 kind: "calendar_month".into(),
-                timezone: tz.clone(),
+                timezone: String::new(),
             },
         }),
         ..Default::default()
@@ -789,7 +784,7 @@ pub(crate) async fn apply_balance_ceiling(
             .as_ref()
             .ok()
             .and_then(|l| l.budget.as_ref())
-            .is_some_and(|b| b.mode != mode || b.period.timezone != tz);
+            .is_some_and(|b| b.mode != mode);
     if conflict {
         balance["balance_state"] = json!("unresolved");
         balance["remaining_usd"] = Value::Null;

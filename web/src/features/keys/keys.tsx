@@ -2,7 +2,7 @@ import { useId, useEffect, useLayoutEffect, useRef, useState, useSyncExternalSto
 import { useTranslation } from 'react-i18next';
 import { ApiError, session, StaleResponse } from '../../lib/api';
 import i18n, { msgid } from '../../lib/i18n';
-import type { Grant, IssuedKey, KeyCredential, KeyMetadata, Limits, Page, Validity } from '../../lib/types';
+import type { AuthorizedCredentials, Grant, IssuedKey, KeyCredential, KeyMetadata, Limits, Page, Validity } from '../../lib/types';
 import type { CredentialList, CredentialMeta } from '../admin/types';
 import { credentialLabel, providerNames } from '../admin/credentials';
 import { Badge, Select } from '../../ui/ui';
@@ -26,7 +26,16 @@ type IssueInput = { name: string; validity: Validity; grants: Grant[]; limits: L
 type Confirmation = { kind: 'issue'; input: IssueInput } | { kind: 'revoke'; key: KeyMetadata };
 type Recovery = { commandId: string; kind: 'issue' | 'revoke'; keyId?: string };
 const durationName = (value: Validity) => durations.find(([key]) => key === value)?.[1] ?? value;
-export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipal?: { id: string; service: boolean; grants: Grant[] }; adminAll?: boolean } = {}) {
+/** 발급 폼에서 고를 회사 키 하나. */
+type CompanyKey = { id: string; label: string; hint: string; default: boolean };
+/** 예산 기간의 기준 시간대 안내. 시간대는 관리자 설정 하나로 정하고 키·정책마다 따로 두지 않는다. */
+export function BudgetTimezoneNote() {
+  const { t } = useTranslation();
+  const tz = useSyncExternalStore(session.subscribe, session.snapshot).me?.budget_timezone;
+  if (!tz) return null;
+  return <p className="meta">{t('월 예산 기준 시간대: {{timezone}} (관리자 설정). 이번 기간: {{start}} ~ {{end}}', { timezone: tz.timezone, start: tz.period_start, end: tz.period_end })}{tz.pending && <> · {t('{{at}}부터 {{timezone}} 기준으로 바뀝니다.', { at: tz.pending.effective_from, timezone: tz.pending.timezone })}</>}</p>;
+}
+export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipal?: { id: string; service: boolean; grants: Grant[]; authorized?: AuthorizedCredentials }; adminAll?: boolean } = {}) {
   const { t } = useTranslation();
   const prefix = useId(), isAdmin = !!adminPrincipal || adminAll;
   const listUrl = adminPrincipal ? `/api/admin/keys?principal_id=${encodeURIComponent(adminPrincipal.id)}` : adminAll ? '/api/admin/keys' : '/api/keys';
@@ -39,7 +48,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
   const [secret, setSecret] = useState<{ value: string; epoch: number } | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [recovery, setRecovery] = useState<Recovery | null>(null);
-  // 관리자만 회사 키 목록을 읽어 발급 때 고르거나 연결을 바꾼다. 일반 사용자 키는 기본 키에 연결된다.
+  // 관리자는 회사 키 목록 전체를 읽어 발급 때 고르거나 연결을 바꾼다.
+  // 일반 사용자는 자기에게 인가된 회사 키 안에서 고른다. 인가가 없으면 그 Provider의 기본 키에 연결된다.
   const [companyKeys, setCompanyKeys] = useState<CredentialList | null>(null), [rebinding, setRebinding] = useState<string | null>(null);
   const canChoose = auth.me?.role === 'admin';
   const mounted = useRef(true), lock = useRef(false);
@@ -70,7 +80,14 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
     return () => { current = false; };
     // 회사 키 목록은 키 목록을 다시 읽을 때마다 바뀌지 않으므로 화면을 열 때 한 번만 읽는다.
   }, [canChoose]);
-  const choices = (companyKeys?.providers ?? []).filter(p => p.credentials.length > 1);
+  // 키 주인에게 인가된 회사 키. 서비스 키는 그 서비스의 인가, 개인 키는 본인의 인가다.
+  const authorized: AuthorizedCredentials = adminPrincipal ? adminPrincipal.authorized ?? [] : auth.me?.provider_credentials ?? [];
+  // 고를 수 있는 회사 키: 인가가 있는 Provider는 인가된 키만, 없는 Provider는 관리자만 전체에서 고른다.
+  // 하나뿐이어도 보여 준다(어느 회사 키에 연결되는지 알 수 있게). 그때는 고를 수 없게 막는다.
+  const choices: { provider: string; options: CompanyKey[] }[] = [
+    ...authorized.map(a => ({ provider: a.provider, options: a.credentials })),
+    ...(canChoose ? (companyKeys?.providers ?? []).filter(p => !authorized.some(a => a.provider === p.provider)).map(p => ({ provider: p.provider, options: p.credentials.map(c => ({ id: c.id, label: c.label, hint: c.hint, default: c.default })) })) : []),
+  ].filter(p => p.options.length > 0);
   const credentialsOf = (provider: string): CredentialMeta[] => companyKeys?.providers.find(p => p.provider === provider)?.credentials ?? [];
   const reload = () => { setQuery(''); setStatus(''); setRevision(v => v + 1); };
   const prepare = (event: FormEvent<HTMLFormElement>) => {
@@ -91,9 +108,9 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
     const amount = String(data.get('budget') ?? '');
     if (amount) {
       if (!/^(0|[1-9][0-9]{0,15})\.[0-9]{12}$/.test(amount)) { setError(i18n.t('예산은 소수점 12자리 USD 문자열로 입력하세요.')); return; }
-      limits.budget = { mode: data.get('mode') === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month', timezone: String(data.get('timezone') ?? '') } };
+      limits.budget = { mode: data.get('mode') === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month' } };
     }
-    const chosen = Object.fromEntries(choices.map(p => [p.provider, String(data.get(`credential:${p.provider}`) ?? '')]).filter(([, id]) => id));
+    const chosen = Object.fromEntries(choices.filter(p => p.options.length > 1).map(p => [p.provider, String(data.get(`credential:${p.provider}`) ?? '')]).filter(([, id]) => id));
     setConfirmation({ kind: 'issue', input: { name, validity: validity as Validity, grants, limits, ...(Object.keys(chosen).length ? { provider_credentials: chosen } : {}) } });
   };
   const execute = async () => {
@@ -120,6 +137,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
       if (!current() || e instanceof StaleResponse) return;
       if (e instanceof ApiError && e.code === 'version_conflict') {
         setRecovery(null); setError(i18n.t('버전이 변경되었습니다. 다시 조회한 상태를 확인하고 회수를 새로 선택하세요.')); reload();
+      } else if (e instanceof ApiError && e.code === 'provider_credential_not_authorized') {
+        setRecovery(null); setError(i18n.t('고른 회사 키를 쓸 수 있는 인가가 없습니다. 쓰기는 재전송하지 않았습니다.')); reload();
       } else if (e instanceof ApiError && ['invalid_request', 'csrf_invalid', 'origin_denied', 'unsupported_media_type', 'access_denied', 'key_quota_exceeded', 'resource_not_found'].includes(e.code)) {
         setRecovery(null); setError(i18n.t('요청이 거부되었습니다. 현재 권한·입력·키 개수를 확인하고 다시 내용을 확인하세요. 쓰기는 재전송하지 않았습니다.')); reload();
       } else {
@@ -140,7 +159,9 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
       setNotice(i18n.t('{{name}} 키의 회사 키를 {{label}}로 바꿨습니다.', { name: key.name, label: target ? credentialLabel(target) : to }));
     } catch (e) {
       if (e instanceof StaleResponse) return;
-      setError(i18n.t('회사 키 연결을 바꾸지 못했습니다. 목록을 다시 조회했습니다. 명령 ID: {{id}}', { id: commandId }));
+      setError(e instanceof ApiError && e.code === 'provider_credential_not_authorized'
+        ? i18n.t('이 키 주인에게 인가되지 않은 회사 키입니다. 사용자 상세의 회사 키 인가를 먼저 바꾸세요. 명령 ID: {{id}}', { id: commandId })
+        : i18n.t('회사 키 연결을 바꾸지 못했습니다. 목록을 다시 조회했습니다. 명령 ID: {{id}}', { id: commandId }));
     } finally { lock.current = false; setBusy(false); setRebinding(null); reload(); }
   };
   if (auth.status !== 'ready') return null;
@@ -158,18 +179,18 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
           <div className="field"><label htmlFor={`${prefix}-key-validity`}>{t('유효기간')}</label><Select id={`${prefix}-key-validity`} name="validity" defaultValue="" required><option value="" disabled>{t('선택하세요')}</option>{durations.map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}</Select></div>
         </div>
         <fieldset className="stack-sm"><legend>{t('허용할 API (미선택 시 허용 API 없음)')}</legend><div className="checks">{(availableGrants ?? auth.me?.grants ?? []).flatMap((g, gi) => g.capabilities.map((cap, ci) => <label key={`${gi}:${ci}`}><input type="checkbox" name="grant" value={`${gi}:${ci}`} />{g.provider} / {g.model} / {cap}</label>))}</div></fieldset>
-        {choices.length > 0 && <div className="form-grid">{choices.map(p => <div key={p.provider} className="field"><label htmlFor={`${prefix}-credential-${p.provider}`}>{t('{{provider}} 회사 키', { provider: providerNames[p.provider] ?? p.provider })}</label><Select id={`${prefix}-credential-${p.provider}`} name={`credential:${p.provider}`} defaultValue={p.credentials.find(c => c.default)?.id ?? ''}>{p.credentials.map(c => <option key={c.id} value={c.id}>{credentialLabel(c)}{c.default ? ` · ${t('기본 키')}` : ''}</option>)}</Select></div>)}</div>}
+        {choices.length > 0 && <div className="form-grid">{choices.map(p => <div key={p.provider} className="field"><label htmlFor={`${prefix}-credential-${p.provider}`}>{t('{{provider}} 회사 키', { provider: providerNames[p.provider] ?? p.provider })}</label><Select id={`${prefix}-credential-${p.provider}`} name={`credential:${p.provider}`} disabled={p.options.length < 2} defaultValue={p.options.find(c => c.default)?.id ?? p.options[0].id}>{p.options.map(c => <option key={c.id} value={c.id}>{credentialLabel(c)}{c.default ? ` · ${t('기본 키')}` : ''}</option>)}</Select></div>)}</div>}
         <p className="meta">{t('빈 한도는 서버의 실행 상한으로 정규화됩니다. 현재 정책을 우회하지 않습니다.')}</p>
         <div className="form-grid">
           <label>{t('예산 USD (소수점 12자리)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} placeholder="0.000000000000" /></label>
           <div className="field"><label htmlFor={`${prefix}-key-budget-mode`}>{t('예산 모드')}</label><Select id={`${prefix}-key-budget-mode`} name="mode" defaultValue="actual"><option value="actual">{t('실사용량 (하드캡 아님)')}</option><option value="reserved">{t('예약 기반')}</option></Select></div>
-          <label>{t('예산 timezone (IANA)')}<input name="timezone" className="mono" spellCheck={false} defaultValue="UTC" /></label>
           <label>{t('생성 RPM')}<input name="rpm" className="mono" inputMode="numeric" /></label><label>{t('생성 TPM')}<input name="tpm" className="mono" inputMode="numeric" /></label><label>Count RPM<input name="count_rpm" className="mono" inputMode="numeric" /></label>
         </div>
+        <BudgetTimezoneNote />
         <div className="actions"><button type="submit" className="btn-primary">{t('발급 내용 확인')}</button></div>
       </fieldset>
     </form>}
-    {confirmation && <section role="region" aria-label={t('쓰기 확인')} className={confirmation.kind === 'revoke' ? 'confirm confirm-danger' : 'confirm'}><h3>{confirmation.kind === 'issue' ? t('발급 확인') : t('회수 확인')}</h3>{confirmation.kind === 'issue' ? <><p>{confirmation.input.name} · {t(durationName(confirmation.input.validity))}</p><pre>{JSON.stringify({ grants: confirmation.input.grants, limits: confirmation.input.limits }, null, 2)}</pre>{confirmation.input.provider_credentials && <p>{t('회사 키')}: {Object.entries(confirmation.input.provider_credentials).map(([provider, id]) => { const c = credentialsOf(provider).find(x => x.id === id); return `${providerNames[provider] ?? provider} · ${c ? credentialLabel(c) : id}`; }).join(', ')}</p>}<p className="meta">{t('만료일과 실효 상한은 서버가 계산합니다.')}</p></> : <p>{t('{{name}} · {{id}} · version {{version}} 키를 회수합니다. 되돌릴 수 없습니다.', { name: confirmation.key.name, id: confirmation.key.id, version: confirmation.key.version })}</p>}<div className="actions"><button autoFocus className={confirmation.kind === 'revoke' ? 'btn-danger' : 'btn-primary'} disabled={busy} onClick={() => void execute()}>{confirmation.kind === 'issue' ? t('발급 확인') : t('회수 확인')}</button><button className="btn-quiet" onClick={() => setConfirmation(null)}>{t('취소')}</button></div></section>}
+    {confirmation && <section role="region" aria-label={t('쓰기 확인')} className={confirmation.kind === 'revoke' ? 'confirm confirm-danger' : 'confirm'}><h3>{confirmation.kind === 'issue' ? t('발급 확인') : t('회수 확인')}</h3>{confirmation.kind === 'issue' ? <><p>{confirmation.input.name} · {t(durationName(confirmation.input.validity))}</p><pre>{JSON.stringify({ grants: confirmation.input.grants, limits: confirmation.input.limits }, null, 2)}</pre>{confirmation.input.provider_credentials && <p>{t('회사 키')}: {Object.entries(confirmation.input.provider_credentials).map(([provider, id]) => { const c = choices.find(p => p.provider === provider)?.options.find(x => x.id === id); return `${providerNames[provider] ?? provider} · ${c ? credentialLabel(c) : id}`; }).join(', ')}</p>}<p className="meta">{t('만료일과 실효 상한은 서버가 계산합니다.')}</p></> : <p>{t('{{name}} · {{id}} · version {{version}} 키를 회수합니다. 되돌릴 수 없습니다.', { name: confirmation.key.name, id: confirmation.key.id, version: confirmation.key.version })}</p>}<div className="actions"><button autoFocus className={confirmation.kind === 'revoke' ? 'btn-danger' : 'btn-primary'} disabled={busy} onClick={() => void execute()}>{confirmation.kind === 'issue' ? t('발급 확인') : t('회수 확인')}</button><button className="btn-quiet" onClick={() => setConfirmation(null)}>{t('취소')}</button></div></section>}
     <div className="stack">
       <form aria-label={t('키 조회')} className="filters" onSubmit={e => { e.preventDefault(); setQuery(status ? `status=${status}` : ''); setRevision(v => v + 1); }}><div className="field"><label htmlFor={`${prefix}-key-status`}>{t('키 상태')}</label><Select id={`${prefix}-key-status`} value={status} onChange={e => setStatus(e.target.value)}><option value="">{t('전체')}</option><option value="active">{t('활성')}</option><option value="revoked">{t('회수')}</option><option value="expired">{t('만료')}</option></Select></div><div className="actions"><button disabled={loading || busy}>{t('키 조회')}</button></div></form>
       {loading && <p role="status">{t('키 목록 조회 중…')}</p>}{page && <><p className="meta">{t('목록 관측 시각')}: <span className="mono">{page.as_of}</span></p>{!page.items.length && <p className="empty">{t('키가 없습니다.')}</p>}{page.items.length > 0 && <ul className="list list-block">{page.items.map(key => <li key={key.id}>
@@ -179,6 +200,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false }: { adminPrincipa
         <p className="meta">{t('발급 명령: {{id}}', { id: key.created_command_id })}</p>
         <div className="stack-sm" aria-label={t('{{name}} 회사 키 연결', { name: key.name })}>{(key.provider_credentials ?? []).length === 0 ? <p className="meta">{t('회사 키: 각 Provider의 기본 키')}</p> : (key.provider_credentials ?? []).map(b => <div key={b.provider} className="row">
           <span className="meta">{t('회사 키')}: {providerNames[b.provider] ?? b.provider} · {credentialLabel(b)}{b.state === 'retired' && <> <Badge tone="neutral">{t('해제됨')}</Badge></>}</span>
+          {b.authorized === false && !key.revoked_at && <><Badge tone="critical">{t('인가 해제됨')}</Badge><span className="text-critical">{t('이 회사 키의 사용 인가가 해제돼 이 키로 보내는 {{provider}} 요청은 거절됩니다.', { provider: providerNames[b.provider] ?? b.provider })}{isAdmin ? ` ${t('회사 키 변경으로 인가된 키에 연결하세요.')}` : ` ${t('관리자에게 문의하거나 새 키를 발급하세요.')}`}</span></>}
           {isAdmin && !key.revoked_at && b.state === 'active' && credentialsOf(b.provider).length > 1 && (rebinding === `${key.id}:${b.provider}`
             ? <form className="row" aria-label={t('{{name}} 회사 키 변경', { name: key.name })} onSubmit={e => { e.preventDefault(); void rebind(key, b, String(new FormData(e.currentTarget).get('to') ?? '')); }}><Select name="to" aria-label={t('바꿀 회사 키')} defaultValue={b.credential_id}>{credentialsOf(b.provider).map(c => <option key={c.id} value={c.id}>{credentialLabel(c)}</option>)}</Select><button className="btn-sm btn-primary" disabled={busy}>{t('변경')}</button><button type="button" className="btn-sm btn-quiet" onClick={() => setRebinding(null)}>{t('취소')}</button></form>
             : <button className="btn-sm" disabled={busy || loading} onClick={() => setRebinding(`${key.id}:${b.provider}`)}>{t('회사 키 변경')}</button>)}

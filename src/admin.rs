@@ -113,6 +113,15 @@ impl DashboardApi {
             )
             .route("/api/admin/keys", any(management::handle))
             .route("/api/admin/provider-credentials", any(management::handle))
+            .route(
+                "/api/admin/principals/{id}/provider-credentials",
+                any(management::handle),
+            )
+            .route("/api/admin/settings", any(management::handle))
+            .route(
+                "/api/admin/settings/budget-timezone",
+                any(management::handle),
+            )
             .route("/api/admin/model-catalog", any(management::handle))
             .route("/api/admin/model-catalog/sync", any(management::handle))
             .route("/api/admin/model-catalog/approve", any(management::handle))
@@ -177,8 +186,10 @@ async fn read(State(state): State<ApiState>, request: Request) -> Response {
             match state.api.store.dashboard_me(human.current.id,&grants,&state.api.digest).await {
                 Ok(mut principal)=>{
                     let grants=principal.as_object_mut().expect("principal object").remove("effective_grants").unwrap_or(json!([]));
+                    let budget_timezone=principal.as_object_mut().expect("principal object").remove("budget_timezone").unwrap_or(Value::Null);
+                    let provider_credentials=principal.as_object_mut().expect("principal object").remove("provider_credentials").unwrap_or(json!([]));
                     let Some(expires)=time::OffsetDateTime::from_unix_timestamp(human.identity.expires_at()).ok().and_then(|t|t.format(&time::format_description::well_known::Rfc3339).ok()) else { return query_error(QueryError::Invariant); };
-                    success(json!({"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}))
+                    success(json!({"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}))
                 },Err(error)=>query_error(error),
             }
         } else {

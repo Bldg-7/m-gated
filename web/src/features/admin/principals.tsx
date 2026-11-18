@@ -5,7 +5,8 @@ import { msgid } from '../../lib/i18n';
 import { Link, navigate, useRoute } from '../../lib/router';
 import type { Page, Grant, Limits } from '../../lib/types';
 import { Pill, Select, StatusBadge } from '../../ui/ui';
-import { KeysScreen } from '../keys/keys';
+import { BudgetTimezoneNote, KeysScreen } from '../keys/keys';
+import { CredentialAccess } from './access';
 import type { Policy, PrincipalDetail, PrincipalSummary } from './types';
 import { directId, fields, ReadState, useCommand, useResource } from './shared';
 /** 사용자 상세 하위 페이지 주소. */
@@ -82,7 +83,8 @@ function PrincipalEditor({ id }: { id: string }) {
       <section aria-label={t('자동 안전차단')} className={p.inference_safety.paused ? 'card card-critical' : 'card'}><h3>{t('자동 과금 안전차단')}</h3><p className="meta">{t('{{state}} · 안전 버전 {{version}} · 사유 {{reason}} · 시각 {{at}} · 원인 요청 {{request}}', { state: p.inference_safety.paused ? t('차단 중') : t('해제 상태'), version: p.inference_safety.version, reason: p.inference_safety.reason ?? t('없음'), at: p.inference_safety.paused_at ?? t('없음'), request: p.inference_safety.trigger_request_id ?? t('없음') })}</p><p className="meta">{t('별도 해제는 unknown·계정 정지·fence·예산·키 회수를 해제하지 않습니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/api/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>
     </div>
     <PolicyForm key={`policy-${p.policy.version}`} principalId={p.id} policy={p.policy} ceiling={detail.data!.execution_ceiling.grants} busy={command.busy} onSubmit={body => command.prepare({ label: msgid('정책 전체 교체 확인'), url: `/api/admin/principals/${p.id}/policy`, method: 'PUT', body })} onError={setFormError} />
-    <div className="card"><KeysScreen key={`${p.id}:${session.snapshot().epoch}`} adminPrincipal={{ id: p.id, service: p.kind === 'service', grants: p.policy.grants }} /></div>
+    <CredentialAccess principalId={p.id} authorized={p.provider_credentials ?? []} onChanged={async () => { await detail.reload(); }} />
+    <div className="card"><KeysScreen key={`${p.id}:${session.snapshot().epoch}:${JSON.stringify(p.provider_credentials ?? [])}`} adminPrincipal={{ id: p.id, service: p.kind === 'service', grants: p.policy.grants, authorized: p.provider_credentials ?? [] }} /></div>
   </>}</section>;
 }
 
@@ -126,7 +128,7 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
     if (budgetMode !== 'none') {
       const amount = toUsd(String(f.get('budget') ?? ''));
       if (!amount) { onError(t('월 예산은 USD 금액으로 입력하세요(예: 100 또는 12.5, 소수점 12자리까지).')); return; }
-      limits.budget = { mode: budgetMode === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month', timezone: String(f.get('timezone') ?? '').trim() } };
+      limits.budget = { mode: budgetMode === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month' } };
     }
     const body: Record<string, unknown> = { expected_version: policy.version, disabled: f.has('disabled'), grants, limits, reason: String(f.get('reason')) };
     if (f.has('fence_confirmed')) body.fence_release = { fence_ref: String(f.get('fence_ref')), old_processes_stopped_ref: String(f.get('stopped_ref')), confirmed: true };
@@ -145,12 +147,12 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
     <fieldset className="stack-sm"><legend>{t('한도')}</legend>
       <div className="form-grid">
         <div className="field"><label htmlFor="policy-budget-mode">{t('월 예산 방식')}</label><Select id="policy-budget-mode" value={budgetMode} onChange={e => setBudgetMode(e.target.value)}><option value="none">{t('예산 없음')}</option><option value="actual">{t('실사용량 (하드캡 아님)')}</option><option value="reserved">{t('예약 기반')}</option></Select></div>
-        {budgetMode !== 'none' && <><label>{t('월 예산 (USD)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} defaultValue={budget ? shortUsd(budget.limit_usd) : ''} required /></label>
-        <label>{t('예산 기준 시간대 (IANA)')}<input name="timezone" className="mono" spellCheck={false} defaultValue={budget?.period.timezone ?? 'Asia/Seoul'} required /></label></>}
+        {budgetMode !== 'none' && <label>{t('월 예산 (USD)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} defaultValue={budget ? shortUsd(budget.limit_usd) : ''} required /></label>}
         <label>{t('분당 요청 수 한도 (RPM)')}<input name="rpm" className="mono" inputMode="numeric" defaultValue={policy.limits.rpm ?? ''} placeholder={t('제한 없음')} /></label>
         <label>{t('분당 토큰 수 한도 (TPM)')}<input name="tpm" className="mono" inputMode="numeric" defaultValue={policy.limits.tpm ?? ''} placeholder={t('제한 없음')} /></label>
         <label>{t('분당 토큰 계산 요청 수 한도 (Count RPM)')}<input name="count_rpm" className="mono" inputMode="numeric" defaultValue={policy.limits.count_rpm ?? ''} placeholder={t('제한 없음')} /></label>
       </div>
+      {budgetMode !== 'none' && <BudgetTimezoneNote />}
     </fieldset>
     <label>{t('정책 변경 사유')}<input name="reason" required maxLength={1000} /></label>
     <details><summary>{t('보안 설정 fence 해제 진술')}</summary><div className="stack"><p className="meta">{t('fence 설정 사유는 security_config_fence:승인참조입니다. 구 프로세스 종료 확인 전 해제하지 마세요.')}</p><label>{t('Fence 참조')}<input name="fence_ref" className="mono" spellCheck={false} /></label><label>{t('구 프로세스 종료 확인 참조')}<input name="stopped_ref" className="mono" spellCheck={false} /></label><label className="attest"><input name="fence_confirmed" type="checkbox" />{t('구 설정 프로세스 종료를 확인했습니다')}</label></div></details>

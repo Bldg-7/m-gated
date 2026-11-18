@@ -127,7 +127,7 @@ try{
  console.log('DB_SSL_MODE_REQUIRE_ENCRYPTS_WITHOUT_VERIFY_AND_NEVER_PLAINTEXT_OK');
  writeFileSync(join(directory,'config.yaml'),config.replace('host: 127.0.0.1','host: localhost'));
  app=start();await waitStatus('/readyz',200);assert.equal((await get('/livez')).status,200);assert.equal((await get('/dashboard/')).status,200);
- const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5','6','7','8']);
+ const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5','6','7','8','9']);
  const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'key1'})).toString('base64url');const payload=Buffer.from(JSON.stringify({iss:'https://auth.example.test',aud:'https://example.test',sub:'main-human',email:'alice@example.test',email_verified:true,exp:Math.floor(Date.now()/1000)+7200,name:'Synthetic main'})).toString('base64url');const signed=`${header}.${payload}`;const signature=createSign('RSA-SHA256').update(signed).sign(keys.privateKey).toString('base64url');const cookie=`mgated_access=${signed}.${signature}`;
  assert.equal((await get('/api/me',{cookie})).status,200);assert.equal((await get('/api/usage?group_by=provider',{cookie})).status,200);
  // 회사 키 미등록: ready는 유지하고(관리자가 등록할 수 있게) 추론만 장부 행 없이 503으로 거절한다.
@@ -220,7 +220,7 @@ try{
         rates:
           input: '0.000000000000'
 execution_ceiling:
-  budget: {mode: reserved, limit_usd: '1.000000000000', period: {kind: calendar_month, timezone: UTC}}
+  budget: {mode: reserved, limit_usd: '1.000000000000', period: {kind: calendar_month}}
   rpm: 5
   tpm: 5000
   count_rpm: 5
@@ -476,7 +476,7 @@ execution_ceiling:
  const unknownConfig=s8Config.replace("budget: {mode: reserved,", "budget: {mode: actual,").replace('  tpm: 10000','  tpm: null').replace('billing_time_rule: fixed_admission_v1','billing_time_rule: deepseek_time_unresolved_v1');writeFileSync(join(directory,'config.yaml'),unknownConfig);await db.query(`UPDATE ${schema}.gw_policies SET budget_mode='actual' WHERE principal_id=$1`,[did]);app=start();await waitStatus('/readyz',200);
  const unknownResponse=await fetch('http://127.0.0.1:4000/deepseek/v1/chat/completions',{method:'POST',headers:{authorization:`Bearer ${dt}`,'content-type':'application/json'},body:JSON.stringify({model:'synthetic-text',messages:[{role:'user',content:'synthetic time unknown'}],max_tokens:100}),signal:AbortSignal.timeout(10000)});assert.equal(unknownResponse.status,200);const unknownId=unknownResponse.headers.get('x-gateway-request-id');assert.equal((await unknownResponse.json()).usage.total_tokens,120);await finalized(unknownId);
  const unresolved=await db.query(`SELECT r.accounting_state,r.cost_usd,r.pricing_snapshot->>'billing_time_rule' AS time,b.remaining_reserved_tokens::text FROM ${schema}.gw_requests r JOIN ${schema}.gw_request_budgets b ON b.request_id=r.id WHERE r.id=$1`,[unknownId]);assert.deepEqual(unresolved.rows.map(r=>Object.values(r)),[['unknown',null,'deepseek_time_unresolved_v1','4196']]);
- const s8Issued=await fetch('http://127.0.0.1:4000/api/keys',{method:'POST',headers:{authorization:`Bearer ${dt}`,'content-type':'application/json','x-gateway-command-id':randomUUID()},body:JSON.stringify({name:'Synthetic S8 blocked key',validity:'3_months',grants:dsGrants,limits:{budget:{mode:'actual',limit_usd:'1.000000000000',period:{kind:'calendar_month',timezone:'UTC'}},rpm:null,tpm:null,count_rpm:null}})});assert.equal(s8Issued.status,201);const blockedKey=(await s8Issued.json()).key;
+ const s8Issued=await fetch('http://127.0.0.1:4000/api/keys',{method:'POST',headers:{authorization:`Bearer ${dt}`,'content-type':'application/json','x-gateway-command-id':randomUUID()},body:JSON.stringify({name:'Synthetic S8 blocked key',validity:'3_months',grants:dsGrants,limits:{budget:{mode:'actual',limit_usd:'1.000000000000',period:{kind:'calendar_month'}},rpm:null,tpm:null,count_rpm:null}})});assert.equal(s8Issued.status,201);const blockedKey=(await s8Issued.json()).key;
  const s8BeforeFreeCount=providerCalls;let probeOrdinal=0;
  for(const [path,token,body] of [['/deepseek/v1/chat/completions',blockedKey,{model:'synthetic-text',messages:[{role:'user',content:'synthetic blocked'}],max_tokens:100}],['/openai/v1/chat/completions',blockedKey,{model:'synthetic-text',messages:[{role:'user',content:'synthetic blocked'}],max_completion_tokens:100}],['/anthropic/v1/messages',dt,{model:'synthetic-text',messages:[{role:'user',content:'synthetic blocked'}],max_tokens:100}]]){const r=await fetch(`http://127.0.0.1:4000${path}`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','anthropic-version':'2023-06-01'},body:JSON.stringify(body)});probeOrdinal++;if(r.status!==403){const code=r.headers.get('x-gateway-error-code');console.log(`S8_PROBE_DIAGNOSTIC ordinal=${probeOrdinal} status=${r.status} code=${['rate_limited','concurrency_limited','unsupported_strict_policy','access_denied','unsettled_usage_block'].includes(code)?code:'other'}`);}assert.equal(r.status,403);assert.equal(r.headers.get('x-gateway-error-code'),'unsettled_usage_block');await r.arrayBuffer();}
  assert.equal(providerCalls-s8BeforeFreeCount,1); // 마지막 Anthropic부모만미송신이고독립무료count1은정상이다.
@@ -500,7 +500,7 @@ execution_ceiling:
  failJwks=true;readySignal=new Promise(r=>{readyResolve=r;});app=start();await bounded(readySignal,8000,'bounded initial JWKS request');await waitStatus('/readyz',503);assert.equal((await get('/livez')).status,200);assert.equal((await get('/api/me',{cookie})).status,503);
  failJwks=false;await waitStatus('/readyz',200,20000);assert.equal((await get('/api/me',{cookie})).status,200);assert(calls>=3);await stop();
  await db.query(`ALTER TABLE ${schema}.gw_usage_events RENAME TO gw_hidden_usage_events`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`ALTER TABLE ${schema}.gw_hidden_usage_events RENAME TO gw_usage_events`);
- await db.query(`INSERT INTO ${schema}.gw_schema_migrations(version,checksum) VALUES(9,decode(repeat('00',32),'hex'))`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`DELETE FROM ${schema}.gw_schema_migrations WHERE version=9`);
+ await db.query(`INSERT INTO ${schema}.gw_schema_migrations(version,checksum) VALUES(10,decode(repeat('00',32),'hex'))`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;await db.query(`DELETE FROM ${schema}.gw_schema_migrations WHERE version=9`);
  await db.query(`UPDATE ${schema}.gw_schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=2`);app=start();result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;
  console.log('U0_ACTUAL_MAIN_TLS_MIGRATION_HEALTH_OK');
 }finally{

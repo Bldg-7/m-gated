@@ -762,7 +762,7 @@ async fn handoff_import_is_atomic_idempotent_and_rollback_keeps_unknown_reservat
     let target = finance::human(database.pool()).await;
     let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
     let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
-    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month","timezone":"UTC"}},"rpm":null,"tpm":5000,"count_rpm":null});
+    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":5000,"count_rpm":null});
     let ctx = CommandContext {
         actor,
         command_id: uuid::Uuid::new_v4(),
@@ -1052,7 +1052,7 @@ async fn handoff_unknown_key_fixture(alarm_fault: Option<bool>, historical: bool
     sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=10,tpm_limit=5000 WHERE principal_id=$1").bind(old_user).execute(old_clock.pool()).await.unwrap();
     let old_ledger = PgLedger::new(old_clock.clone(), settings.clone(), [1; 32]);
     let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
-    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month","timezone":"UTC"}},"rpm":null,"tpm":5000,"count_rpm":null});
+    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":5000,"count_rpm":null});
     let old_ctx = CommandContext {
         actor: old_user,
         command_id: uuid::Uuid::new_v4(),
@@ -1596,7 +1596,7 @@ async fn handoff_detail_fixture(remove_budget: bool, carried: bool, zero: bool) 
     let admin = finance::human(old_clock.pool()).await;
     let old_ledger = PgLedger::new(old_clock.clone(), settings.clone(), [1; 32]);
     let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
-    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month","timezone":if remove_budget {"Asia/Seoul"} else {"UTC"}}},"rpm":null,"tpm":null,"count_rpm":null});
+    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":null,"count_rpm":null});
     let ctx = CommandContext {
         actor: admin,
         command_id: uuid::Uuid::new_v4(),
@@ -1609,6 +1609,14 @@ async fn handoff_detail_fixture(remove_budget: bool, carried: bool, zero: bool) 
         execution_running: false,
     };
     old_ledger.management_command(&ctx,Command::Policy(owner,serde_json::from_value(serde_json::json!({"expected_version":"1","disabled":false,"grants":grants,"limits":limits,"reason":"원래 기간 설정"})).unwrap())).await.unwrap();
+    // 0.9.0 이전에 정책마다 시간대를 두던 정책을 흉내 낸다. 이 값은 이전(handoff)에서 그대로 옮겨져야 한다.
+    if remove_budget {
+        sqlx::query("UPDATE gw_policies SET period_timezone='Asia/Seoul' WHERE principal_id=$1 AND key_id IS NULL")
+            .bind(owner)
+            .execute(old_clock.pool())
+            .await
+            .unwrap();
+    }
     let current = finance::current(old_clock.pool(), owner).await;
     let spec = s4::strict_specification();
     old_ledger.admit_request(&current, &spec).await.unwrap();
@@ -1963,7 +1971,7 @@ async fn two_migrators_serialize_and_actual_advisory30s_total120s_fail_closed() 
     let clean = db.store.migrate().await.is_ok();
     db.close().await;
     assert!(timed_out && elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(35));
-    assert!(one.is_ok() && two.is_ok() && count == 8);
+    assert!(one.is_ok() && two.is_ok() && count == 9);
     assert!(
         reached
             && total_timeout.is_err()

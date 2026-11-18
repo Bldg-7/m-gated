@@ -97,7 +97,7 @@ pub(crate) async fn key_metadata(c: &mut PgConnection, id: Uuid) -> Result<Value
     )
 }
 pub(crate) fn limits(row: &sqlx::postgres::PgRow) -> Value {
-    json!({"budget":row.get::<Option<String>,_>("budget").map(|n|json!({"mode":row.get::<String,_>("budget_mode"),"limit_usd":n,"period":{"kind":"calendar_month","timezone":row.get::<String,_>("period_timezone")}})),"rpm":row.get::<Option<i64>,_>("rpm_limit"),"tpm":row.get::<Option<i64>,_>("tpm_limit"),"count_rpm":row.get::<Option<i64>,_>("count_rpm_limit")})
+    json!({"budget":row.get::<Option<String>,_>("budget").map(|n|json!({"mode":row.get::<String,_>("budget_mode"),"limit_usd":n,"period":{"kind":"calendar_month"}})),"rpm":row.get::<Option<i64>,_>("rpm_limit"),"tpm":row.get::<Option<i64>,_>("tpm_limit"),"count_rpm":row.get::<Option<i64>,_>("count_rpm_limit")})
 }
 pub(crate) async fn principal(
     c: &mut PgConnection,
@@ -543,13 +543,33 @@ impl PgIdentityStore {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ManagementError::Database)?;
-        tokio::time::timeout(std::time::Duration::from_secs(3),async{
-            let mut tx=self.begin_transaction().await?;sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
-            management::check_actor(&mut tx,ctx.actor,ctx.settings,true).await?;
-            let value=if resource=="principals"{json!({"principal":principal(&mut tx,id,ctx.grants,ctx.digest,ctx.settings).await?,"execution_ceiling":{"grants":ctx.grants,"limits":ceiling}})}else{request_detail(&mut tx,id,true).await?};
-            if serde_json::to_vec(&value).map_err(|_|ManagementError::Invariant)?.len()>1024*1024{return Err(ManagementError::Invariant);}
-            tx.commit().await?;Ok(value)
-        }).await.map_err(|_|ManagementError::Database)?
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut tx = self.begin_transaction().await?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *tx)
+                .await?;
+            management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
+            let value = if resource == "principals" {
+                let mut p = principal(&mut tx, id, ctx.grants, ctx.digest, ctx.settings).await?;
+                // 이 사용자가 쓸 수 있는 회사 키(인가). 인가가 없는 Provider는 그 Provider의 기본 키를 쓴다.
+                p["provider_credentials"] =
+                    super::credentials::principal_authorization(&mut tx, id).await?;
+                json!({"principal":p,"execution_ceiling":{"grants":ctx.grants,"limits":ceiling}})
+            } else {
+                request_detail(&mut tx, id, true).await?
+            };
+            if serde_json::to_vec(&value)
+                .map_err(|_| ManagementError::Invariant)?
+                .len()
+                > 1024 * 1024
+            {
+                return Err(ManagementError::Invariant);
+            }
+            tx.commit().await?;
+            Ok(value)
+        })
+        .await
+        .map_err(|_| ManagementError::Database)?
     }
     pub async fn management_usage(
         &self,

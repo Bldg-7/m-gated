@@ -1145,7 +1145,7 @@ fn limits() -> serde_json::Value {
     serde_json::json!({"budget":null,"rpm":null,"tpm":null,"count_rpm":null})
 }
 async fn key(h: &Harness, service: Option<uuid::Uuid>) -> (String, uuid::Uuid) {
-    let mut input = serde_json::json!({"name":"합성 Responses key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month","timezone":"UTC"}},"rpm":null,"tpm":100000,"count_rpm":null}});
+    let mut input = serde_json::json!({"name":"합성 Responses key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":100000,"count_rpm":null}});
     if let Some(service) = service {
         input["service_principal_id"] = service.to_string().into();
     }

@@ -29,7 +29,7 @@ async fn insert_policy(
     limits: &PolicyLimits,
     actor: Uuid,
 ) -> Result<(), ManagementError> {
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,rpm_limit,tpm_limit,count_rpm_limit,updated_by) VALUES($1,$2,$3,$4,$5,gw_amount($6::numeric),'calendar_month',$7,$8,$9,$10,$11)").bind(id).bind(principal).bind(key).bind(grants).bind(limits.budget.as_ref().map_or("actual",|b|b.mode.as_str())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(limits.budget.as_ref().map_or("UTC",|b|b.period.timezone.as_str())).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(actor).execute(c).await?;
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,rpm_limit,tpm_limit,count_rpm_limit,updated_by) VALUES($1,$2,$3,$4,$5,gw_amount($6::numeric),'calendar_month',COALESCE($7::text,(SELECT timezone FROM gw_budget_period(clock_timestamp()))),$8,$9,$10,$11)").bind(id).bind(principal).bind(key).bind(grants).bind(limits.budget.as_ref().map_or("actual",|b|b.mode.as_str())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(Option::<&str>::None).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(actor).execute(c).await?;
     Ok(())
 }
 fn require_subset(requested: &Value, allowed: &Value) -> Result<(), ManagementError> {
@@ -252,11 +252,25 @@ impl PgLedger {
                     ctx.actor,
                 )
                 .await?;
-                // 회사 키를 직접 고르는 것은 관리자만 할 수 있다. 고르지 않으면 기본 키에 연결한다.
-                if !v.provider_credentials.is_empty() {
+                // 사용자에게 인가된 회사 키는 본인이 고를 수 있다. 인가가 없는 Provider의 키를 고르는 것은
+                // 관리자만 할 수 있다. 고르지 않으면 사용자의 기본 키(없으면 Provider의 기본 키)에 연결한다.
+                if !v.provider_credentials.is_empty()
+                    && super::credentials::choice_needs_admin(
+                        &mut tx,
+                        target_principal,
+                        &v.provider_credentials,
+                    )
+                    .await?
+                {
                     management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
                 }
-                super::credentials::bind_new_key(&mut tx, key.id, &v.provider_credentials).await?;
+                super::credentials::bind_new_key(
+                    &mut tx,
+                    key.id,
+                    target_principal,
+                    &v.provider_credentials,
+                )
+                .await?;
                 after = json!({"id":key.id,"principal_id":target_principal,"version":"1","provider_credentials":super::credentials::key_bindings(&mut tx, key.id).await?});
                 secret = Some(key.expose_once());
                 201
@@ -384,7 +398,7 @@ impl PgLedger {
                     || p.get::<Option<String>, _>("security_fence_ref") != new_fence;
                 result_version = Some(policy.get::<i64, _>("version") + i64::from(changed));
                 if changed {
-                    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode=$3,budget_limit_usd=gw_amount($4::numeric),period_timezone=$5,rpm_limit=$6,tpm_limit=$7,count_rpm_limit=$8,version=version+1,updated_by=$9,updated_at=$10::timestamptz WHERE id=$1").bind(policy.get::<Uuid,_>("id")).bind(&grants).bind(limits.budget.as_ref().map_or(policy.get::<String,_>("budget_mode"),|b|b.mode.clone())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(limits.budget.as_ref().map_or(policy.get::<String,_>("period_timezone"),|b|b.period.timezone.clone())).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(ctx.actor).bind(&now).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode=$3,budget_limit_usd=gw_amount($4::numeric),period_timezone=$5,rpm_limit=$6,tpm_limit=$7,count_rpm_limit=$8,version=version+1,updated_by=$9,updated_at=$10::timestamptz WHERE id=$1").bind(policy.get::<Uuid,_>("id")).bind(&grants).bind(limits.budget.as_ref().map_or(policy.get::<String,_>("budget_mode"),|b|b.mode.clone())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(policy.get::<String,_>("period_timezone")).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(ctx.actor).bind(&now).execute(&mut *tx).await?;
                     if old_disabled != v.disabled
                         || p.get::<Option<String>, _>("security_fence_ref") != new_fence
                     {

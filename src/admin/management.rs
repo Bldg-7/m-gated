@@ -21,6 +21,10 @@ const CREDENTIALS: &str = "/api/admin/provider-credentials";
 const KEYS_ADMIN: &str = "/api/admin/keys/";
 const KEY_BINDING: &str = "/provider-credential";
 const CATALOG: &str = "/api/admin/model-catalog";
+const PRINCIPALS_ADMIN: &str = "/api/admin/principals/";
+const PRINCIPAL_CREDENTIALS: &str = "/provider-credentials";
+const SETTINGS: &str = "/api/admin/settings";
+const BUDGET_TIMEZONE: &str = "/api/admin/settings/budget-timezone";
 fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
 }
@@ -68,6 +72,21 @@ pub(super) fn error(e: ManagementError) -> Response {
                 json!({"current_credential_id":current}),
             );
         }
+        AuthorizationConflict(ids, default) => {
+            return details(
+                StatusCode::CONFLICT,
+                "credential_authorization_conflict",
+                json!({"credential_ids":ids,"default_credential_id":default}),
+            );
+        }
+        AuthorizationInUse(n) => {
+            return details(
+                StatusCode::CONFLICT,
+                "credential_authorization_in_use",
+                json!({"bound_keys":n.to_string()}),
+            );
+        }
+        CredentialNotAuthorized => (403, "provider_credential_not_authorized"),
         CredentialDuplicate(id) => {
             return details(
                 StatusCode::CONFLICT,
@@ -103,32 +122,37 @@ pub(super) fn error(e: ManagementError) -> Response {
 }
 pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> Response {
     let path = request.uri().path();
-    let allowed = if path == "/api/csrf" || path == CREDENTIALS || path == CATALOG {
-        vec![Method::GET]
-    } else if path == "/api/admin/model-catalog/sync" || path == "/api/admin/model-catalog/approve"
-    {
-        vec![Method::POST]
-    } else if let Some(rest) = path.strip_prefix(CREDENTIALS) {
-        if rest.matches('/').count() == 1 {
+    let allowed =
+        if path == "/api/csrf" || path == CREDENTIALS || path == CATALOG || path == SETTINGS {
+            vec![Method::GET]
+        } else if path == "/api/admin/model-catalog/sync"
+            || path == "/api/admin/model-catalog/approve"
+        {
             vec![Method::POST]
+        } else if let Some(rest) = path.strip_prefix(CREDENTIALS) {
+            if rest.matches('/').count() == 1 {
+                vec![Method::POST]
+            } else {
+                vec![Method::PUT, Method::PATCH, Method::DELETE]
+            }
+        } else if (path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING))
+            || (path.starts_with(PRINCIPALS_ADMIN) && path.ends_with(PRINCIPAL_CREDENTIALS))
+            || path == BUDGET_TIMEZONE
+        {
+            vec![Method::PUT]
+        } else if path == "/api/keys" || path == "/api/admin/principals" {
+            vec![Method::GET, Method::POST]
+        } else if path.starts_with("/api/keys/") {
+            vec![Method::DELETE]
+        } else if path.ends_with("/policy") || path.ends_with("/settlement") {
+            vec![Method::PUT]
+        } else if path.ends_with("/inference-pause/release") {
+            vec![Method::POST]
+        } else if path.starts_with("/api/admin/principals/") {
+            vec![Method::GET, Method::PATCH]
         } else {
-            vec![Method::PUT, Method::PATCH, Method::DELETE]
-        }
-    } else if path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING) {
-        vec![Method::PUT]
-    } else if path == "/api/keys" || path == "/api/admin/principals" {
-        vec![Method::GET, Method::POST]
-    } else if path.starts_with("/api/keys/") {
-        vec![Method::DELETE]
-    } else if path.ends_with("/policy") || path.ends_with("/settlement") {
-        vec![Method::PUT]
-    } else if path.ends_with("/inference-pause/release") {
-        vec![Method::POST]
-    } else if path.starts_with("/api/admin/principals/") {
-        vec![Method::GET, Method::PATCH]
-    } else {
-        vec![Method::GET]
-    };
+            vec![Method::GET]
+        };
     if !allowed.contains(request.method()) {
         let mut r = crate::http::method_not_allowed();
         r.headers_mut().insert(
@@ -275,8 +299,12 @@ async fn execute(
     if path == CREDENTIALS
         || path.starts_with(CREDENTIALS)
         || (path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING))
+        || (path.starts_with(PRINCIPALS_ADMIN) && path.ends_with(PRINCIPAL_CREDENTIALS))
     {
         return provider_credentials(state, &head, body, human.current.id).await;
+    }
+    if path == SETTINGS || path == BUDGET_TIMEZONE {
+        return settings(state, &head, body, human.current.id).await;
     }
     if path == CATALOG || path.starts_with(CATALOG) {
         return model_catalog(state, &head, body, human.current.id).await;
@@ -577,7 +605,10 @@ async fn provider_credentials(
     body: axum::body::Body,
     actor: Uuid,
 ) -> Response {
-    use crate::{config::ProviderId, ledger::credentials::CredentialCommand};
+    use crate::{
+        config::ProviderId,
+        ledger::credentials::{BoundAction, CredentialCommand},
+    };
     let Some(service) = state.api.credentials.clone() else {
         return error(ManagementError::NotFound);
     };
@@ -591,8 +622,20 @@ async fn provider_credentials(
             Err(e) => error(e),
         };
     }
-    // 경로: {CREDENTIALS}/{provider}[/{id}] 또는 /api/admin/keys/{key}/provider-credential
-    let (provider, id, key) = if let Some(rest) = path
+    // 경로: {CREDENTIALS}/{provider}[/{id}], /api/admin/keys/{key}/provider-credential,
+    // /api/admin/principals/{id}/provider-credentials
+    let principal = match path
+        .strip_prefix(PRINCIPALS_ADMIN)
+        .and_then(|p| p.strip_suffix(PRINCIPAL_CREDENTIALS))
+        .map(Uuid::parse_str)
+    {
+        None => None,
+        Some(Ok(id)) => Some(id),
+        Some(Err(_)) => return error(ManagementError::NotFound),
+    };
+    let (provider, id, key) = if principal.is_some() {
+        (None, None, None)
+    } else if let Some(rest) = path
         .strip_prefix(KEYS_ADMIN)
         .and_then(|p| p.strip_suffix(KEY_BINDING))
     {
@@ -700,6 +743,64 @@ async fn provider_credentials(
             _ => None,
         };
         let version = |s: Option<String>| s.and_then(|s| s.parse::<i64>().ok());
+        let ids = |v: Option<Value>| -> Option<Vec<Uuid>> {
+            v?.as_array()?
+                .iter()
+                .map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok()))
+                .collect()
+        };
+        let optional_id = |v: Option<Value>| match v {
+            Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Uuid::parse_str(&s).map(Some).map_err(|_| ()),
+            _ => Err(()),
+        };
+        if let Some(principal) = principal {
+            let provider = take_string("provider").and_then(|p| ProviderId::from_name(&p));
+            let credentials = ids(input.remove("credential_ids"));
+            let default = optional_id(input.remove("default_credential_id"));
+            let expected = match input.remove("expected") {
+                Some(Value::Object(mut e)) => {
+                    let r = (
+                        ids(e.remove("credential_ids")),
+                        optional_id(e.remove("default_credential_id")),
+                    );
+                    if e.is_empty() { Some(r) } else { None }
+                }
+                _ => None,
+            };
+            let bound = match input.remove("bound_keys") {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) if s == "block" => Ok(Some(BoundAction::Block)),
+                Some(Value::Object(mut o)) => match (o.remove("move_to"), o.is_empty()) {
+                    (Some(Value::String(s)), true) => Uuid::parse_str(&s)
+                        .map(|id| Some(BoundAction::Move(id)))
+                        .map_err(|_| ()),
+                    _ => Err(()),
+                },
+                Some(_) => Err(()),
+            };
+            let command = match (provider, credentials, default, expected, bound) {
+                (
+                    Some(provider),
+                    Some(credentials),
+                    Ok(default),
+                    Some((Some(expected_ids), Ok(expected_default))),
+                    Ok(bound),
+                ) if head.method == Method::PUT && input.is_empty() => {
+                    CredentialCommand::Authorize {
+                        principal,
+                        provider,
+                        credentials,
+                        default,
+                        expected: (expected_ids, expected_default),
+                        bound,
+                    }
+                }
+                _ => return error(ManagementError::Invalid),
+            };
+            return run_credential_command(state, head, path, actor, command_id, service, command)
+                .await;
+        }
         let parsed = match (head.method.as_str(), provider, id, key) {
             ("POST", Some(provider), None, None) => {
                 match (take_string("label"), take_string("secret")) {
@@ -778,6 +879,19 @@ async fn provider_credentials(
             _ => return error(ManagementError::Invalid),
         }
     };
+    run_credential_command(state, head, path, actor, command_id, service, command).await
+}
+
+/// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인.
+async fn run_credential_command(
+    state: &ApiState,
+    head: &axum::http::request::Parts,
+    path: &str,
+    actor: Uuid,
+    command_id: Uuid,
+    service: std::sync::Arc<crate::credentials::CredentialService>,
+    command: crate::ledger::credentials::CredentialCommand,
+) -> Response {
     let grants = state.api.grants();
     let ctx = CommandContext {
         actor,
@@ -815,7 +929,111 @@ async fn provider_credentials(
     }
 }
 
-/// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인.
+/// 게이트웨이 전체 설정(예산 기간의 시간대). 조회와 변경 모두 관리자만 한다.
+async fn settings(
+    state: &ApiState,
+    head: &axum::http::request::Parts,
+    body: axum::body::Body,
+    actor: Uuid,
+) -> Response {
+    let path = head.uri.path();
+    if head.uri.query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    let grants = state.api.grants();
+    let commands: Vec<_> = head
+        .headers
+        .get_all("x-gateway-command-id")
+        .iter()
+        .collect();
+    let command_id = (commands.len() == 1)
+        .then(|| {
+            commands[0]
+                .to_str()
+                .ok()
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
+        .flatten();
+    let ctx = CommandContext {
+        actor,
+        command_id: command_id.unwrap_or_else(Uuid::nil),
+        method: head.method.as_str(),
+        path,
+        settings: state.api.auth.settings(),
+        grants: &grants,
+        digest: state.api.digest_bytes,
+        ceiling: &state.api.ceiling,
+        execution_running: false,
+    };
+    if head.method == Method::GET {
+        return match state.api.store.settings_view(&ctx).await {
+            Ok(v) => success(v),
+            Err(e) => error(e),
+        };
+    }
+    let Some(command_id) = command_id else {
+        return error(ManagementError::Invalid);
+    };
+    if head
+        .headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .any(|v| v.as_bytes() != b"identity")
+        || !crate::providers::anthropic::json_content_type(&head.headers)
+    {
+        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+    }
+    let body_limit = state.runtime.limits().management_body_bytes;
+    let bytes = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        to_bytes(body, body_limit),
+    )
+    .await
+    {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
+        Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
+    };
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SetTimezone {
+        timezone: String,
+        expected_version: String,
+    }
+    let Ok(input) = serde_json::from_slice::<SetTimezone>(&bytes) else {
+        return error(ManagementError::Invalid);
+    };
+    let Ok(expected) = input.expected_version.parse::<i64>() else {
+        return error(ManagementError::Invalid);
+    };
+    match state
+        .api
+        .store
+        .set_budget_timezone(&ctx, &input.timezone, expected)
+        .await
+    {
+        Ok(result) => {
+            let mut r = match result.body {
+                Some(v) => success(v),
+                None => StatusCode::NO_CONTENT.into_response(),
+            };
+            *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            r.headers_mut().insert(
+                "x-gateway-command-id",
+                HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
+            );
+            r.headers_mut().insert(
+                "x-gateway-command-replayed",
+                HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
+            );
+            r
+        }
+        Err(e) => error(e),
+    }
+}
+
 async fn model_catalog(
     state: &ApiState,
     head: &axum::http::request::Parts,

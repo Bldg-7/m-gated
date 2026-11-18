@@ -828,6 +828,10 @@ impl ValidatedConfig {
             return Err(StartupError::InvalidDatabase);
         }
         self.limits.validate()?;
+        // 예산 기간의 시간대는 관리자 화면의 설정 하나로 정한다. 설정 파일에는 두지 않는다.
+        if !self.execution_ceiling.without_timezone() {
+            return Err(StartupError::InvalidLimits);
+        }
         self.execution_ceiling
             .validate()
             .map_err(|_| StartupError::InvalidLimits)?;

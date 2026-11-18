@@ -453,7 +453,9 @@ impl Import {
                 || scope.limits.budget.as_ref().is_some_and(|budget| {
                     budget.mode != scope.budget_mode
                         || budget.period.kind != scope.period_kind
-                        || budget.period.timezone != scope.period_timezone
+                        // 0.9.0부터 한도에는 시간대가 없다(관리자 설정 하나). 있을 때만 정책 행과 맞춘다.
+                        || (!budget.period.timezone.is_empty()
+                            && budget.period.timezone != scope.period_timezone)
                 })
             {
                 return Err(SourceValidation::Schema);

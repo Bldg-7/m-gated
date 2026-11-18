@@ -862,3 +862,456 @@ async fn several_labeled_keys_bind_to_virtual_keys_and_route_requests() {
     let _ = bob_key_id;
     h.db.close().await;
 }
+
+/// 사용자별 회사 키 인가: 인가된 키 안에서만 고르고, 인가를 풀면 연결된 가상 키를 막거나 옮긴다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn user_authorization_limits_company_keys_and_blocks_deauthorized_keys() {
+    let h = Http::new().await;
+    const CREDS: &str = "/api/admin/provider-credentials";
+    for token in [&h.alice, &h.bob] {
+        assert_eq!(h.call("GET", "/api/me", token, None).await.0, 200);
+    }
+    sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE key_id IS NULL")
+        .bind(
+            json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]),
+        )
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    let bob = id_of(&me["principal"]["id"]);
+    assert_eq!(me["provider_credentials"], json!([]));
+    let add = |label: &str, secret: &str| json!({"label":label,"secret":secret});
+    let (_, a) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-a", KEY_A)),
+        )
+        .await;
+    let a_id = id_of(&a["target"]["id"]);
+    let (_, b) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-b", KEY_B)),
+        )
+        .await;
+    let b_id = id_of(&b["target"]["id"]);
+    h.service.refresh().await.unwrap();
+
+    let path = format!("/api/admin/principals/{bob}/provider-credentials");
+    let authorize = |ids: &[Uuid],
+                     default: Option<Uuid>,
+                     expected: &[Uuid],
+                     expected_default: Option<Uuid>| {
+        json!({"provider":"anthropic","credential_ids":ids,"default_credential_id":default,"expected":{"credential_ids":expected,"default_credential_id":expected_default}})
+    };
+    // 관리자만 인가를 바꾼다. 기본 키는 인가된 키 중 하나여야 한다.
+    assert_eq!(
+        h.call(
+            "PUT",
+            &path,
+            &h.bob,
+            Some(authorize(&[b_id], Some(b_id), &[], None))
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        h.call(
+            "PUT",
+            &path,
+            &h.alice,
+            Some(authorize(&[b_id], Some(a_id), &[], None))
+        )
+        .await
+        .0,
+        400
+    );
+    let (status, granted) = h
+        .call(
+            "PUT",
+            &path,
+            &h.alice,
+            Some(authorize(&[b_id], Some(b_id), &[], None)),
+        )
+        .await;
+    assert_eq!(status, 200, "{granted}");
+    assert_eq!(
+        granted["authorization"]["provider_credentials"][0]["credentials"][0]["label"],
+        "team-b"
+    );
+    // 다른 관리자가 먼저 바꿨으면(지금 인가를 잘못 알면) 덮어쓰지 않는다.
+    let (status, stale) = h
+        .call(
+            "PUT",
+            &path,
+            &h.alice,
+            Some(authorize(&[a_id], Some(a_id), &[], None)),
+        )
+        .await;
+    assert_eq!(
+        (status, stale["error"]["code"].clone()),
+        (409, json!("credential_authorization_conflict"))
+    );
+    assert_eq!(stale["error"]["details"]["credential_ids"], json!([b_id]));
+
+    // 사용자는 /api/me 에서 자기에게 인가된 회사 키를 본다.
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    assert_eq!(
+        me["provider_credentials"][0]["credentials"][0]["label"],
+        "team-b"
+    );
+    assert_eq!(
+        me["provider_credentials"][0]["credentials"][0]["default"],
+        true
+    );
+
+    // 인가된 키는 일반 사용자도 고를 수 있다. 인가 밖의 키는 거절한다. 고르지 않으면 사용자의 기본 키다.
+    let issue = |chosen: Option<Uuid>| {
+        let mut body = json!({"name":"k","validity":"1_year","grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}});
+        if let Some(id) = chosen {
+            body["provider_credentials"] = json!({"anthropic": id});
+        }
+        body
+    };
+    let (status, denied) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(a_id))))
+        .await;
+    assert_eq!(
+        (status, denied["error"]["code"].clone()),
+        (403, json!("provider_credential_not_authorized"))
+    );
+    let (status, chosen) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(b_id))))
+        .await;
+    assert_eq!(status, 201, "{chosen}");
+    let (status, plain) = h.call("POST", "/api/keys", &h.bob, Some(issue(None))).await;
+    assert_eq!(status, 201, "{plain}");
+    assert_eq!(
+        plain["metadata"]["provider_credentials"][0]["label"],
+        "team-b"
+    );
+    let key1 = chosen["key"].as_str().unwrap().to_owned();
+    let key2 = plain["key"].as_str().unwrap().to_owned();
+    let key1_id = id_of(&chosen["metadata"]["id"]);
+    // 요청은 인가된 키로 나간다. SSO 직접 요청도 사용자의 기본 키(Provider 기본 키가 아니다)를 쓴다.
+    assert_eq!(h.infer(&key1).await, (200, Some(KEY_B.into()), Some(b_id)));
+    assert_eq!(h.infer(&h.bob).await, (200, Some(KEY_B.into()), Some(b_id)));
+    assert_eq!(h.infer(&h.alice).await.1.as_deref(), Some(KEY_A));
+    // 관리자도 인가 밖의 키로는 연결을 옮기지 못한다.
+    let (status, err) = h
+        .call(
+            "PUT",
+            &format!("/api/admin/keys/{key1_id}/provider-credential"),
+            &h.alice,
+            Some(
+                json!({"provider":"anthropic","credential_id":a_id,"expected_credential_id":b_id}),
+            ),
+        )
+        .await;
+    assert_eq!(
+        (status, err["error"]["code"].clone()),
+        (403, json!("provider_credential_not_authorized"))
+    );
+
+    // 연결된 가상 키가 있는 회사 키의 인가를 풀려면 막을지 옮길지 골라야 한다.
+    let (status, busy) = h
+        .call(
+            "PUT",
+            &path,
+            &h.alice,
+            Some(authorize(&[a_id], Some(a_id), &[b_id], Some(b_id))),
+        )
+        .await;
+    assert_eq!(
+        (status, busy["error"]["code"].clone()),
+        (409, json!("credential_authorization_in_use"))
+    );
+    assert_eq!(busy["error"]["details"]["bound_keys"], "2");
+    let mut block = authorize(&[a_id], Some(a_id), &[b_id], Some(b_id));
+    block["bound_keys"] = json!("block");
+    let (status, blocked) = h.call("PUT", &path, &h.alice, Some(block)).await;
+    assert_eq!(status, 200, "{blocked}");
+    assert_eq!(blocked["authorization"]["blocked_keys"], "2");
+    // 막힌 키의 요청은 송신 전에 403으로 거절된다. 키 목록에 인가 해제가 보인다.
+    let (status, _, _) = h.infer(&key1).await;
+    assert_eq!(status, 403);
+    assert!(h.provider.calls.lock().await.is_empty());
+    let (_, body) = h
+        .call(
+            "POST",
+            "/v1/messages",
+            &key2,
+            Some(json!({"model":"synthetic-text","max_tokens":100,"messages":[{"role":"user","content":"x"}]})),
+        )
+        .await;
+    assert_eq!(
+        body["gateway_error_code"],
+        "provider_credential_not_authorized"
+    );
+    let (_, keys) = h.call("GET", "/api/keys", &h.bob, None).await;
+    for item in keys["items"].as_array().unwrap() {
+        assert_eq!(
+            item["provider_credentials"][0]["authorized"], false,
+            "{item}"
+        );
+    }
+    let (_, keys) = h.call("GET", "/api/keys", &h.alice, None).await;
+    assert!(
+        keys["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|k| k["provider_credentials"][0]["authorized"] == true)
+    );
+    // SSO 직접 요청은 새 기본 키를 쓴다.
+    assert_eq!(h.infer(&h.bob).await.1.as_deref(), Some(KEY_A));
+
+    // 다시 인가하면 막힌 키가 원래 회사 키로 다시 나간다.
+    let (status, _) = h
+        .call(
+            "PUT",
+            &path,
+            &h.alice,
+            Some(authorize(&[a_id, b_id], Some(a_id), &[a_id], Some(a_id))),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(h.infer(&key1).await.1.as_deref(), Some(KEY_B));
+    // 옮기기를 고르면 연결된 가상 키가 인가된 키로 옮겨진다.
+    let mut moving = authorize(&[a_id], Some(a_id), &[a_id, b_id], Some(a_id));
+    moving["bound_keys"] = json!({"move_to": a_id});
+    let (status, moved) = h.call("PUT", &path, &h.alice, Some(moving)).await;
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(moved["authorization"]["moved_keys"], "2");
+    assert_eq!(h.infer(&key1).await, (200, Some(KEY_A.into()), Some(a_id)));
+
+    // 회사 키를 해제하면 인가도 옮길 키로 넘어간다.
+    let (status, _) = h
+        .call(
+            "PUT",
+            &path,
+            &h.alice,
+            Some(authorize(&[b_id], Some(b_id), &[a_id], Some(a_id))).map(|mut v| {
+                v["bound_keys"] = json!({"move_to": b_id});
+                v
+            }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let version: String =
+        h.call("GET", CREDS, &h.alice, None).await.1["providers"][0]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == json!(b_id))
+            .unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let (status, retired) = h
+        .call(
+            "DELETE",
+            &format!("{CREDS}/anthropic/{b_id}?expected_version={version}&move_to={a_id}"),
+            &h.alice,
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{retired}");
+    let (_, detail) = h
+        .call(
+            "GET",
+            &format!("/api/admin/principals/{bob}"),
+            &h.alice,
+            None,
+        )
+        .await;
+    assert_eq!(
+        detail["principal"]["provider_credentials"],
+        json!([{"provider":"anthropic","credentials":[{"id":a_id,"label":"team-a","hint":"0001","default":true}]}])
+    );
+    // 목록을 비우면 제한이 풀린다.
+    let (status, cleared) = h
+        .call(
+            "PUT",
+            &path,
+            &h.alice,
+            Some(authorize(&[], None, &[a_id], Some(a_id))),
+        )
+        .await;
+    assert_eq!(status, 200, "{cleared}");
+    assert_eq!(cleared["authorization"]["provider_credentials"], json!([]));
+    h.db.close().await;
+}
+
+/// 예산 시간대는 관리자가 한 곳에서 정하고, 바꾸면 다음 기간부터 적용한다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn budget_timezone_is_global_and_changes_from_next_period() {
+    let h = Http::new().await;
+    for token in [&h.alice, &h.bob] {
+        assert_eq!(h.call("GET", "/api/me", token, None).await.0, 200);
+    }
+    let pool = h.db.store.pool();
+    // 기간 계산: 바뀐 직후의 기간 하나만 이전 기간 끝부터 새 시간대의 다음 달 1일 0시까지다.
+    let period = |t: &'static str| async move {
+        let r = sqlx::query("SELECT period_start::text AS s,period_end::text AS e,timezone FROM gw_budget_period($1::timestamptz)")
+            .bind(t)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (
+            r.get::<String, _>("s"),
+            r.get::<String, _>("e"),
+            r.get::<String, _>("timezone"),
+        )
+    };
+    sqlx::query("SET TIME ZONE 'UTC'")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO gw_budget_timezones(effective_from,timezone) VALUES('2030-12-01T00:00:00Z','Asia/Seoul'),('2031-03-01T00:00:00+09:00','UTC')")
+        .execute(pool)
+        .await
+        .unwrap();
+    let tests = [
+        // UTC 기간: 11월
+        (
+            "2030-11-20T00:00:00Z",
+            "2030-11-01 00:00:00+00",
+            "2030-12-01 00:00:00+00",
+            "UTC",
+        ),
+        // UTC→서울: 12월 1일 09:00(서울)부터 1월 1일 00:00(서울)까지(9시간 짧다)
+        (
+            "2030-12-05T00:00:00Z",
+            "2030-12-01 00:00:00+00",
+            "2030-12-31 15:00:00+00",
+            "Asia/Seoul",
+        ),
+        (
+            "2031-01-05T00:00:00Z",
+            "2030-12-31 15:00:00+00",
+            "2031-01-31 15:00:00+00",
+            "Asia/Seoul",
+        ),
+        // 서울 2월 기간은 다음 변경 시각(3월 1일 00:00 서울)에서 끝난다.
+        (
+            "2031-02-10T00:00:00Z",
+            "2031-01-31 15:00:00+00",
+            "2031-02-28 15:00:00+00",
+            "Asia/Seoul",
+        ),
+        // 서울→UTC: 3월 1일 00:00(서울)부터 4월 1일 00:00(UTC)까지(9시간 길다)
+        (
+            "2031-03-01T00:00:00Z",
+            "2031-02-28 15:00:00+00",
+            "2031-04-01 00:00:00+00",
+            "UTC",
+        ),
+        (
+            "2031-04-02T00:00:00Z",
+            "2031-04-01 00:00:00+00",
+            "2031-05-01 00:00:00+00",
+            "UTC",
+        ),
+    ];
+    for (t, s, e, tz) in tests {
+        assert_eq!(period(t).await, (s.into(), e.into(), tz.into()), "{t}");
+    }
+    sqlx::query("DELETE FROM gw_budget_timezones WHERE effective_from>'-infinity'")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // 관리자만 보고 바꾼다.
+    assert_eq!(
+        h.call("GET", "/api/admin/settings", &h.bob, None).await.0,
+        403
+    );
+    let (status, view) = h.call("GET", "/api/admin/settings", &h.alice, None).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["budget_timezone"]["timezone"], "UTC");
+    assert_eq!(view["budget_timezone"]["pending"], json!(null));
+    assert_eq!(view["budget_timezone"]["version"], "0");
+    const SET: &str = "/api/admin/settings/budget-timezone";
+    assert_eq!(
+        h.call(
+            "PUT",
+            SET,
+            &h.bob,
+            Some(json!({"timezone":"Asia/Seoul","expected_version":"0"}))
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        h.call(
+            "PUT",
+            SET,
+            &h.alice,
+            Some(json!({"timezone":"KST","expected_version":"0"}))
+        )
+        .await
+        .0,
+        400
+    );
+    let (status, set) = h
+        .call(
+            "PUT",
+            SET,
+            &h.alice,
+            Some(json!({"timezone":"Asia/Seoul","expected_version":"0"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{set}");
+    // 이번 기간은 그대로 UTC이고, 다음 기간(이번 기간이 끝나는 시각)부터 서울 시간이다.
+    let tz = &set["budget_timezone"];
+    assert_eq!(tz["timezone"], "UTC");
+    assert_eq!(tz["pending"]["timezone"], "Asia/Seoul");
+    assert_eq!(tz["pending"]["effective_from"], tz["period_end"]);
+    assert_eq!(tz["version"], "1");
+    // 다른 화면에서 먼저 바꿨으면 덮어쓰지 않는다.
+    let (status, stale) = h
+        .call(
+            "PUT",
+            SET,
+            &h.alice,
+            Some(json!({"timezone":"Europe/London","expected_version":"0"})),
+        )
+        .await;
+    assert_eq!(
+        (status, stale["error"]["code"].clone()),
+        (409, json!("version_conflict"))
+    );
+    // 일반 사용자도 /api/me 에서 기준 시간대와 예약된 변경을 본다.
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    assert_eq!(me["budget_timezone"]["pending"]["timezone"], "Asia/Seoul");
+    // 지금 시간대로 되돌리면 예약이 취소된다.
+    let (status, back) = h
+        .call(
+            "PUT",
+            SET,
+            &h.alice,
+            Some(json!({"timezone":"UTC","expected_version":"1"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{back}");
+    assert_eq!(back["effect"], "changed");
+    assert_eq!(back["budget_timezone"]["pending"], json!(null));
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gw_audit_events WHERE operation='set_budget_timezone'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(audits, 2);
+    h.db.close().await;
+}

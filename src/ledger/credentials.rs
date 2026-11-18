@@ -52,6 +52,18 @@ pub enum CredentialCommand {
         expected: i64,
         move_to: Option<Uuid>,
     },
+    /// 사용자 하나가 Provider에서 쓸 수 있는 회사 키와 그 사용자의 기본 키를 정한다.
+    /// 목록이 비면 제한을 없앤다(그 Provider의 기본 키를 쓴다).
+    Authorize {
+        principal: Uuid,
+        provider: ProviderId,
+        credentials: Vec<Uuid>,
+        default: Option<Uuid>,
+        /// 지금 인가(회사 키 목록, 기본 키). 다른 관리자의 변경을 덮어쓰지 않게 한다.
+        expected: (Vec<Uuid>, Option<Uuid>),
+        /// 인가에서 빠지는 회사 키에 연결된 이 사용자의 가상 키를 어떻게 할지.
+        bound: Option<BoundAction>,
+    },
     /// 가상 키 하나의 Provider 연결을 다른 회사 키로 바꾼다.
     BindKey {
         key: Uuid,
@@ -61,6 +73,14 @@ pub enum CredentialCommand {
         expected: Option<Uuid>,
     },
 }
+/// 인가에서 빠지는 회사 키에 연결된 가상 키의 처리.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundAction {
+    /// 인가된 다른 회사 키로 옮긴다.
+    Move(Uuid),
+    /// 옮기지 않는다. 그 가상 키로 이 Provider에 보내는 요청은 거절된다.
+    Block,
+}
 impl CredentialCommand {
     pub fn operation(&self) -> &'static str {
         match self {
@@ -69,6 +89,7 @@ impl CredentialCommand {
             Self::Update { .. } => "update_provider_credential",
             Self::Retire { .. } => "retire_provider_credential",
             Self::BindKey { .. } => "bind_key_credential",
+            Self::Authorize { .. } => "authorize_principal_credentials",
         }
     }
     pub fn provider(&self) -> ProviderId {
@@ -77,7 +98,8 @@ impl CredentialCommand {
             | Self::Replace { provider, .. }
             | Self::Update { provider, .. }
             | Self::Retire { provider, .. }
-            | Self::BindKey { provider, .. } => *provider,
+            | Self::BindKey { provider, .. }
+            | Self::Authorize { provider, .. } => *provider,
         }
     }
     fn secret(&self) -> Option<&str> {
@@ -95,6 +117,12 @@ pub fn valid_label(label: &str) -> bool {
         && label.len() <= 240
         && label.trim() == label
         && !label.chars().any(char::is_control)
+}
+
+fn sorted(ids: &[Uuid]) -> Vec<Uuid> {
+    let mut v = ids.to_vec();
+    v.sort();
+    v
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -149,7 +177,8 @@ fn row_metadata(row: &PgRow, kek_id: &[u8]) -> Value {
 
 /// 가상 키의 Provider별 회사 키 연결. 키 목록·상세 응답에 붙는다.
 pub async fn key_bindings(c: &mut PgConnection, key: Uuid) -> Result<Value, ManagementError> {
-    let rows = sqlx::query("SELECT b.provider,c.id,c.label,c.hint,c.state FROM gw_virtual_key_credentials b JOIN gw_provider_credentials c ON c.id=b.credential_id WHERE b.key_id=$1 ORDER BY b.provider")
+    // authorized: 키 주인에게 이 회사 키가 인가돼 있는지. 그 Provider에 인가가 없으면 제한이 없어 true다.
+    let rows = sqlx::query("SELECT b.provider,c.id,c.label,c.hint,c.state,(NOT EXISTS(SELECT 1 FROM gw_principal_credentials a WHERE a.principal_id=k.principal_id AND a.provider=b.provider) OR EXISTS(SELECT 1 FROM gw_principal_credentials a WHERE a.principal_id=k.principal_id AND a.credential_id=b.credential_id)) AS authorized FROM gw_virtual_key_credentials b JOIN gw_virtual_keys k ON k.id=b.key_id JOIN gw_provider_credentials c ON c.id=b.credential_id WHERE b.key_id=$1 ORDER BY b.provider")
         .bind(key)
         .fetch_all(c)
         .await?;
@@ -162,19 +191,47 @@ pub async fn key_bindings(c: &mut PgConnection, key: Uuid) -> Result<Value, Mana
                     "label": r.get::<String, _>("label"),
                     "hint": r.get::<String, _>("hint"),
                     "state": r.get::<String, _>("state"),
+                    "authorized": r.get::<bool, _>("authorized"),
                 })
             })
             .collect(),
     ))
 }
 
-/// 가상 키 발급 transaction 안에서 연결을 만든다. 고른 Provider는 그 키로, 나머지는 기본 키로 잇는다.
+/// 고른 회사 키 중 그 사용자에게 인가가 없는 Provider의 것이 있는지. 그런 선택은 관리자만 할 수 있다.
+pub async fn choice_needs_admin(
+    c: &mut PgConnection,
+    principal: Uuid,
+    chosen: &std::collections::BTreeMap<String, Uuid>,
+) -> Result<bool, ManagementError> {
+    let providers: Vec<String> = chosen.keys().cloned().collect();
+    let restricted: i64 = sqlx::query_scalar("SELECT count(DISTINCT provider) FROM gw_principal_credentials WHERE principal_id=$1 AND provider=ANY($2)")
+        .bind(principal)
+        .bind(&providers)
+        .fetch_one(c)
+        .await?;
+    Ok(restricted < providers.len() as i64)
+}
+
+/// 가상 키 발급 transaction 안에서 연결을 만든다.
+/// 고른 Provider는 그 키로 잇는다. 사용자에게 인가가 있는 Provider면 인가된 키여야 한다.
+/// 고르지 않은 Provider는 사용자의 기본 키로, 그것도 없으면 Provider의 기본 키로 잇는다.
 pub async fn bind_new_key(
     c: &mut PgConnection,
     key: Uuid,
+    principal: Uuid,
     chosen: &std::collections::BTreeMap<String, Uuid>,
 ) -> Result<(), ManagementError> {
     for (provider, id) in chosen {
+        let allowed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM gw_principal_credentials WHERE principal_id=$1 AND provider=$2) OR EXISTS(SELECT 1 FROM gw_principal_credentials WHERE principal_id=$1 AND credential_id=$3)")
+            .bind(principal)
+            .bind(provider)
+            .bind(id)
+            .fetch_one(&mut *c)
+            .await?;
+        if !allowed {
+            return Err(ManagementError::CredentialNotAuthorized);
+        }
         let n = sqlx::query("INSERT INTO gw_virtual_key_credentials(key_id,provider,credential_id) SELECT $1,provider,id FROM gw_provider_credentials WHERE id=$2 AND provider=$3 AND state='active'")
             .bind(key)
             .bind(id)
@@ -187,9 +244,16 @@ pub async fn bind_new_key(
         }
     }
     let chosen: Vec<String> = chosen.keys().cloned().collect();
-    sqlx::query("INSERT INTO gw_virtual_key_credentials(key_id,provider,credential_id) SELECT $1,provider,id FROM gw_provider_credentials WHERE is_default AND NOT (provider=ANY($2))")
+    sqlx::query("INSERT INTO gw_virtual_key_credentials(key_id,provider,credential_id) SELECT $1,provider,credential_id FROM gw_principal_credentials WHERE principal_id=$3 AND is_default AND NOT (provider=ANY($2))")
         .bind(key)
         .bind(&chosen)
+        .bind(principal)
+        .execute(&mut *c)
+        .await?;
+    sqlx::query("INSERT INTO gw_virtual_key_credentials(key_id,provider,credential_id) SELECT $1,provider,id FROM gw_provider_credentials p WHERE is_default AND NOT (provider=ANY($2)) AND NOT EXISTS(SELECT 1 FROM gw_principal_credentials a WHERE a.principal_id=$3 AND a.provider=p.provider)")
+        .bind(key)
+        .bind(&chosen)
+        .bind(principal)
         .execute(&mut *c)
         .await?;
     Ok(())
@@ -216,6 +280,65 @@ async fn move_bindings(
     }
     .rows_affected();
     Ok(n as i64)
+}
+
+/// 회사 키를 해제할 때 그 키의 사용자 인가를 옮길 키로 넘긴다. 옮길 키가 없으면(마지막 키) 지운다.
+async fn move_authorizations(
+    c: &mut PgConnection,
+    from: Uuid,
+    to: Option<Uuid>,
+) -> Result<(), ManagementError> {
+    let Some(to) = to else {
+        sqlx::query("DELETE FROM gw_principal_credentials WHERE credential_id=$1")
+            .bind(from)
+            .execute(&mut *c)
+            .await?;
+        return Ok(());
+    };
+    // 이미 옮길 키도 인가된 사용자는 해제하는 키의 행만 지우고, 기본 키였다면 옮길 키를 기본으로 한다.
+    let defaults: Vec<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>("DELETE FROM gw_principal_credentials o WHERE o.credential_id=$1 AND EXISTS(SELECT 1 FROM gw_principal_credentials n WHERE n.principal_id=o.principal_id AND n.credential_id=$2) RETURNING CASE WHEN o.is_default THEN o.principal_id END")
+        .bind(from)
+        .bind(to)
+        .fetch_all(&mut *c)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
+    sqlx::query("UPDATE gw_principal_credentials SET is_default=true WHERE credential_id=$1 AND principal_id=ANY($2)")
+        .bind(to)
+        .bind(&defaults)
+        .execute(&mut *c)
+        .await?;
+    sqlx::query("UPDATE gw_principal_credentials SET credential_id=$2 WHERE credential_id=$1")
+        .bind(from)
+        .bind(to)
+        .execute(&mut *c)
+        .await?;
+    Ok(())
+}
+
+/// 사용자에게 인가된 회사 키. 인가가 있는 Provider만 담는다(없는 Provider는 그 Provider의 기본 키를 쓴다).
+pub async fn principal_authorization(
+    c: &mut PgConnection,
+    principal: Uuid,
+) -> Result<Value, sqlx::Error> {
+    let rows = sqlx::query("SELECT a.provider,a.is_default,c.id,c.label,c.hint FROM gw_principal_credentials a JOIN gw_provider_credentials c ON c.id=a.credential_id WHERE a.principal_id=$1 ORDER BY a.provider,a.is_default DESC,c.label,c.id")
+        .bind(principal)
+        .fetch_all(c)
+        .await?;
+    let mut providers: Vec<Value> = Vec::new();
+    for r in &rows {
+        let provider: String = r.get("provider");
+        let item = json!({"id":r.get::<Uuid,_>("id"),"label":r.get::<String,_>("label"),"hint":r.get::<String,_>("hint"),"default":r.get::<bool,_>("is_default")});
+        match providers
+            .iter_mut()
+            .find(|p| p["provider"] == provider.as_str())
+        {
+            Some(p) => p["credentials"].as_array_mut().expect("목록").push(item),
+            None => providers.push(json!({"provider":provider,"credentials":[item]})),
+        }
+    }
+    Ok(Value::Array(providers))
 }
 
 impl CredentialService {
@@ -313,6 +436,30 @@ impl CredentialService {
             } => {
                 json!({"provider":provider.name(),"key_id":key,"credential_id":credential,"expected_credential_id":expected})
             }
+            CredentialCommand::Authorize {
+                principal,
+                credentials,
+                default,
+                expected,
+                bound,
+                ..
+            } => {
+                let unique: std::collections::BTreeSet<_> = credentials.iter().collect();
+                if unique.len() != credentials.len()
+                    || credentials.len() as i64 > MAX_ACTIVE_PER_PROVIDER
+                    || default.is_some() == credentials.is_empty()
+                    || default.is_some_and(|d| !credentials.contains(&d))
+                    || matches!(bound, Some(BoundAction::Move(to)) if !credentials.contains(to))
+                {
+                    return Err(ManagementError::Invalid);
+                }
+                let bound = match bound {
+                    None => json!(null),
+                    Some(BoundAction::Block) => json!("block"),
+                    Some(BoundAction::Move(to)) => json!({"move_to":to}),
+                };
+                json!({"provider":provider.name(),"principal_id":principal,"credential_ids":sorted(credentials),"default_credential_id":default,"expected":{"credential_ids":sorted(&expected.0),"default_credential_id":expected.1},"bound_keys":bound})
+            }
         };
         let digest = management::input_digest(ctx.method, ctx.path, &input);
         // 이미 처리한 명령은 Provider를 다시 호출하지 않고 기록된 결과를 돌려준다.
@@ -383,6 +530,13 @@ impl CredentialService {
                 .await?
                 .ok_or(ManagementError::NotFound)?;
         }
+        if let CredentialCommand::Authorize { principal, .. } = command {
+            sqlx::query("SELECT id FROM gw_principals WHERE id=$1 FOR UPDATE")
+                .bind(principal)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(ManagementError::NotFound)?;
+        }
         // Provider 하나의 사용 중 키 전체를 잠가 기본 키·이름·연결 변경을 한 줄로 세운다.
         let active = sqlx::query(
             "SELECT id,label,is_default,fingerprint,kek_id,version FROM gw_provider_credentials WHERE provider=$1 AND state='active' ORDER BY id FOR UPDATE",
@@ -410,6 +564,7 @@ impl CredentialService {
             })
         };
         let mut moved = 0_i64;
+        let mut authorization_counts = None;
         let (status, target_kind, target, before, changed) = match command {
             CredentialCommand::Add { label, secret, .. } => {
                 if let Some(id) = duplicate(None) {
@@ -456,6 +611,12 @@ impl CredentialService {
                         .bind(new).bind(provider.name()).bind(kek.as_slice()).bind(nonce.as_slice()).bind(&sealed).bind(fingerprint.expect("교체 키").as_slice()).bind(credentials::hint(secret)).bind(ctx.actor).bind(old.get::<String, _>("label")).bind(old.get::<bool, _>("is_default"))
                         .execute(&mut *tx).await?;
                     moved = move_bindings(&mut tx, *id, Some(new)).await?;
+                    // 사용자 인가도 새 키로 옮긴다(이름·기본 여부와 같이 원문만 바뀐 같은 키로 본다).
+                    sqlx::query("UPDATE gw_principal_credentials SET credential_id=$2 WHERE credential_id=$1")
+                        .bind(id)
+                        .bind(new)
+                        .execute(&mut *tx)
+                        .await?;
                     (201, "credential", new, before, true)
                 }
             }
@@ -522,6 +683,7 @@ impl CredentialService {
                 }
                 retire(&mut tx, *id, ctx.actor).await?;
                 moved = move_bindings(&mut tx, *id, *move_to).await?;
+                move_authorizations(&mut tx, *id, *move_to).await?;
                 if default && let Some(to) = move_to {
                     sqlx::query("UPDATE gw_provider_credentials SET is_default=true,version=version+1 WHERE id=$1")
                         .bind(to)
@@ -529,6 +691,85 @@ impl CredentialService {
                         .await?;
                 }
                 (200, "credential", *id, before, true)
+            }
+            CredentialCommand::Authorize {
+                principal,
+                credentials,
+                default,
+                expected,
+                bound,
+                ..
+            } => {
+                if credentials.iter().any(|id| find(*id).is_none()) {
+                    return Err(ManagementError::Invalid);
+                }
+                let current = sqlx::query("SELECT credential_id,is_default FROM gw_principal_credentials WHERE principal_id=$1 AND provider=$2 ORDER BY credential_id FOR UPDATE")
+                    .bind(principal)
+                    .bind(provider.name())
+                    .fetch_all(&mut *tx)
+                    .await?;
+                let current_ids: Vec<Uuid> =
+                    current.iter().map(|r| r.get("credential_id")).collect();
+                let current_default: Option<Uuid> = current
+                    .iter()
+                    .find(|r| r.get::<bool, _>("is_default"))
+                    .map(|r| r.get("credential_id"));
+                if (sorted(&expected.0), expected.1) != (current_ids.clone(), current_default) {
+                    return Err(ManagementError::AuthorizationConflict(
+                        current_ids,
+                        current_default,
+                    ));
+                }
+                let before = json!({"provider":provider.name(),"credential_ids":current_ids,"default_credential_id":current_default});
+                // 새 인가 밖의 회사 키에 연결된, 쓰고 있는 가상 키. 제한을 없애면(빈 목록) 막힐 키가 없다.
+                let outside: i64 = if credentials.is_empty() {
+                    0
+                } else {
+                    sqlx::query_scalar("SELECT count(*) FROM gw_virtual_key_credentials b JOIN gw_virtual_keys k ON k.id=b.key_id WHERE k.principal_id=$1 AND b.provider=$2 AND NOT (b.credential_id=ANY($3)) AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>clock_timestamp())")
+                        .bind(principal)
+                        .bind(provider.name())
+                        .bind(credentials)
+                        .fetch_one(&mut *tx)
+                        .await?
+                };
+                let mut blocked = 0_i64;
+                if outside > 0 {
+                    match bound {
+                        None => return Err(ManagementError::AuthorizationInUse(outside)),
+                        Some(BoundAction::Block) => blocked = outside,
+                        Some(BoundAction::Move(to)) => {
+                            moved = sqlx::query("UPDATE gw_virtual_key_credentials b SET credential_id=$4,bound_at=clock_timestamp() FROM gw_virtual_keys k WHERE k.id=b.key_id AND k.principal_id=$1 AND b.provider=$2 AND NOT (b.credential_id=ANY($3)) AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>clock_timestamp())")
+                                .bind(principal)
+                                .bind(provider.name())
+                                .bind(credentials)
+                                .bind(to)
+                                .execute(&mut *tx)
+                                .await?
+                                .rows_affected() as i64;
+                        }
+                    }
+                }
+                let wanted = sorted(credentials);
+                let changed = wanted != current_ids || *default != current_default;
+                if changed {
+                    sqlx::query("DELETE FROM gw_principal_credentials WHERE principal_id=$1 AND provider=$2")
+                        .bind(principal)
+                        .bind(provider.name())
+                        .execute(&mut *tx)
+                        .await?;
+                    for id in &wanted {
+                        sqlx::query("INSERT INTO gw_principal_credentials(principal_id,provider,credential_id,is_default,granted_by) VALUES($1,$2,$3,$4,$5)")
+                            .bind(principal)
+                            .bind(provider.name())
+                            .bind(id)
+                            .bind(Some(*id) == *default)
+                            .bind(ctx.actor)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                }
+                authorization_counts = Some((moved, blocked));
+                (200, "principal", *principal, before, changed || moved > 0)
             }
             CredentialCommand::BindKey {
                 key,
@@ -545,6 +786,16 @@ impl CredentialService {
                     .await?;
                 if !active_key {
                     return Err(ManagementError::Invalid);
+                }
+                // 키 주인에게 이 Provider의 인가가 있으면, 인가된 회사 키로만 옮길 수 있다.
+                let allowed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM gw_principal_credentials a JOIN gw_virtual_keys k ON k.principal_id=a.principal_id WHERE k.id=$1 AND a.provider=$2) OR EXISTS(SELECT 1 FROM gw_principal_credentials a JOIN gw_virtual_keys k ON k.principal_id=a.principal_id WHERE k.id=$1 AND a.credential_id=$3)")
+                    .bind(key)
+                    .bind(provider.name())
+                    .bind(credential)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                if !allowed {
+                    return Err(ManagementError::CredentialNotAuthorized);
                 }
                 let current: Option<Uuid> = sqlx::query_scalar(
                     "SELECT credential_id FROM gw_virtual_key_credentials WHERE key_id=$1 AND provider=$2",
@@ -570,7 +821,18 @@ impl CredentialService {
                 }
             }
         };
-        let (after, version) = if target_kind == "key" {
+        let (after, version) = if let Some((moved, blocked)) = authorization_counts {
+            let version: i64 = sqlx::query_scalar("SELECT version FROM gw_principals WHERE id=$1")
+                .bind(target)
+                .fetch_one(&mut *tx)
+                .await?;
+            let mut after = json!({"principal_id":target,"provider":provider.name()});
+            let current = principal_authorization(&mut tx, target).await?;
+            after["provider_credentials"] = current;
+            after["moved_keys"] = json!(moved.to_string());
+            after["blocked_keys"] = json!(blocked.to_string());
+            (after, version)
+        } else if target_kind == "key" {
             let version: i64 =
                 sqlx::query_scalar("SELECT version FROM gw_virtual_keys WHERE id=$1")
                     .bind(target)
@@ -589,7 +851,9 @@ impl CredentialService {
                 .ok_or(ManagementError::Invariant)?;
             (after, version)
         };
-        let projection = if target_kind == "key" {
+        let projection = if target_kind == "principal" {
+            json!({"authorization":after})
+        } else if target_kind == "key" {
             json!({"key":after})
         } else {
             json!({"credential":after})
@@ -659,7 +923,7 @@ async fn retire(c: &mut PgConnection, id: Uuid, actor: Uuid) -> Result<(), Manag
     Ok(())
 }
 
-async fn replay_on(
+pub(super) async fn replay_on(
     c: &mut PgConnection,
     ctx: &CommandContext<'_>,
     digest: &[u8; 32],

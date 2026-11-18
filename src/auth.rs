@@ -475,10 +475,16 @@ impl SsoAuthenticator {
         let human = self
             .authenticate(headers, AuthRoute::Inference, now)
             .await?;
+        // SSO 직접 요청은 사용자에게 정해 둔 기본 회사 키를 쓴다(없으면 Provider의 기본 키).
+        let credentials = self
+            .store
+            .principal_default_credentials(human.current.id)
+            .await?;
         Ok(AuthenticatedInference {
             current: human.current,
             key: None,
-            credentials: Vec::new(),
+            credentials,
+            blocked: Vec::new(),
         })
     }
     pub async fn authenticate(
@@ -548,10 +554,16 @@ impl SsoAuthenticator {
 pub struct AuthenticatedInference {
     pub current: crate::ledger::CurrentHuman,
     pub key: Option<crate::ledger::finance::KeyScope>,
-    /// 가상 키에 연결된 Provider별 회사 키. SSO 직접 요청과 연결이 없는 Provider는 기본 키를 쓴다.
+    /// 이 요청이 Provider별로 쓸 회사 키. 가상 키의 연결이 먼저이고, 연결이 없으면 사용자의 기본 키다.
+    /// 둘 다 없는 Provider는 그 Provider의 기본 키를 쓴다.
     pub credentials: Vec<(crate::config::ProviderId, uuid::Uuid)>,
+    /// 가상 키가 연결된 회사 키의 사용 인가가 해제된 Provider. 이 Provider로 가는 요청은 거절한다.
+    pub blocked: Vec<crate::config::ProviderId>,
 }
 impl AuthenticatedInference {
+    pub fn blocked(&self, provider: crate::config::ProviderId) -> bool {
+        self.blocked.contains(&provider)
+    }
     pub fn credential_for(&self, provider: crate::config::ProviderId) -> Option<uuid::Uuid> {
         self.credentials
             .iter()
