@@ -59,14 +59,14 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
         .current_human(&identity, &AccessSettings::from_config(&cfg))
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=gw_amount(100) WHERE id=$1",
-    )
-    .bind(human.policy_id)
-    .bind(json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]))
-    .execute(db.store.pool())
-    .await
-    .unwrap();
+    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=(100) WHERE id=$1")
+        .bind(human.policy_id)
+        .bind(
+            json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]),
+        )
+        .execute(db.store.pool())
+        .await
+        .unwrap();
     // Provider 키 인가는 필수다. 시험 고정 Provider 키를 인가한다.
     finance::allow(db.store.pool(), human.id).await;
     let ledger = Arc::new(PgLedger::new(

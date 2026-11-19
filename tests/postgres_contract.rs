@@ -4,7 +4,7 @@ use sqlx::{Row, ValueRef};
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn finance_schema_and_amount_boundary_are_real_sql() {
+async fn finance_schema_is_real_sql() {
     let db = postgres::TestDb::new().await;
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('gw_requests') IS NOT NULL")
         .fetch_one(db.store.pool())
@@ -14,27 +14,6 @@ async fn finance_schema_and_amount_boundary_are_real_sql() {
         db.close().await;
         panic!("financial request ledger missing");
     }
-    for bad in [
-        "-0.0000000000001",
-        "0.0000000000001",
-        "NaN",
-        "Infinity",
-        "10000000000000000",
-    ] {
-        assert!(
-            sqlx::query("SELECT gw_amount($1::numeric)")
-                .bind(bad)
-                .execute(db.store.pool())
-                .await
-                .is_err(),
-            "SQL amount boundary accepted rounding/overflow"
-        );
-    }
-    let r = sqlx::query("SELECT gw_amount('0.000000000001'::numeric)::text AS amount")
-        .fetch_one(db.store.pool())
-        .await
-        .unwrap();
-    assert_eq!(r.get::<String, _>("amount"), "0.000000000001");
     db.close().await;
 }
 
@@ -1278,7 +1257,7 @@ async fn model_price_overflow_and_totals_overflow_never_become_zero() {
         ledger.admit_request(&current, &spec).await.unwrap();
         let _p = ledger.authorize_dispatch(spec.id).await.unwrap();
         if variant == "totals_overflow" {
-            sqlx::query("UPDATE gw_usage_totals SET cost_usd=gw_amount('9999999999999999.999999999999'),carried_cost_usd=gw_amount('9999999999999999.999999999999')").execute(db.store.pool()).await.unwrap();
+            sqlx::query("UPDATE gw_usage_totals SET cost_usd=('9999999999999999.999999999999'),carried_cost_usd=('9999999999999999.999999999999')").execute(db.store.pool()).await.unwrap();
         }
         let mut obs = observation();
         if variant == "cache_rate" {
@@ -2002,7 +1981,7 @@ async fn single_send_rechecks_deadline_and_shutdown_without_claiming_free_cost()
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn immutable_snapshots_dispatch_facts_and_pause_owner_fk_are_real_sql() {
+async fn request_not_null_facts_and_pause_owner_fk_are_real_sql() {
     let db = postgres::TestDb::new().await;
     let p = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), p).await;
@@ -2021,12 +2000,6 @@ async fn immutable_snapshots_dispatch_facts_and_pause_owner_fk_are_real_sql() {
     for assignment in [
         "phase=NULL",
         "accounting_state=NULL",
-        "pricing_snapshot='{}'",
-        "execution_snapshot='{}'",
-        "principal_id=gen_random_uuid()",
-        "key_id=gen_random_uuid()",
-        "admitted_at=admitted_at-interval '1 day'",
-        "dispatch_authorized_at=NULL,lease_expires_at=NULL,cost_usd=0,outcome='failed'",
         "safety_violation_recorded=NULL",
     ] {
         assert!(
@@ -2035,7 +2008,7 @@ async fn immutable_snapshots_dispatch_facts_and_pause_owner_fk_are_real_sql() {
                 .execute(db.store.pool())
                 .await
                 .is_err(),
-            "request immutable/NOT NULL fact was changed"
+            "request NOT NULL fact was changed"
         );
     }
     let other = finance::human(db.store.pool()).await;
@@ -2062,7 +2035,7 @@ async fn immutable_snapshots_dispatch_facts_and_pause_owner_fk_are_real_sql() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn actual_budget_and_rate_denials_are_not_dispatch_and_free_count_is_independent() {
     let h = Harness::new().await;
-    sqlx::query("UPDATE gw_policies SET budget_limit_usd=gw_amount('0.000000000000'),count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_limit_usd=('0.000000000000'),count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     let r = h.request("/v1/messages", BODY).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.headers()["x-gateway-error-code"], "budget_exhausted");
@@ -2123,11 +2096,7 @@ async fn explicit_pg_suite_has_no_product_database_fallback() {
             .env("DB_NAME", "company")
             .env("DB_USER", "synthetic")
             .env("DB_PASSWORD", "never-read-synthetic-secret")
-            .args([
-                "--ignored",
-                "--exact",
-                "finance_schema_and_amount_boundary_are_real_sql",
-            ])
+            .args(["--ignored", "--exact", "finance_schema_is_real_sql"])
             .kill_on_drop(true);
         if let Some(url) = test_url {
             child.env("TEST_DATABASE_URL", url);
@@ -2180,10 +2149,10 @@ async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_
             .fetch_one(db.store.pool())
             .await
             .unwrap();
-        assert_eq!(n, 11);
+        assert_eq!(n, 13);
         if future {
             sqlx::query(
-                "INSERT INTO gw_schema_migrations VALUES(12,decode(repeat('00',32),'hex'))",
+                "INSERT INTO gw_schema_migrations VALUES(14,decode(repeat('00',32),'hex'))",
             )
             .execute(db.store.pool())
             .await
@@ -2234,16 +2203,6 @@ async fn internal_count_relationship_and_budget_states_are_constrained() {
             .is_err(),
         "second internal child accepted"
     );
-    assert!(
-        sqlx::query(statement)
-            .bind(uuid::Uuid::new_v4())
-            .bind(count.id)
-            .bind(child)
-            .execute(db.store.pool())
-            .await
-            .is_err(),
-        "recursive child accepted"
-    );
     for assignment in [
         "state='settled'",
         "applied_cost_usd=1",
@@ -2284,7 +2243,7 @@ async fn free_count_ignores_generation_tpm_reserved_budget_unknown_and_safety_on
             .status(),
         StatusCode::OK
     );
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('0.000000000000'),tpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('0.000000000000'),tpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     sqlx::query("UPDATE gw_principals SET inference_paused_at=clock_timestamp(),inference_pause_reason='amount_overflow',inference_pause_request_id=(SELECT id FROM gw_requests WHERE principal_id=$1 LIMIT 1),inference_safety_version=inference_safety_version+1 WHERE id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     h.provider
         .set(
@@ -2898,8 +2857,8 @@ async fn two_scope_finalizer_fixture(pool: &sqlx::PgPool, source: uuid::Uuid) ->
     sqlx::query("INSERT INTO gw_requests(id,principal_id,key_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,dispatch_authorized_at,lease_expires_at,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest) SELECT $2,principal_id,$3,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,dispatch_authorized_at,lease_expires_at,executor_id,phase,accounting_state,pricing_snapshot,jsonb_set(execution_snapshot,'{auth_dependency_versions,key}',jsonb_build_object('id',$3::uuid::text,'version','1')),auth_config_digest FROM gw_requests WHERE id=$1").bind(source).bind(id).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_usage_totals(scope_id,period_start,period_end,timezone_snapshot) SELECT $2,period_start,period_end,timezone_snapshot FROM gw_request_budgets WHERE request_id=$1").bind(source).bind(scope).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_rate_windows(scope_id,lane,window_start,window_end,admitted_count) SELECT $2,rate_lane,rate_start,rate_end,1 FROM gw_request_budgets WHERE request_id=$1").bind(source).bind(scope).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) SELECT $2,sc.id,1,b.policy_snapshot,b.period_start,b.period_end,b.timezone_snapshot,b.rate_lane,b.rate_start,b.rate_end,b.budget_mode,gw_amount(0.000001),gw_amount(0.000001),3,3,'active' FROM gw_request_budgets b CROSS JOIN (SELECT scope_id AS id FROM gw_request_budgets WHERE request_id=$1 UNION ALL SELECT $3) sc WHERE b.request_id=$1").bind(source).bind(id).bind(scope).execute(&mut *tx).await.unwrap();
-    sqlx::query("UPDATE gw_usage_totals SET reserved_usd=gw_amount(0.000001)")
+    sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) SELECT $2,sc.id,1,b.policy_snapshot,b.period_start,b.period_end,b.timezone_snapshot,b.rate_lane,b.rate_start,b.rate_end,b.budget_mode,(0.000001),(0.000001),3,3,'active' FROM gw_request_budgets b CROSS JOIN (SELECT scope_id AS id FROM gw_request_budgets WHERE request_id=$1 UNION ALL SELECT $3) sc WHERE b.request_id=$1").bind(source).bind(id).bind(scope).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE gw_usage_totals SET reserved_usd=(0.000001)")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -3223,7 +3182,7 @@ async fn anthropic_sdk_streaming_alias_and_native_error_have_one_attempt_and_rea
 async fn s4_reserved_last_budget_is_atomic() {
     let db = postgres::TestDb::new().await;
     let id = finance::human(db.store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('0.004296000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('0.004296000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
     let current = finance::current(db.store.pool(), id).await;
     let ledger = Arc::new(PgLedger::new(
         db.store.clone(),

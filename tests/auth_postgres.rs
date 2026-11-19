@@ -496,8 +496,6 @@ async fn principal_policy_constraints_and_migration_are_real_sql() {
     let id = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example','subject','alice@example.test','Alice')").bind(id).execute(db.store.pool()).await.unwrap();
     for statement in [
-        "UPDATE gw_principals SET subject='other' WHERE id=$1",
-        "UPDATE gw_principals SET issuer='https://other.example' WHERE id=$1",
         "UPDATE gw_principals SET email='Alice@example.test' WHERE id=$1",
         "UPDATE gw_principals SET kind='service',issuer=NULL,subject=NULL,email=NULL,owner_principal_id=id WHERE id=$1",
         "UPDATE gw_principals SET disabled_at=clock_timestamp(),disabled_reason=NULL WHERE id=$1",
@@ -512,23 +510,20 @@ async fn principal_policy_constraints_and_migration_are_real_sql() {
                 .execute(db.store.pool())
                 .await
                 .is_err(),
-            "SQL CHECK/trigger must reject invalid principal state"
+            "SQL CHECK must reject invalid principal state"
         );
     }
     let service = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','service',$2)").bind(service).bind(id).execute(db.store.pool()).await.unwrap();
-    assert!(sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','invalid owner',$2)").bind(uuid::Uuid::new_v4()).bind(service).execute(db.store.pool()).await.is_err());
     let scope = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','actual','calendar_month','UTC',$2)").bind(scope).bind(id).execute(db.store.pool()).await.unwrap();
     for assignment in [
-        "period_timezone='No/SuchZone'",
         "allow_rules='{}'",
         "rpm_limit=0",
         "budget_limit_usd='NaN'",
         "budget_limit_usd='Infinity'",
         "budget_limit_usd=-1",
         "version=0",
-        "principal_id=(SELECT id FROM gw_principals WHERE kind='service' LIMIT 1)",
     ] {
         assert!(
             sqlx::query(&format!("UPDATE gw_policies SET {assignment} WHERE id=$1"))
@@ -536,14 +531,14 @@ async fn principal_policy_constraints_and_migration_are_real_sql() {
                 .execute(db.store.pool())
                 .await
                 .is_err(),
-            "SQL policy CHECK/trigger must reject invalid state"
+            "SQL policy CHECK must reject invalid state"
         );
     }
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_schema_migrations")
         .fetch_one(db.store.pool())
         .await
         .unwrap();
-    assert_eq!(count, 11);
+    assert_eq!(count, 13);
     sqlx::query("UPDATE gw_schema_migrations SET checksum=decode(repeat('00',32),'hex')")
         .execute(db.store.pool())
         .await

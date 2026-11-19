@@ -433,7 +433,7 @@ async fn retained_month_total_does_not_fabricate_deleted_detail() {
         .as_str()
         .unwrap();
     let mut tx = db.store.pool().begin().await.unwrap();
-    sqlx::query("UPDATE gw_usage_totals SET carried_cost_usd=gw_amount(3),cost_usd=gw_amount(3),carried_settled_count=settled_count,carried_input_tokens=input_tokens,carried_output_tokens=output_tokens,detail_deleted_through=(SELECT admitted_at FROM gw_requests WHERE id=$1) WHERE scope_id=(SELECT id FROM gw_policies WHERE principal_id=$2 AND key_id IS NULL)").bind(source).bind(id).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE gw_usage_totals SET carried_cost_usd=(3),cost_usd=(3),carried_settled_count=settled_count,carried_input_tokens=input_tokens,carried_output_tokens=output_tokens,detail_deleted_through=(SELECT admitted_at FROM gw_requests WHERE id=$1) WHERE scope_id=(SELECT id FROM gw_policies WHERE principal_id=$2 AND key_id IS NULL)").bind(source).bind(id).execute(&mut *tx).await.unwrap();
     sqlx::query("DELETE FROM gw_usage_events WHERE request_id=$1")
         .bind(source)
         .execute(&mut *tx)
@@ -530,7 +530,7 @@ async fn selected_key_balance_and_null_tokens_are_independent_of_period_filters(
     let mut tx = db.store.pool().begin().await.unwrap();
     sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection) VALUES($1,$2,decode(repeat('01',32),'hex'),'issue_key','key',$3,201,'{}')").bind(id).bind(command).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_virtual_keys(id,principal_id,secret_hash,hash_version,public_prefix,name,grant_snapshot,validity_preset,created_by,created_command_id) VALUES($1,$2,decode(repeat('02',32),'hex'),1,'fixture','fixture','[]','unlimited',$2,$3)").bind(key).bind(id).bind(command).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'[]','reserved',gw_amount(10),'calendar_month','UTC',$2)").bind(scope).bind(id).bind(key).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'[]','reserved',(10),'calendar_month','UTC',$2)").bind(scope).bind(id).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("UPDATE gw_request_budgets SET applied_input_tokens=NULL,applied_output_tokens=NULL WHERE request_id=$1").bind(source).execute(&mut *tx).await.unwrap();
     sqlx::query("UPDATE gw_usage_totals SET input_tokens=0,output_tokens=0,settled_unknown_tokens_count=1 WHERE scope_id=(SELECT id FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL)").bind(id).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
@@ -594,21 +594,19 @@ async fn multimonth_usage_never_emits_an_out_of_range_amount() {
     let clone = uuid::Uuid::new_v4();
     let max = "9999999999999999.999999999999";
     let mut tx = db.store.pool().begin().await.unwrap();
-    sqlx::query("UPDATE gw_requests SET cost_usd=gw_amount($2::numeric) WHERE id=$1")
+    sqlx::query("UPDATE gw_requests SET cost_usd=($2::numeric) WHERE id=$1")
         .bind(source)
         .bind(max)
         .execute(&mut *tx)
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE gw_request_budgets SET applied_cost_usd=gw_amount($2::numeric) WHERE request_id=$1",
-    )
-    .bind(source)
-    .bind(max)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE gw_usage_totals SET cost_usd=gw_amount($2::numeric) WHERE scope_id=(SELECT scope_id FROM gw_request_budgets WHERE request_id=$1)").bind(source).bind(max).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE gw_request_budgets SET applied_cost_usd=($2::numeric) WHERE request_id=$1")
+        .bind(source)
+        .bind(max)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE gw_usage_totals SET cost_usd=($2::numeric) WHERE scope_id=(SELECT scope_id FROM gw_request_budgets WHERE request_id=$1)").bind(source).bind(max).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_requests SELECT (jsonb_populate_record(NULL::gw_requests,to_jsonb(r)||jsonb_build_object('id',$2::uuid,'admitted_at',admitted_at-interval '1 month','admit_expires_at',admit_expires_at-interval '1 month','transport_deadline',transport_deadline-interval '1 month','execution_deadline',execution_deadline-interval '1 month','dispatch_authorized_at',dispatch_authorized_at-interval '1 month','lease_expires_at',lease_expires_at-interval '1 month','finished_at',finished_at-interval '1 month'))).* FROM gw_requests r WHERE id=$1").bind(source).bind(clone).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_usage_totals SELECT (jsonb_populate_record(NULL::gw_usage_totals,to_jsonb(t)||jsonb_build_object('period_start',period_start-interval '1 month','period_end',period_end-interval '1 month'))).* FROM gw_usage_totals t WHERE scope_id=(SELECT scope_id FROM gw_request_budgets WHERE request_id=$1)").bind(source).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_request_budgets SELECT (jsonb_populate_record(NULL::gw_request_budgets,to_jsonb(b)||jsonb_build_object('request_id',$2::uuid,'period_start',period_start-interval '1 month','period_end',period_end-interval '1 month'))).* FROM gw_request_budgets b WHERE request_id=$1").bind(source).bind(clone).execute(&mut *tx).await.unwrap();

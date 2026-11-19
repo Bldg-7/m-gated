@@ -493,7 +493,7 @@ impl PgIdentityStore {
                 ));
             }
             // 기간 경계(관리자가 정한 예산 시간대 기준)와 정확히 맞는 범위만 월 합계로 답한다.
-            let complete:bool=sqlx::query_scalar("SELECT (SELECT period_start FROM gw_budget_period($1::timestamptz))=$1::timestamptz AND (SELECT period_start FROM gw_budget_period($2::timestamptz))=$2::timestamptz").bind(from).bind(to).fetch_one(&mut *tx).await?;
+            let complete:bool=sqlx::query_scalar(&format!("SELECT (SELECT period_start FROM {} a)=$1::timestamptz AND (SELECT period_start FROM {} b)=$2::timestamptz", super::settings::budget_period_sql("$1::timestamptz"), super::settings::budget_period_sql("$2::timestamptz"))).bind(from).bind(to).fetch_one(&mut *tx).await?;
             if !complete
                 || filter.provider.is_some()
                 || filter.model.is_some()
@@ -701,7 +701,8 @@ async fn balance(
     extra: Vec<&str>,
 ) -> Result<Value, QueryError> {
     let sql = format!(
-        "WITH period AS(SELECT period_start AS start,period_end AS finish,timezone FROM gw_budget_period($2::timestamptz)) SELECT {} AS start,{} AS finish,period.timezone,COALESCE(t.cost_usd,0)::numeric(38,12)::text AS cost,COALESCE(t.reserved_usd,0)::numeric(38,12)::text AS reserved,COALESCE(t.unknown_count,0)::text AS unknown,CASE WHEN $3::numeric IS NULL THEN NULL ELSE greatest($3::numeric-COALESCE(t.cost_usd,0)-CASE WHEN $4='reserved' THEN COALESCE(t.reserved_usd,0) ELSE 0 END,0)::numeric(38,12)::text END AS remaining FROM period LEFT JOIN gw_usage_totals t ON t.scope_id=$1 AND t.period_start=period.start",
+        "WITH period AS(SELECT period_start AS start,period_end AS finish,timezone FROM {} b) SELECT {} AS start,{} AS finish,period.timezone,COALESCE(t.cost_usd,0)::numeric(38,12)::text AS cost,COALESCE(t.reserved_usd,0)::numeric(38,12)::text AS reserved,COALESCE(t.unknown_count,0)::text AS unknown,CASE WHEN $3::numeric IS NULL THEN NULL ELSE greatest($3::numeric-COALESCE(t.cost_usd,0)-CASE WHEN $4='reserved' THEN COALESCE(t.reserved_usd,0) ELSE 0 END,0)::numeric(38,12)::text END AS remaining FROM period LEFT JOIN gw_usage_totals t ON t.scope_id=$1 AND t.period_start=period.start",
+        super::settings::budget_period_sql("$2::timestamptz"),
         stamp_sql("period.start"),
         stamp_sql("period.finish")
     );

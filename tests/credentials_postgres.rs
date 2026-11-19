@@ -1132,11 +1132,14 @@ async fn budget_timezone_is_global_and_changes_from_next_period() {
     let pool = h.db.store.pool();
     // 기간 계산: 바뀐 직후의 기간 하나만 이전 기간 끝부터 새 시간대의 다음 달 1일 0시까지다.
     let period = |t: &'static str| async move {
-        let r = sqlx::query("SELECT period_start::text AS s,period_end::text AS e,timezone FROM gw_budget_period($1::timestamptz)")
-            .bind(t)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+        let r = sqlx::query(&format!(
+            "SELECT period_start::text AS s,period_end::text AS e,timezone FROM {} b",
+            m_gated::ledger::settings::budget_period_sql("$1::timestamptz")
+        ))
+        .bind(t)
+        .fetch_one(pool)
+        .await
+        .unwrap();
         (
             r.get::<String, _>("s"),
             r.get::<String, _>("e"),

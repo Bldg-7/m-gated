@@ -2,7 +2,7 @@
 //!
 //! - 예산(사용자 정책·가상 키)의 월 기간은 모두 이 시간대의 달력 한 달이다.
 //! - 바꾸면 지금 기간은 이전 시간대로 끝까지 세고, 다음 기간부터 새 시간대를 쓴다. 바뀐 직후의 기간 하나만
-//!   이전 기간이 끝난 시각부터 새 시간대의 다음 달 1일 0시까지로 센다(`gw_budget_period`).
+//!   이전 기간이 끝난 시각부터 새 시간대의 다음 달 1일 0시까지로 센다([`budget_period_sql`]).
 //! - 다음 기간이 시작되기 전에 다시 바꾸면 예약된 변경을 덮어쓴다. 지금 시간대와 같게 바꾸면 예약을 취소한다.
 use super::{
     PgIdentityStore,
@@ -13,19 +13,44 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
+/// 시각 `t`가 속한 예산 기간과 그 기간의 시간대를 구하는 조회문 조각. `FROM` 뒤에 넣어 쓴다.
+///
+/// - 열: `period_start`, `period_end`, `timezone`. `t`는 `timestamptz` 값을 내는 SQL 식이다.
+/// - 보통은 그 시간대의 달력 한 달이다.
+/// - 시간대가 바뀐 직후의 기간 하나만, 이전 기간이 끝난 시각부터 새 시간대의 다음 달 1일 0시까지다.
+/// - 다음 시간대 변경이 기간 끝보다 먼저 오면 기간은 그 변경 시각에 끝난다.
+/// - 달의 경계는 Postgres 의 시간대 자료로 계산한다. 그래서 장부의 다른 시각 계산과 어긋나지 않는다.
+pub fn budget_period_sql(t: &str) -> String {
+    const MONTH: &str = "date_trunc('month',bp_a.t AT TIME ZONE bp_z.timezone)";
+    const SHORT: &str = "bp_c.boundary IS NOT NULL AND bp_a.t<bp_c.boundary";
+    format!(
+        "(SELECT CASE WHEN {SHORT} THEN bp_z.since ELSE bp_c.month_start END AS period_start,\
+         LEAST(CASE WHEN {SHORT} THEN bp_c.boundary ELSE bp_c.month_end END,bp_n.next_change) AS period_end,\
+         bp_z.timezone \
+         FROM (SELECT ({t})::timestamptz AS t) bp_a \
+         CROSS JOIN LATERAL (SELECT effective_from AS since,timezone FROM gw_budget_timezones WHERE effective_from<=bp_a.t ORDER BY effective_from DESC LIMIT 1) bp_z \
+         CROSS JOIN LATERAL (SELECT {MONTH} AT TIME ZONE bp_z.timezone AS month_start,\
+         ({MONTH}+interval '1 month') AT TIME ZONE bp_z.timezone AS month_end,\
+         CASE WHEN bp_z.since>'-infinity'::timestamptz THEN (date_trunc('month',(bp_z.since+interval '2 days') AT TIME ZONE bp_z.timezone)+interval '1 month') AT TIME ZONE bp_z.timezone END AS boundary) bp_c \
+         CROSS JOIN LATERAL (SELECT min(effective_from) AS next_change FROM gw_budget_timezones WHERE effective_from>bp_a.t) bp_n)"
+    )
+}
+
 /// 지금 적용 중인 예산 시간대와 기간, 예약된 변경. 모든 사용자가 볼 수 있는 값이다.
 pub async fn budget_timezone_view(c: &mut PgConnection) -> Result<Value, sqlx::Error> {
     let now = sqlx::query(&format!(
-        "SELECT b.timezone,{} AS period_start,{} AS period_end FROM gw_budget_period(clock_timestamp()) b",
+        "SELECT b.timezone,{} AS period_start,{} AS period_end FROM {} b",
         super::dashboard::stamp_sql("b.period_start"),
-        super::dashboard::stamp_sql("b.period_end")
+        super::dashboard::stamp_sql("b.period_end"),
+        budget_period_sql("clock_timestamp()")
     ))
     .fetch_one(&mut *c)
     .await?;
     let pending = sqlx::query(&format!(
-        "SELECT z.timezone,{} AS effective_from,{} AS first_period_end FROM gw_budget_timezones z CROSS JOIN LATERAL gw_budget_period(z.effective_from) b WHERE z.effective_from>clock_timestamp() ORDER BY z.effective_from LIMIT 1",
+        "SELECT z.timezone,{} AS effective_from,{} AS first_period_end FROM gw_budget_timezones z CROSS JOIN LATERAL {} b WHERE z.effective_from>clock_timestamp() ORDER BY z.effective_from LIMIT 1",
         super::dashboard::stamp_sql("z.effective_from"),
-        super::dashboard::stamp_sql("b.period_end")
+        super::dashboard::stamp_sql("b.period_end"),
+        budget_period_sql("z.effective_from")
     ))
     .fetch_optional(&mut *c)
     .await?;
@@ -105,11 +130,11 @@ impl PgIdentityStore {
                 .execute(&mut *tx)
                 .await?;
             let current: String =
-                sqlx::query_scalar("SELECT timezone FROM gw_budget_period(clock_timestamp())")
+                sqlx::query_scalar(&format!("SELECT timezone FROM {} b", budget_period_sql("clock_timestamp()")))
                     .fetch_one(&mut *tx)
                     .await?;
             if current != timezone {
-                sqlx::query("INSERT INTO gw_budget_timezones(effective_from,timezone,set_by) SELECT b.period_end,$1,$2 FROM gw_budget_period(clock_timestamp()) b")
+                sqlx::query(&format!("INSERT INTO gw_budget_timezones(effective_from,timezone,set_by) SELECT b.period_end,$1,$2 FROM {} b", budget_period_sql("clock_timestamp()")))
                     .bind(timezone)
                     .bind(ctx.actor)
                     .execute(&mut *tx)

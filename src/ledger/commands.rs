@@ -29,7 +29,7 @@ async fn insert_policy(
     limits: &PolicyLimits,
     actor: Uuid,
 ) -> Result<(), ManagementError> {
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,rpm_limit,tpm_limit,count_rpm_limit,updated_by) VALUES($1,$2,$3,$4,$5,gw_amount($6::numeric),'calendar_month',COALESCE($7::text,(SELECT timezone FROM gw_budget_period(clock_timestamp()))),$8,$9,$10,$11)").bind(id).bind(principal).bind(key).bind(grants).bind(limits.budget.as_ref().map_or("actual",|b|b.mode.as_str())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(Option::<&str>::None).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(actor).execute(c).await?;
+    sqlx::query(&format!("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,rpm_limit,tpm_limit,count_rpm_limit,updated_by) VALUES($1,$2,$3,$4,$5,($6::numeric),'calendar_month',COALESCE($7::text,(SELECT timezone FROM {} b)),$8,$9,$10,$11)",super::settings::budget_period_sql("clock_timestamp()"))).bind(id).bind(principal).bind(key).bind(grants).bind(limits.budget.as_ref().map_or("actual",|b|b.mode.as_str())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(Option::<&str>::None).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(actor).execute(c).await?;
     Ok(())
 }
 fn require_subset(requested: &Value, allowed: &Value) -> Result<(), ManagementError> {
@@ -495,7 +495,7 @@ impl PgLedger {
                     || p.get::<Option<String>, _>("security_fence_ref") != new_fence;
                 result_version = Some(policy.get::<i64, _>("version") + i64::from(changed));
                 if changed {
-                    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode=$3,budget_limit_usd=gw_amount($4::numeric),period_timezone=$5,rpm_limit=$6,tpm_limit=$7,count_rpm_limit=$8,version=version+1,updated_by=$9,updated_at=$10::timestamptz WHERE id=$1").bind(policy.get::<Uuid,_>("id")).bind(&grants).bind(limits.budget.as_ref().map_or(policy.get::<String,_>("budget_mode"),|b|b.mode.clone())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(policy.get::<String,_>("period_timezone")).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(ctx.actor).bind(&now).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode=$3,budget_limit_usd=($4::numeric),period_timezone=$5,rpm_limit=$6,tpm_limit=$7,count_rpm_limit=$8,version=version+1,updated_by=$9,updated_at=$10::timestamptz WHERE id=$1").bind(policy.get::<Uuid,_>("id")).bind(&grants).bind(limits.budget.as_ref().map_or(policy.get::<String,_>("budget_mode"),|b|b.mode.clone())).bind(limits.budget.as_ref().map(|b|&b.limit_usd)).bind(policy.get::<String,_>("period_timezone")).bind(limits.rpm).bind(limits.tpm).bind(limits.count_rpm).bind(ctx.actor).bind(&now).execute(&mut *tx).await?;
                     if old_disabled != v.disabled
                         || p.get::<Option<String>, _>("security_fence_ref") != new_fence
                     {

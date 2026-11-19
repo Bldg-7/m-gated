@@ -22,7 +22,7 @@ async fn count_explicit_error_is_not_evidence_for_free_or_paid_external_or_inter
                     s4::chargeable_configuration(true)
                 };
                 let h = Harness::with_config(cfg).await;
-                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
                 h.provider.set_count(StatusCode::OK, json_headers(), Bytes::from_static(if bad {
                     br#"{"type":"error","error":{"type":"api_error","message":"synthetic failure"},"input_tokens":1}"#
                 } else { br#"{"input_tokens":321}"# })).await;
@@ -206,7 +206,7 @@ async fn sse_unexpected_terminal_usage_native_and_alias_same_or_split_part_stays
                         Bytes::from_static(br#"{"input_tokens":321}"#),
                     )
                     .await;
-                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+                sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
                 let tail = if bad {
                     END.replace(
                         r#"{"type":"message_stop"}"#,

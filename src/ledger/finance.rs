@@ -745,7 +745,7 @@ impl PgLedger {
                 return Err(LedgerError::UnsupportedStrictPolicy);
             }
             // 예산 기간은 관리자가 정한 예산 시간대 하나로 정한다(정책마다 따로 두지 않는다).
-            let period=sqlx::query("SELECT b.period_start::text AS start,b.period_end::text AS finish,b.timezone,to_timestamp(floor(extract(epoch FROM $1::timestamptz)/60)*60)::text AS rate FROM gw_budget_period($1::timestamptz) b")
+            let period=sqlx::query(&format!("SELECT b.period_start::text AS start,b.period_end::text AS finish,b.timezone,to_timestamp(floor(extract(epoch FROM $1::timestamptz)/60)*60)::text AS rate FROM {} b", super::settings::budget_period_sql("$1::timestamptz")))
                 .bind(&provisional).fetch_one(&mut *tx).await?;
             let timezone: String = period.get("timezone");
             let start: String = period.get("start");
@@ -835,7 +835,7 @@ impl PgLedger {
                 .ok_or(LedgerError::InvariantViolation)?;
             let snapshot = json!({"scope_id":scope.to_string(),"version":policy.get::<i64,_>("version").to_string(),"grants":policy.get::<Value,_>("allow_rules"),"limits":stored});
             sqlx::query("UPDATE gw_rate_windows SET admitted_count=admitted_count+1 WHERE scope_id=$1 AND lane=$2 AND window_start=$3::timestamptz").bind(scope).bind(lane).bind(&rate).execute(&mut *tx).await?;
-            sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) VALUES($1,$2,$3,$4,$5::timestamptz,$6::timestamptz,$7,$8,$9::timestamptz,$9::timestamptz+interval '60 seconds',$10,gw_amount(0),gw_amount(0),0,0,'admitted')")
+            sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) VALUES($1,$2,$3,$4,$5::timestamptz,$6::timestamptz,$7,$8,$9::timestamptz,$9::timestamptz+interval '60 seconds',$10,(0),(0),0,0,'admitted')")
                 .bind(spec.id).bind(scope).bind(policy.get::<i64,_>("version")).bind(snapshot).bind(start).bind(end).bind(timezone).bind(lane).bind(rate).bind(policy.get::<String,_>("budget_mode")).execute(&mut *tx).await?;
         }
         if spec
@@ -1206,9 +1206,9 @@ impl PgLedger {
                 let start: String = b.get("start_text");
                 let rate_start: String = b.get("rate_text");
                 let lane: String = b.get("rate_lane");
-                sqlx::query("UPDATE gw_usage_totals SET reserved_usd=gw_amount(reserved_usd+gw_amount($3::numeric)) WHERE scope_id=$1 AND period_start=$2::timestamptz").bind(scope).bind(start).bind(reservation.to_string()).execute(&mut *tx).await?;
+                sqlx::query("UPDATE gw_usage_totals SET reserved_usd=(reserved_usd+($3::numeric)) WHERE scope_id=$1 AND period_start=$2::timestamptz").bind(scope).bind(start).bind(reservation.to_string()).execute(&mut *tx).await?;
                 sqlx::query("UPDATE gw_rate_windows SET reserved_tokens=reserved_tokens+$4 WHERE scope_id=$1 AND lane=$2 AND window_start=$3::timestamptz").bind(scope).bind(lane).bind(rate_start).bind(tokens).execute(&mut *tx).await?;
-                sqlx::query("UPDATE gw_request_budgets SET reservation_usd=gw_amount($3::numeric),remaining_reservation_usd=gw_amount($3::numeric),reserved_tokens=$4,remaining_reserved_tokens=$4 WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(reservation.to_string()).bind(tokens).execute(&mut *tx).await?;
+                sqlx::query("UPDATE gw_request_budgets SET reservation_usd=($3::numeric),remaining_reservation_usd=($3::numeric),reserved_tokens=$4,remaining_reserved_tokens=$4 WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(reservation.to_string()).bind(tokens).execute(&mut *tx).await?;
             }
         }
         sqlx::query("UPDATE gw_request_budgets SET state='active' WHERE request_id=$1")
@@ -1495,10 +1495,10 @@ impl PgLedger {
             let lane: String = b.get("rate_lane");
             if let Some(cost) = amount {
                 let (input, output) = tokens.unwrap_or((0, 0));
-                sqlx::query("UPDATE gw_usage_totals SET cost_usd=gw_amount(cost_usd+gw_amount($3::numeric)),reserved_usd=gw_amount(reserved_usd-(SELECT remaining_reservation_usd FROM gw_request_budgets WHERE request_id=$4 AND scope_id=$1)),settled_count=settled_count+1,input_tokens=input_tokens+$5,output_tokens=output_tokens+$6,settled_unknown_tokens_count=settled_unknown_tokens_count+$7,updated_at=clock_timestamp() WHERE scope_id=$1 AND period_start=$2::timestamptz")
+                sqlx::query("UPDATE gw_usage_totals SET cost_usd=(cost_usd+($3::numeric)),reserved_usd=(reserved_usd-(SELECT remaining_reservation_usd FROM gw_request_budgets WHERE request_id=$4 AND scope_id=$1)),settled_count=settled_count+1,input_tokens=input_tokens+$5,output_tokens=output_tokens+$6,settled_unknown_tokens_count=settled_unknown_tokens_count+$7,updated_at=clock_timestamp() WHERE scope_id=$1 AND period_start=$2::timestamptz")
                     .bind(scope).bind(&start).bind(cost.to_string()).bind(id).bind(input).bind(output).bind(i64::from(tokens.is_none())).execute(&mut *tx).await?;
                 sqlx::query("UPDATE gw_rate_windows SET reserved_tokens=reserved_tokens-$4,settled_tokens=settled_tokens+$5,updated_at=clock_timestamp() WHERE scope_id=$1 AND lane=$2 AND window_start=$3::timestamptz").bind(scope).bind(lane).bind(rate).bind(b.get::<i64,_>("remaining_reserved_tokens")).bind(if r.get::<String,_>("api")=="count_tokens" {0}else{input.checked_add(output).ok_or(LedgerError::AmountOverflow)?}).execute(&mut *tx).await?;
-                sqlx::query("UPDATE gw_request_budgets SET state='settled',remaining_reservation_usd=gw_amount(0),remaining_reserved_tokens=0,applied_cost_usd=gw_amount($3::numeric),applied_input_tokens=$4,applied_output_tokens=$5 WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(cost.to_string()).bind(tokens.map(|t|t.0)).bind(tokens.map(|t|t.1)).execute(&mut *tx).await?;
+                sqlx::query("UPDATE gw_request_budgets SET state='settled',remaining_reservation_usd=(0),remaining_reserved_tokens=0,applied_cost_usd=($3::numeric),applied_input_tokens=$4,applied_output_tokens=$5 WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(cost.to_string()).bind(tokens.map(|t|t.0)).bind(tokens.map(|t|t.1)).execute(&mut *tx).await?;
             } else {
                 sqlx::query("UPDATE gw_usage_totals SET unknown_count=unknown_count+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND period_start=$2::timestamptz").bind(scope).bind(start).execute(&mut *tx).await?;
                 sqlx::query("UPDATE gw_request_budgets SET state='unknown' WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).execute(&mut *tx).await?;
@@ -1513,7 +1513,7 @@ impl PgLedger {
         };
         let resolution = json!({"pricing_version":pricing.pricing_version,"categories":pricing.rates.iter().filter_map(|rate|if source!="provider"{None}else{observation.usage.as_ref()}.and_then(|u|{let n=match rate.category.as_str(){"input"=>pricing.billable_input(u).ok()?,"output"=>u.output_tokens,"cache_read"=>u.cache_read_tokens,"cache_write"|"cache_write_5m"=>u.cache_write_tokens,_=>return None};Some(json!({"category":rate.category,"tokens":n.to_string(),"rate":rate.usd_per_million_tokens}))})).collect::<Vec<_>>(),"rounding_version":pricing.rounding_version,"cost_usd":amount.map(|n|n.to_string()),"unresolved_reason":if amount.is_none(){Some(reason)}else{None}});
         sqlx::query("INSERT INTO gw_usage_events(request_id,kind,actual_model,provider_usage,normalized_usage,pricing_resolution,reason_code,content_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(kind).bind(if source=="provider"{observation.usage.as_ref().map(|u|u.actual_model.as_str())}else{None}).bind(provider_usage).bind(usage).bind(resolution).bind(reason).bind(&digest).execute(&mut *tx).await?;
-        sqlx::query("UPDATE gw_requests SET phase='finished',outcome=$2,accounting_state=$3,cost_usd=gw_amount($4::numeric),finished_at=$9::timestamptz,provider_request_id=$5,http_status=$6,reason_code=$7,result_digest=$8,version=version+1 WHERE id=$1")
+        sqlx::query("UPDATE gw_requests SET phase='finished',outcome=$2,accounting_state=$3,cost_usd=($4::numeric),finished_at=$9::timestamptz,provider_request_id=$5,http_status=$6,reason_code=$7,result_digest=$8,version=version+1 WHERE id=$1")
             .bind(id).bind(outcome).bind(state).bind(amount.map(|n|n.to_string())).bind(&observation.provider_request_id).bind(observation.http_status.map(|n|n as i16)).bind(reason).bind(&digest).bind(r.get::<String,_>("db_now")).execute(&mut *tx).await?;
         if let Some(reason) = safety {
             self.pause(&mut tx, &p, &r, id, reason).await?;

@@ -47,7 +47,7 @@ async fn key(
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection) VALUES($1,$2,decode(repeat('00',32),'hex'),'issue_key','key',$3,201,'{}')").bind(id).bind(command).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_virtual_keys(id,principal_id,secret_hash,hash_version,public_prefix,name,grant_snapshot,validity_preset,created_by,created_command_id) SELECT $2,$1,decode(replace($2::text,'-','')||replace($2::text,'-',''),'hex'),1,'fixture','fixture',allow_rules,'unlimited',$1,$3 FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL").bind(id).bind(key).bind(command).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,rpm_limit,tpm_limit,updated_by) SELECT $3,$1,$2,allow_rules,budget_mode,gw_amount($4::numeric),period_kind,period_timezone,$6,$5,$1 FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL").bind(id).bind(key).bind(uuid::Uuid::new_v4()).bind(limit).bind(tpm).bind(rpm).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,rpm_limit,tpm_limit,updated_by) SELECT $3,$1,$2,allow_rules,budget_mode,($4::numeric),period_kind,period_timezone,$6,$5,$1 FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL").bind(id).bind(key).bind(uuid::Uuid::new_v4()).bind(limit).bind(tpm).bind(rpm).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
     KeyScope {
         id: key,
@@ -60,7 +60,7 @@ async fn s4_key_budget_and_tpm_failures_roll_back_both_scopes() {
     for tpm in [false, true] {
         let db = postgres::TestDb::new().await;
         let id = finance::human(db.store.pool()).await;
-        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
         let current = finance::current(db.store.pool(), id).await;
         let key = key(
             db.store.pool(),
@@ -199,7 +199,7 @@ async fn s4_current_ceiling_and_balance_conflict_never_reset_scope() {
     let db = postgres::TestDb::new().await;
     let id = finance::human(db.store.pool()).await;
     sqlx::query(
-        "UPDATE gw_policies SET budget_limit_usd=gw_amount('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL",
+        "UPDATE gw_policies SET budget_limit_usd=('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL",
     )
     .bind(id)
     .execute(db.store.pool())
@@ -358,7 +358,7 @@ async fn s4_policy_period_and_mode_transition_keeps_stable_scope_and_cost() {
     .await
     .unwrap();
     assert_eq!(normalized.budget.unwrap().limit_usd, "1.000000000000");
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),version=version+1 WHERE id=$1").bind(current.policy_id).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),version=version+1 WHERE id=$1").bind(current.policy_id).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
     let row = sqlx::query("SELECT scope_id,cost_usd::text AS cost FROM test_user_usage_totals")
         .fetch_one(db.store.pool())
@@ -576,7 +576,7 @@ async fn s4_count_lease_edges_and_both_finalizer_recovery_orders_are_independent
 async fn s4_paid_count_cost_and_unknown_survive_parent_rejection() {
     for lost in [false, true] {
         let h = Harness::with_config(chargeable_configuration(true)).await;
-        sqlx::query("UPDATE gw_policies SET budget_limit_usd=gw_amount('0.000300000000') WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET budget_limit_usd=('0.000300000000') WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
         h.provider
             .set_count(
                 StatusCode::OK,
@@ -767,7 +767,7 @@ async fn s4_strict_context_contract_is_enforced_by_synthetic_upstream_not_count_
             "api: messages\n        internal_count: true",
         ));
         let h = Harness::with_config(cfg).await;
-        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
         h.provider.hardcap(4096).await;
         h.provider
             .set_count(
@@ -900,7 +900,7 @@ async fn s4_key_current_revoke_policy_and_independent_balances_are_sql() {
     let db = postgres::TestDb::new().await;
     let id = finance::human(db.store.pool()).await;
     sqlx::query(
-        "UPDATE gw_policies SET budget_limit_usd=gw_amount('2.000000000000') WHERE principal_id=$1 AND key_id IS NULL",
+        "UPDATE gw_policies SET budget_limit_usd=('2.000000000000') WHERE principal_id=$1 AND key_id IS NULL",
     )
     .bind(id)
     .execute(db.store.pool())
@@ -985,7 +985,7 @@ async fn s4_unknown_and_expired_chargeable_block_new_keys_providers_and_calendar
         let db = postgres::TestDb::new().await;
         let store = db.clock_store(None).await;
         let id = finance::human(store.pool()).await;
-        sqlx::query("UPDATE gw_policies SET budget_mode=$2,budget_limit_usd=gw_amount('9.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).bind(mode).execute(store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET budget_mode=$2,budget_limit_usd=('9.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).bind(mode).execute(store.pool()).await.unwrap();
         let current = finance::current(store.pool(), id).await;
         let cfg = chargeable_configuration(false);
         let ledger = PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
@@ -1131,7 +1131,7 @@ async fn s4_free_and_paid_count_commit_ack_loss_recovery_never_reissues_permit()
             let faulty = db.clock_store(Some(proxy.port)).await;
             let healthy = db.clock_store(None).await;
             let id = finance::human(healthy.pool()).await;
-            sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(healthy.pool()).await.unwrap();
+            sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(healthy.pool()).await.unwrap();
             let current = finance::current(healthy.pool(), id).await;
             let cfg = if free {
                 configuration()
@@ -1261,7 +1261,7 @@ async fn s4_recovery_principal_nowait_skips_whole_candidate_and_releases_partial
 async fn s4_reserved_count_bound_violation_and_system_audit_are_atomic_for_both_scopes() {
     let db = postgres::TestDb::new().await;
     let id = finance::human(db.store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
     let current = finance::current(db.store.pool(), id).await;
     let key = key(db.store.pool(), id, Some("1.000000000000"), None, None).await;
     let cfg = chargeable_configuration(false);
@@ -1283,7 +1283,7 @@ async fn s4_reserved_count_bound_violation_and_system_audit_are_atomic_for_both_
         ledger.finalize_request(a.id, &usage).await.err(),
         Some(LedgerError::DatabaseUnavailable)
     );
-    let intact:bool=sqlx::query_scalar("SELECT bool_and(cost_usd=0 AND reserved_usd=gw_amount('0.008192000000') AND settled_count=0 AND unknown_count=0) FROM test_user_usage_totals").fetch_one(db.store.pool()).await.unwrap();
+    let intact:bool=sqlx::query_scalar("SELECT bool_and(cost_usd=0 AND reserved_usd=('0.008192000000') AND settled_count=0 AND unknown_count=0) FROM test_user_usage_totals").fetch_one(db.store.pool()).await.unwrap();
     assert!(intact);
     let safety: i64 =
         sqlx::query_scalar("SELECT inference_safety_version FROM gw_principals WHERE id=$1")
@@ -1310,7 +1310,7 @@ async fn s4_reserved_count_bound_violation_and_system_audit_are_atomic_for_both_
     ));
     ledger.finalize_request(b.id, &usage).await.unwrap();
     let row=sqlx::query("SELECT version,inference_safety_version,disabled_at IS NULL AS active,(SELECT count(*) FROM gw_audit_events WHERE actor_kind='system' AND actor_principal_id IS NULL) AS audits FROM gw_principals WHERE id=$1").bind(id).fetch_one(db.store.pool()).await.unwrap();
-    let totals:bool=sqlx::query_scalar("SELECT bool_and(cost_usd=gw_amount('0.010000000000') AND reserved_usd=0 AND settled_count=2 AND unknown_count=0) FROM test_user_usage_totals").fetch_one(db.store.pool()).await.unwrap();
+    let totals:bool=sqlx::query_scalar("SELECT bool_and(cost_usd=('0.010000000000') AND reserved_usd=0 AND settled_count=2 AND unknown_count=0) FROM test_user_usage_totals").fetch_one(db.store.pool()).await.unwrap();
     db.close().await;
     assert!(totals);
     assert_eq!(row.get::<i64, _>("version"), current.version);
@@ -1400,7 +1400,7 @@ async fn s4_fixed_sdk_paid_external_and_strict_internal_count_have_one_client_at
         "api: messages\n        internal_count: true",
     ));
     let h = Harness::with_config(cfg).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     h.provider.hardcap(4096).await;
     h.provider
         .set_count(
@@ -1686,7 +1686,7 @@ async fn s4_reserved_zero_budget_rejects_zero_rate_chargeable_count() {
             for free in [false, true] {
                 let db = postgres::TestDb::new().await;
                 let id = finance::human(db.store.pool()).await;
-                sqlx::query("UPDATE gw_policies SET budget_mode=$2,budget_limit_usd=gw_amount($3::numeric) WHERE principal_id=$1 AND key_id IS NULL")
+                sqlx::query("UPDATE gw_policies SET budget_mode=$2,budget_limit_usd=($3::numeric) WHERE principal_id=$1 AND key_id IS NULL")
                     .bind(id).bind(mode).bind(if scope == "principal" {"0.000000000000"} else {"1.000000000000"}).execute(db.store.pool()).await.unwrap();
                 let key = if scope == "key" {
                     Some(key(db.store.pool(), id, Some("0.000000000000"), None, None).await)
@@ -1803,7 +1803,7 @@ async fn s4_zero_budget_count_native_wire_and_free_rate_access_checks() {
                         Bytes::from_static(br#"{"input_tokens":321}"#),
                     )
                     .await;
-                sqlx::query("UPDATE gw_policies SET budget_mode=$2,budget_limit_usd=gw_amount($3::numeric),count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL")
+                sqlx::query("UPDATE gw_policies SET budget_mode=$2,budget_limit_usd=($3::numeric),count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL")
                     .bind(h.principal).bind(mode).bind(if ceiling {"1.000000000000"} else {"0.000000000000"}).execute(h.db.store.pool()).await.unwrap();
                 let response = h
                     .request("/v1/messages/count_tokens", COUNT)
@@ -1927,7 +1927,7 @@ async fn s4_positive_reserved_count_exact_budget_is_allowed_in_every_scope() {
         let spec =
             RequestSpec::from_profile(ProviderId::Anthropic, &cfg.providers()[0].profiles[1], None);
         let bound = spec.cost_bound.unwrap().to_string();
-        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount($2::numeric) WHERE principal_id=$1 AND key_id IS NULL").bind(id).bind(if scope == "principal" {&bound} else {"1.000000000000"}).execute(db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=($2::numeric) WHERE principal_id=$1 AND key_id IS NULL").bind(id).bind(if scope == "principal" {&bound} else {"1.000000000000"}).execute(db.store.pool()).await.unwrap();
         let key = if scope == "key" {
             Some(key(db.store.pool(), id, Some(&bound), None, None).await)
         } else {

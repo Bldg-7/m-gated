@@ -2722,7 +2722,7 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=gw_amount('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(actor).execute(store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(actor).execute(store.pool()).await.unwrap();
     let ledger = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
