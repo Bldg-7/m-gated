@@ -8,7 +8,7 @@ const response = (body: unknown, status = 200) => new Response(JSON.stringify(bo
 afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); Reflect.deleteProperty(navigator, 'clipboard'); });
 
 async function issue() {
-  history.replaceState(null, '', '/dashboard/keys');
+  history.replaceState(null, '', '/dashboard/keys/new');
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input) === '/api/me') return Promise.resolve(response(me));
     if (String(input) === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2099-01-01T00:00:00Z' }));
@@ -16,9 +16,11 @@ async function issue() {
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
   }));
   render(<App />);
-  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
+  await screen.findByRole('heading', { level: 2, name: '가상 키 발급' });
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '복사 키' } });
   pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
+  pickOption(screen.getByLabelText('Anthropic Provider 키'), 'team-a (…0001)');
+  fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   fireEvent.click(await screen.findByRole('button', { name: '발급 확인' }));
   await screen.findByText('one-time-synthetic-secret');
@@ -35,6 +37,10 @@ test('issued_key_is_copied_only_when_the_copy_button_is_pressed', async () => {
   fireEvent.click(screen.getByRole('button', { name: '닫기' }));
   expect(screen.queryByText('one-time-synthetic-secret')).toBeNull();
   expect(screen.queryByRole('button', { name: '키 복사' })).toBeNull();
+  // 키 창을 닫으면 목록 페이지로 돌아가고, 키는 어디에도 남지 않는다.
+  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
+  expect(location.pathname).toBe('/dashboard/keys');
+  expect(screen.queryByText('one-time-synthetic-secret')).toBeNull();
   expect(localStorage.length + sessionStorage.length).toBe(0);
 });
 

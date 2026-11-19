@@ -254,3 +254,7 @@ details[open] > summary::before { transform: rotate(45deg); }
 details[open] > summary { border-bottom: 1px solid var(--gray-100); }
 details > :not(summary) { margin: 16px; }
 .field-label { font-size: 13px; line-height: 18px; font-weight: 500; }
+
+/* 사용자 인가 창의 사용자 목록. 길면 목록 안에서 스크롤한다. */
+.grant-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--gray-200); border-radius: var(--radius-md); padding: 4px 12px; }
+.grant-list li { padding: 6px 0; }

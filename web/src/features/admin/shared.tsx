@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next';
 import { ApiError, session, StaleResponse } from '../../lib/api';
 import i18n, { msgid } from '../../lib/i18n';
-import type { CommandAck } from './types';
+import type { Page } from '../../lib/types';
+import type { CommandAck, PrincipalSummary } from './types';
 import { formatTime } from '../../lib/time';
-import { Modal, RefreshIcon, Time } from '../../ui/ui';
+import { Modal, RefreshIcon, SearchSelect, Time } from '../../ui/ui';
 const messages: Record<string, string> = { version_conflict: msgid('버전이 변경되었습니다. 서버를 다시 조회했습니다. 새 상태를 확인하고 다시 선택하세요.'), execution_not_final: msgid('실행 종료를 확인할 수 없거나 알려진 sender가 실행 중입니다. 정산하지 않았습니다.'), settlement_conflict: msgid('다른 수동 처리와 상충합니다. 서버 처리 내역을 확인하세요.'), security_fence_conflict: msgid('자기·마지막 관리자 정지 또는 보안 fence 해제 조건을 만족하지 못했습니다.'), policy_period_conflict: msgid('기존 장부·예약이 있어 예산 기간 또는 모드를 변경할 수 없습니다.'), resource_not_found: msgid('대상이 없거나 현재 권한으로 조회할 수 없습니다.'), invalid_request: msgid('입력이 올바르지 않습니다.'), access_denied: msgid('현재 관리자 권한이 없습니다.'), invalid_filter: msgid('조회 필터가 올바르지 않습니다.'), invalid_cursor: msgid('페이지가 만료되었거나 조회 조건이 다릅니다. 처음부터 조회하세요.') };
 export function failure(error: unknown) {
   const t = (key: string, values?: Record<string, string>) => i18n.t(key, values);
@@ -69,3 +70,29 @@ export function useCommand(onRead: (ack?: CommandAck) => Promise<void>) {
 }
 export function fields(event: FormEvent<HTMLFormElement>) { event.preventDefault(); return new FormData(event.currentTarget); }
 export function directId(name: string) { return new URLSearchParams(location.search).get(name) ?? ''; }
+
+/** 페이지 단위 목록을 끝까지 읽는다. 고르는 칸의 후보처럼 전체가 필요한 곳에 쓴다. url이 바뀌면 다시 읽는다. */
+export function useAll<T>(url: string) {
+  const [items, setItems] = useState<T[] | null>(null), [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true; setItems(null); setError(null);
+    void (async () => {
+      const all: T[] = [], base = `${url}${url.includes('?') ? '&' : '?'}limit=100`;
+      let cursor: string | null = null;
+      do {
+        const page: Page<T> = await session.read<Page<T>>(`${base}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, () => current);
+        all.push(...page.items); cursor = page.next_cursor;
+      } while (cursor);
+      if (current) setItems(all);
+    })().catch(e => { if (current && !(e instanceof StaleResponse)) setError(failure(e)); });
+    return () => { current = false; };
+  }, [url]);
+  return { items, error };
+}
+/** 사용자(사람·서비스 계정)를 이름·이메일로 찾아 고르는 칸. 폼에는 고른 사용자의 ID가 전송된다. */
+export function PrincipalSelect({ kind, optional = false, ...props }: { id?: string; name?: string; value?: string; defaultValue?: string; onChange?: (value: string) => void; required?: boolean; kind?: 'human' | 'service'; optional?: boolean; 'aria-label'?: string }) {
+  const { t } = useTranslation();
+  const { items, error } = useAll<PrincipalSummary>(`/api/admin/principals${kind ? `?kind=${kind}` : ''}`);
+  const options = (items ?? []).map(p => ({ value: p.id, label: p.email ? `${p.display_name} (${p.email})` : `${p.display_name} (${t('서비스')})` }));
+  return <><SearchSelect {...props} placeholder={items ? t('선택하세요') : error ? t('사용자 목록을 가져올 수 없습니다') : t('사용자 목록 조회 중…')} options={optional ? [{ value: '', label: t('전체') }, ...options] : options} />{error && <p role="alert">{error}</p>}</>;
+}

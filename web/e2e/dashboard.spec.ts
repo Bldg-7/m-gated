@@ -18,7 +18,7 @@ test('Rust bundle serves precise usage, global block, keyboard and text-only ide
   await expect(page.getByText(/<img src=x onerror=window.__xss=1>/)).toBeVisible(); expect(await page.evaluate(() => Reflect.get(window, '__xss'))).toBeUndefined(); expect(await page.locator('main img').count()).toBe(0);
   await page.getByLabel('모델', { exact: true }).fill('historical-missing-model'); await page.getByRole('button', { name: '조회', exact: true }).focus(); await page.keyboard.press('Enter'); await expect(page.getByText(/그룹별 사용량이 없습니다/)).toBeVisible(); await expect(page.getByText(/전체 기간 미정산: 1/)).toBeVisible();
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]); expect(errors).toEqual([]);
-  for (const path of ['/dashboard/keys', '/dashboard/admin/principals', '/dashboard/admin/usage', '/dashboard/admin/requests']) { const r = await page.request.get(path); expect(r.status()).toBe(200); expect(r.headers()['content-type']).toContain('text/html'); }
+  for (const path of ['/dashboard/keys', '/dashboard/keys/new', '/dashboard/admin/principals', '/dashboard/admin/principals/key', '/dashboard/admin/keys', '/dashboard/admin/usage', '/dashboard/admin/requests']) { const r = await page.request.get(path); expect(r.status()).toBe(200); expect(r.headers()['content-type']).toContain('text/html'); }
   for (const path of ['/dashboard/assets/missing.js', '/dashboard/assets/%2e%2e%2findex.html', '/api/missing']) { const r = await page.request.get(path); expect(r.status()).toBe(404); }
   for (const path of ['/anthropic/v1/messages', '/anthropic/v1/messages/count_tokens', '/v1/messages', '/v1/messages/count_tokens']) { const inference = await page.request.post(path, { data: { model: 'synthetic-text', messages: [{ role: 'user', content: 'synthetic' }], max_tokens: 1 } }); expect(inference.status()).toBe(401); }
 });
@@ -114,7 +114,8 @@ test('cross_tab_logout_latch_blocks_visibility_pageshow_and_old_cookie_until_exp
     // 구 cookie가 여전히 정상 서명이므로 명시적인 사용자 재확인만 다시 로그인한다.
     await other.getByRole('button', { name: '다시 확인' }).click();
     await expect(other.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
-    expect(await other.evaluate(() => Reflect.get(window, '__authReads'))).toBe(2);
+    // 다시 로그인하면 사용자 확인, 사용량, 조회 조건의 가상 키 후보를 한 번씩 읽는다.
+    expect(await other.evaluate(() => Reflect.get(window, '__authReads'))).toBe(3);
   } finally { released(); }
   await expect(page).toHaveTitle('합성 SSO 로그아웃'); await other.close();
 });

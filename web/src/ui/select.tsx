@@ -110,7 +110,7 @@ function List({ id, options, value, active, optionId, onActive, onChoose, style,
     <ul ref={list} id={id} role="listbox" className="select-list" style={style.list}>
       {options.map((option, index) => {
         const selected = option.value === value;
-        return <li key={option.value} id={optionId(index)} data-index={index} role="option" aria-selected={selected} aria-disabled={option.disabled || undefined}
+        return <li key={option.value} id={optionId(index)} data-index={index} data-value={option.value} role="option" aria-selected={selected} aria-disabled={option.disabled || undefined}
           className={index === active ? 'select-option active' : 'select-option'}
           onMouseMove={() => { if (!option.disabled && index !== active) onActive(index); }}
           onClick={() => { if (!option.disabled) onChoose(option); }}>

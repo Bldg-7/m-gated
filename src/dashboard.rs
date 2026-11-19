@@ -16,8 +16,11 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 pub const SCREENS: &[&str] = &[
     "/dashboard/",
     "/dashboard/keys",
+    "/dashboard/keys/new",
     "/dashboard/admin/principals",
     "/dashboard/admin/principals/detail",
+    "/dashboard/admin/principals/key",
+    "/dashboard/admin/keys",
     "/dashboard/admin/usage",
     "/dashboard/admin/requests",
     "/dashboard/admin/credentials",

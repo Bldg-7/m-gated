@@ -3,9 +3,9 @@ import { Fragment, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { msgid } from '../../lib/i18n';
 import { Link } from '../../lib/router';
-import type { Page } from '../../lib/types';
-import { Money, Select, StatusBadge, TextArea, Time } from '../../ui/ui';
-import { directId, fields, ReadState, useCommand, useResource } from './shared';
+import type { KeyMetadata, Page } from '../../lib/types';
+import { Money, SearchSelect, Select, StatusBadge, TextArea, Time } from '../../ui/ui';
+import { directId, fields, PrincipalSelect, ReadState, useAll, useCommand, useResource } from './shared';
 import type { RequestDetail, RequestSummary } from './types';
 const providers = [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['deepseek', 'DeepSeek']];
 const phases = [['admitted', msgid('입장')], ['dispatching', msgid('전송 중')], ['finished', msgid('종료')]];
@@ -17,19 +17,21 @@ export function RequestsScreen() {
   const all = { value: '', label: t('전체') };
   const initial = directId('principal_id');
   const [query, setQuery] = useState(initial ? `principal_id=${encodeURIComponent(initial)}` : ''), [id, setId] = useState(directId('request_id'));
+  // 조회 조건의 사용자. 고르면 가상 키 후보를 그 사용자의 키로 좁힌다.
+  const [principal, setPrincipal] = useState(initial ?? '');
+  const keys = useAll<KeyMetadata>(`/api/admin/keys${principal ? `?principal_id=${encodeURIComponent(principal)}` : ''}`);
   const page = useResource<Page<RequestSummary>>(`/api/admin/requests${query ? `?${query}` : ''}`);
   return <div className="stack-lg">
-    <form aria-label={t('요청 조회')} className="filters" onSubmit={e => { const f = fields(e), q = new URLSearchParams(); for (const key of ['principal_id', 'key_id', 'provider', 'model', 'phase', 'outcome', 'accounting_state', 'from', 'to', 'limit']) if (f.get(key)) q.set(key, String(f.get(key))); if (q.toString() === query) void page.reload().catch(() => {}); else setQuery(q.toString()); }}>
+    <form aria-label={t('요청 조회')} className="filters" onSubmit={e => { const f = fields(e), q = new URLSearchParams(); for (const key of ['principal_id', 'key_id', 'provider', 'model', 'phase', 'outcome', 'accounting_state']) if (f.get(key)) q.set(key, String(f.get(key))); for (const key of ['from', 'to']) { const at = new Date(String(f.get(key) ?? '')); if (!Number.isNaN(at.getTime())) q.set(key, at.toISOString()); } if (q.toString() === query) void page.reload().catch(() => {}); else setQuery(q.toString()); }}>
       <div className="field"><label htmlFor="request-accounting">{t('회계 상태')}</label><Select id="request-accounting" name="accounting_state" defaultValue="unknown" options={options(accounting)} /></div>
       <div className="field"><label htmlFor="request-provider">{t('요청 Provider')}</label><Select id="request-provider" name="provider" defaultValue="" options={[all, ...providers.map(([value, label]) => ({ value, label }))]} /></div>
       <div className="field"><label htmlFor="request-phase">{t('실행 단계')}</label><Select id="request-phase" name="phase" defaultValue="" options={[all, ...options(phases)]} /></div>
       <div className="field"><label htmlFor="request-outcome">{t('결과')}</label><Select id="request-outcome" name="outcome" defaultValue="" options={[all, ...options(outcomes)]} /></div>
-      <label>{t('요청 사용자 ID')}<input name="principal_id" className="mono" spellCheck={false} defaultValue={initial} /></label>
-      <label>{t('요청 키 ID')}<input name="key_id" className="mono" spellCheck={false} /></label>
+      <div className="field"><label htmlFor="request-principal">{t('사용자')}</label><PrincipalSelect id="request-principal" name="principal_id" optional value={principal} onChange={setPrincipal} /></div>
+      <div className="field"><label htmlFor="request-key">{t('가상 키')}</label><SearchSelect key={principal} id="request-key" name="key_id" defaultValue="" placeholder={keys.items ? t('선택하세요') : t('키 목록 조회 중…')} options={[all, ...(keys.items ?? []).map(k => ({ value: k.id, label: `${k.name} (${k.key_hint})` }))]} /></div>
       <label>{t('요청 모델')}<input name="model" maxLength={200} /></label>
-      <label>{t('요청 시작 (RFC3339)')}<input name="from" className="mono" spellCheck={false} placeholder="2026-11-01T00:00:00Z" /></label>
-      <label>{t('요청 종료 (RFC3339)')}<input name="to" className="mono" spellCheck={false} /></label>
-      <label>{t('요청 페이지 크기')}<input name="limit" type="number" min="1" max="100" /></label>
+      <label>{t('시작 (현지 시각)')}<input type="datetime-local" name="from" /></label>
+      <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" /></label>
       <div className="actions"><button className="btn-primary">{t('요청 조회')}</button></div>
     </form>
     <section aria-labelledby="request-list-heading" className="stack">

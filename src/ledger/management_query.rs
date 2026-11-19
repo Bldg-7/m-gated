@@ -242,7 +242,7 @@ impl PgIdentityStore {
                     vec!["status", "limit"]
                 }
             }
-            "principals" => vec!["kind", "disabled", "limit"],
+            "principals" => vec!["kind", "disabled", "email", "limit"],
             "requests" => vec![
                 "principal_id",
                 "key_id",
@@ -423,6 +423,19 @@ impl PgIdentityStore {
             }
         }
         if resource == "principals" {
+            // 이메일 일부로 찾는다. 대소문자를 가리지 않고, %와 _는 글자 그대로 비교한다.
+            if let Some(v) = filter.get("email") {
+                if v.is_empty() || v.chars().count() > 200 || v.chars().any(char::is_control) {
+                    return Err(QueryError::InvalidFilter.into());
+                }
+                let pattern = v
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                q.push(" AND email ILIKE ")
+                    .push_bind(format!("%{pattern}%"))
+                    .push(" ESCAPE '\\'");
+            }
             if let Some(v) = kind {
                 q.push(" AND kind=").push_bind(v);
             }

@@ -131,7 +131,7 @@ pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> R
             if rest.matches('/').count() == 1 {
                 vec![Method::POST]
             } else {
-                vec![Method::PUT, Method::PATCH, Method::DELETE]
+                vec![Method::POST, Method::PUT, Method::PATCH, Method::DELETE]
             }
         } else if (path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING))
             || (path.starts_with(PRINCIPALS_ADMIN) && path.ends_with(PRINCIPAL_CREDENTIALS))
@@ -795,6 +795,14 @@ async fn provider_credentials(
                     }),
                     _ => None,
                 }
+            }
+            // 이 Provider 키를 여러 사용자에게 한 번에 인가한다.
+            ("POST", Some(provider), Some(id), None) => {
+                ids(input.remove("principal_ids")).map(|principals| CredentialCommand::Grant {
+                    provider,
+                    id,
+                    principals,
+                })
             }
             ("PUT", Some(provider), Some(id), None) => {
                 match (

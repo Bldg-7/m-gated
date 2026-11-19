@@ -33,7 +33,7 @@ test('spa_link_moves_between_screens_without_document_navigation_and_remounts_ea
 
   expect(clickRecord(screen.getByRole('link', { name: '전체 사용량' }))).toBe(true);
   expect(location.pathname).toBe('/dashboard/admin/usage');
-  await screen.findByLabelText('사용자 ID');
+  await screen.findByLabelText('사용자');
   expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('');
   expect(paths).toContain('/api/admin/usage?group_by=provider');
   expect(screen.getByRole('link', { name: '전체 사용량' }).getAttribute('aria-current')).toBe('page');

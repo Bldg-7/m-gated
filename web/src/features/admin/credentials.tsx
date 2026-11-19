@@ -6,6 +6,7 @@ import { failure, fields, ReadState, useResource } from './shared';
 import type { CredentialList, CredentialMeta } from './types';
 import { useTimeFormat } from '../../lib/time';
 import { Badge, Modal, SearchSelect, StatusBadge } from '../../ui/ui';
+import { GrantModal } from './grant';
 
 export const providerNames: Record<string, string> = { anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek' };
 /** 상태 라벨은 StatusBadge(정상·미등록·복호화 불가)가 그리고, 여기에는 그 결과만 적는다. */
@@ -46,6 +47,8 @@ export function CredentialsScreen() {
   const secret = useRef<string | null>(null), mounted = useRef(true);
   const [pending, setPending] = useState<Pending | null>(null), [editing, setEditing] = useState<Editing | null>(null);
   const [busy, setBusy] = useState(false), [status, setStatus] = useState<string | null>(null), [formKey, setFormKey] = useState(0);
+  // 사용자 인가 창을 연 Provider 키.
+  const [granting, setGranting] = useState<{ provider: string; target: CredentialMeta } | null>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; secret.current = null; }; }, []);
   const cancel = () => { secret.current = null; setPending(null); setFormKey(v => v + 1); };
   /** 명령 하나를 보내고 결과 문구를 남긴 뒤 목록을 다시 읽는다. 실패해도 자동으로 다시 보내지 않는다. */
@@ -86,6 +89,8 @@ export function CredentialsScreen() {
         : pending.moveTo ? t('{{label}}를 해제합니다. 이 키에 연결된 가상 키는 {{to}}로 옮겨집니다.', { label: credentialLabel(pending.target), to: credentialLabel(pending.moveTo) })
         : t('{{label}}를 해제합니다. 되돌릴 수 없습니다. 이 Provider의 마지막 키라면 새 키를 등록할 때까지 요청이 거절됩니다.', { label: credentialLabel(pending.target) })}</p>
     </Modal>}
+    {granting && <GrantModal provider={granting.provider} providerName={providerNames[granting.provider]} credential={granting.target} onClose={() => setGranting(null)}
+      onDone={count => { const label = credentialLabel(granting.target); setGranting(null); setStatus(t('{{label}}를 {{count}}명에게 인가했습니다.', { label, count })); void list.reload().catch(() => { /* ReadState가 조회 실패를 표시한다 */ }); }} />}
     <div className="stack-lg">{list.data?.providers.map(p => {
       const name = providerNames[p.provider];
       return <section key={p.provider} aria-label={t('{{provider}} Provider 키', { provider: name })} className={p.status === 'active' ? 'card stack' : p.status === 'missing' ? 'card card-warning stack' : 'card card-critical stack'}>
@@ -99,12 +104,13 @@ export function CredentialsScreen() {
             <div className="row row-between">
               <div className="row"><strong>{c.label}</strong>{!c.decryptable && <Badge tone="critical">{t('복호화 불가')}</Badge>}<span className="mono meta"><span aria-hidden="true">••••</span>{c.hint}</span></div>
               <div className="actions">
+                <button className="btn-sm" disabled={locked} onClick={() => { setStatus(null); setGranting({ provider: p.provider, target: c }); }}>{t('사용자 인가')}</button>
                 <button className="btn-sm" disabled={locked} onClick={() => setEditing(open === 'rename' ? null : { id: c.id, kind: 'rename' })}>{t('이름 변경')}</button>
                 <button className="btn-sm" disabled={locked} title={t('이름과 연결은 그대로 두고 키만 바꿉니다')} onClick={() => setEditing(open === 'replace' ? null : { id: c.id, kind: 'replace' })}>{t('키 교체')}</button>
                 <button className="btn-sm btn-danger-outline" disabled={locked} onClick={() => setEditing(open === 'retire' ? null : { id: c.id, kind: 'retire' })}>{t('해제')}</button>
               </div>
             </div>
-            <p className="meta">{t('연결된 가상 키 {{count}}개', { count: Number(c.bound_keys) })} · {t('버전 {{version}}', { version: c.version })} · {t('등록 {{at}} ({{by}}) · Provider 확인 {{verified}}', { at: format(c.created_at), by: c.created_by_email ?? c.created_by, verified: format(c.verified_at) })}</p>
+            <p className="meta">{t('인가된 사용자 {{count}}명', { count: c.authorized_principal_ids?.length ?? 0 })} · {t('연결된 가상 키 {{count}}개', { count: Number(c.bound_keys) })} · {t('버전 {{version}}', { version: c.version })} · {t('등록 {{at}} ({{by}}) · Provider 확인 {{verified}}', { at: format(c.created_at), by: c.created_by_email ?? c.created_by, verified: format(c.verified_at) })}</p>
             {open === 'rename' && <form aria-label={t('{{label}} 이름 변경', { label: c.label })} className="row" onSubmit={e => { const label = String(fields(e).get('label') ?? ''); if (label === c.label) { setEditing(null); return; } void send(`/api/admin/provider-credentials/${p.provider}/${c.id}`, 'PATCH', { expected_version: c.version, label }, t('이름을 {{label}}로 바꿨습니다.', { label })); }}>
               <label>{t('새 이름')}<input name="label" defaultValue={c.label} required maxLength={60} autoFocus /></label><div className="actions"><button className="btn-primary" disabled={locked}>{t('저장')}</button><button type="button" className="btn-quiet" onClick={() => setEditing(null)}>{t('취소')}</button></div>
             </form>}
@@ -123,7 +129,7 @@ export function CredentialsScreen() {
         <form key={`${p.provider}:${formKey}`} aria-label={t('{{provider}} 키 추가', { provider: name })} onSubmit={e => { const f = fields(e), label = String(f.get('label') ?? '').trim(), value = String(f.get('secret') ?? ''); setStatus(null); if (!label || value.length < 20) { setStatus(message(new ApiError(400, 'invalid_request'))); return; } secret.current = value; setPending({ kind: 'add', provider: p.provider, label, hint: value.slice(-4) }); }}>
           <fieldset disabled={locked} className="stack-sm"><legend>{p.credentials.length ? t('키 추가') : t('키 등록')}</legend>
             <div className="form-grid"><label>{t('이름 (예: 팀·용도)')}<input name="label" required maxLength={60} autoComplete="off" /></label><label>{t('{{provider}} API 키', { provider: name })}<input name="secret" type="password" autoComplete="off" spellCheck={false} required maxLength={512} /></label></div>
-            <p className="meta">{t('사용자는 관리자가 인가한 Provider 키만 쓸 수 있습니다. 저장한 뒤 사용자 상세의 Provider 키 인가에서 이 키를 인가하세요.')}</p>
+            <p className="meta">{t('사용자는 관리자가 인가한 Provider 키만 쓸 수 있습니다. 저장한 뒤 이 키의 「사용자 인가」로 여러 사용자에게 한 번에 인가하거나, 사용자 상세의 Provider 키 인가에서 인가하세요.')}</p>
             <div className="actions"><button className="btn-primary">{p.credentials.length ? t('추가 확인') : t('등록 확인')}</button></div>
           </fieldset>
         </form>

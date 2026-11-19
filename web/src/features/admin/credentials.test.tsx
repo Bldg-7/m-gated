@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
-import { pickOption, selectedValue } from '../../test-select';
+import { optionNames, pickOption, selectedValue } from '../../test-select';
 import { session } from '../../lib/api';
 const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -34,7 +34,7 @@ test('first_key_is_added_with_a_label_and_the_secret_is_never_rendered', async (
   await screen.findByText(/미등록/);
   expect(screen.getByRole('heading', { level: 1, name: 'Provider 키' })).toBeTruthy();
   expect(screen.getByText('활성 Provider 키가 없어 이 Provider 요청은 503으로 거절됩니다.')).toBeTruthy();
-  expect(screen.getByText(/저장한 뒤 사용자 상세의 Provider 키 인가에서 이 키를 인가하세요/)).toBeTruthy();
+  expect(screen.getByText(/저장한 뒤 이 키의 「사용자 인가」로 여러 사용자에게 한 번에 인가하거나/)).toBeTruthy();
   expect(document.body.textContent).not.toContain('기본 키');
   fireEvent.change(screen.getByLabelText('이름 (예: 팀·용도)'), { target: { value: 'team-a' } });
   fireEvent.change(screen.getByLabelText('Anthropic API 키'), { target: { value: secret } });
@@ -123,7 +123,7 @@ test('last_key_with_bound_virtual_keys_cannot_be_retired_without_another_key', a
 });
 
 test('admin_chooses_only_from_own_authorized_provider_keys_when_issuing', async () => {
-  history.replaceState(null, '', '/dashboard/keys');
+  history.replaceState(null, '', '/dashboard/keys/new');
   const authorizedMe = { ...me, provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'credA', label: 'team-a', hint: '0001' }, { id: 'credB', label: 'team-b', hint: '0002' }] }] };
   const issued = { id: 'key1', principal_id: 'admin1', name: '새 키', key_hint: 'mgw_v1_x', created_at: '2026-11-13T00:00:00.000000Z', created_by: 'admin1', created_command_id: 'c1', validity: 'unlimited', expires_at: null, revoked_at: null, version: '1', grants: [], limits: {}, provider_credentials: [{ provider: 'anthropic', credential_id: 'credB', label: 'team-b', hint: '0002', state: 'active', authorized: true }] };
   let items: unknown[] = [];
@@ -140,30 +140,35 @@ test('admin_chooses_only_from_own_authorized_provider_keys_when_issuing', async 
   render(<App />);
   fireEvent.change(await screen.findByLabelText('키 이름'), { target: { value: '새 키' } });
   pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
-  expect(screen.queryByLabelText('Anthropic Provider 키')).toBeNull();
-  fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
-  // 인가된 키가 둘이면 미리 고르지 않고, 고르지 않으면 확인 창을 열지 않는다.
+  // Provider 키를 고르기 전에는 고를 API가 없다.
+  expect(screen.queryByLabelText('anthropic / synthetic-text / messages')).toBeNull();
+  // Provider 키는 미리 고르지 않고, 고르지 않으면 확인 창을 열지 않는다.
   const select = screen.getByLabelText('Anthropic Provider 키') as HTMLInputElement;
   expect(selectedValue(select)).toBe('');
+  expect(optionNames(select)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
+  expect((screen.getByRole('button', { name: '발급 내용 확인' }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
-  expect(screen.getByRole('alert').textContent).toBe('고른 API의 Provider마다 쓸 Provider 키를 고르세요.');
+  expect(screen.getByRole('alert').textContent).toBe('연동할 Provider 키를 하나 이상 고르세요.');
   expect(screen.queryByRole('dialog')).toBeNull();
   // 글자를 쳐서 좁힌 뒤 고른다.
   fireEvent.click(select);
   fireEvent.change(select, { target: { value: 'TEAM-B' } });
   pickOption(select, 'team-b (…0002)');
   expect(select.value).toBe('team-b (…0002)');
+  fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   const confirm = await screen.findByRole('dialog', { name: '발급 확인' });
   expect(confirm.textContent).toContain('Anthropic · team-b (…0002)');
   fireEvent.click(within(confirm).getByRole('button', { name: '발급 확인' }));
   fireEvent.click(within(await screen.findByRole('dialog', { name: '발급된 키' })).getByRole('button', { name: '닫기' }));
+  // 키 창을 닫으면 목록 페이지로 돌아가 새 키와 그 Provider 키 연결을 보여 준다.
   const binding = await screen.findByLabelText('새 키 Provider 키 연결');
+  expect(location.pathname).toBe('/dashboard/keys');
   expect(binding.textContent).toContain('Provider 키: Anthropic · team-b (…0002)');
   expect(calls.find(c => c.method === 'POST' && c.url === '/api/keys')?.body?.provider_credentials).toEqual({ anthropic: 'credB' });
   // 관리자도 발급할 때 전체 Provider 키 목록을 읽지 않는다.
   expect(calls.some(c => c.url === '/api/admin/provider-credentials')).toBe(false);
-  expect(screen.getByText(/생성: 2026-11-13 00:00 · 만료: 없음/)).toBeTruthy();
+  expect(screen.getAllByText('2026-11-13 00:00').length).toBeGreaterThan(0);
 
   // 내 가상 키 화면에서는 Provider 키 연결을 바꾸지 않는다(관리자 화면에서만 바꾼다).
   expect(within(binding).queryByRole('button', { name: 'Provider 키 변경' })).toBeNull();

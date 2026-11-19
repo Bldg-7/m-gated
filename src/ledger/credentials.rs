@@ -61,6 +61,13 @@ pub enum CredentialCommand {
         /// 인가에서 빠지는 회사 키에 연결된 이 사용자의 가상 키를 어떻게 할지.
         bound: Option<BoundAction>,
     },
+    /// Provider 키 하나를 여러 사용자에게 한 번에 인가한다. 기존 인가는 그대로 두고 이 키만 더한다.
+    /// 전부 성공하거나 전부 실패한다. 인가를 빼지 않으므로 가상 키의 연결은 바뀌지 않는다.
+    Grant {
+        provider: ProviderId,
+        id: Uuid,
+        principals: Vec<Uuid>,
+    },
     /// 가상 키 하나의 Provider 연결을 다른 회사 키로 바꾼다.
     BindKey {
         key: Uuid,
@@ -86,7 +93,8 @@ impl CredentialCommand {
             Self::Update { .. } => "update_provider_credential",
             Self::Retire { .. } => "retire_provider_credential",
             Self::BindKey { .. } => "bind_key_credential",
-            Self::Authorize { .. } => "authorize_principal_credentials",
+            // 감사 기록의 operation은 사용자 하나의 인가와 같다. 대상이 Provider 키(credential)인 점으로 구분한다.
+            Self::Authorize { .. } | Self::Grant { .. } => "authorize_principal_credentials",
         }
     }
     pub fn provider(&self) -> ProviderId {
@@ -96,6 +104,7 @@ impl CredentialCommand {
             | Self::Update { provider, .. }
             | Self::Retire { provider, .. }
             | Self::BindKey { provider, .. }
+            | Self::Grant { provider, .. }
             | Self::Authorize { provider, .. } => *provider,
         }
     }
@@ -116,6 +125,8 @@ pub fn valid_label(label: &str) -> bool {
         && !label.chars().any(char::is_control)
 }
 
+/// 한 번에 인가할 수 있는 사용자 수.
+pub const MAX_GRANT_PRINCIPALS: usize = 500;
 fn sorted(ids: &[Uuid]) -> Vec<Uuid> {
     let mut v = ids.to_vec();
     v.sort();
@@ -206,7 +217,8 @@ pub async fn bind_new_key(
     if chosen.keys().any(|p| !providers.contains(p)) {
         return Err(ManagementError::Invalid);
     }
-    if providers.iter().any(|p| !chosen.contains_key(p)) {
+    // 허용한 API가 없는 가상 키는 아무 요청도 보낼 수 없다. Provider 키를 하나 이상 연결해야 발급한다.
+    if providers.is_empty() || providers.iter().any(|p| !chosen.contains_key(p)) {
         return Err(ManagementError::CredentialRequired);
     }
     for (provider, id) in chosen {
@@ -344,7 +356,21 @@ impl CredentialService {
             .bind(provider.name())
             .fetch_all(&mut *c)
             .await?;
-            let credentials: Vec<Value> = active.iter().map(|r| row_metadata(r, &kek)).collect();
+            let mut credentials: Vec<Value> =
+                active.iter().map(|r| row_metadata(r, &kek)).collect();
+            // 키마다 인가된 사용자. 일괄 인가 화면이 이미 인가된 사용자를 표시하는 데 쓴다.
+            let holders = sqlx::query("SELECT credential_id,principal_id FROM gw_principal_credentials WHERE provider=$1 ORDER BY principal_id")
+                .bind(provider.name())
+                .fetch_all(&mut *c)
+                .await?;
+            for (row, meta) in active.iter().zip(credentials.iter_mut()) {
+                let id: Uuid = row.get("id");
+                meta["authorized_principal_ids"] = holders
+                    .iter()
+                    .filter(|h| h.get::<Uuid, _>("credential_id") == id)
+                    .map(|h| json!(h.get::<Uuid, _>("principal_id")))
+                    .collect();
+            }
             // 사용 중인 키가 없으면 missing, 풀 수 없는 키가 하나라도 있으면 undecryptable.
             let status = if credentials.is_empty() {
                 "missing"
@@ -418,6 +444,16 @@ impl CredentialService {
                 ..
             } => {
                 json!({"provider":provider.name(),"key_id":key,"credential_id":credential,"expected_credential_id":expected})
+            }
+            CredentialCommand::Grant { id, principals, .. } => {
+                let unique: std::collections::BTreeSet<_> = principals.iter().collect();
+                if principals.is_empty()
+                    || principals.len() > MAX_GRANT_PRINCIPALS
+                    || unique.len() != principals.len()
+                {
+                    return Err(ManagementError::Invalid);
+                }
+                json!({"provider":provider.name(),"id":id,"principal_ids":sorted(principals)})
             }
             CredentialCommand::Authorize {
                 principal,
@@ -510,6 +546,17 @@ impl CredentialService {
                 .await?
                 .ok_or(ManagementError::NotFound)?;
         }
+        if let CredentialCommand::Grant { principals, .. } = command {
+            // 대상 사용자를 id 순서로 잠근다. 없는 사용자가 하나라도 있으면 아무도 인가하지 않는다.
+            let found =
+                sqlx::query("SELECT id FROM gw_principals WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+                    .bind(principals)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            if found.len() != principals.len() {
+                return Err(ManagementError::NotFound);
+            }
+        }
         if let CredentialCommand::Authorize { principal, .. } = command {
             sqlx::query("SELECT id FROM gw_principals WHERE id=$1 FOR UPDATE")
                 .bind(principal)
@@ -545,6 +592,7 @@ impl CredentialService {
         };
         let mut moved = 0_i64;
         let mut authorization_counts = None;
+        let mut granted: Option<Vec<Uuid>> = None;
         let (status, target_kind, target, before, changed) = match command {
             CredentialCommand::Add { label, secret, .. } => {
                 if let Some(id) = duplicate(None) {
@@ -717,6 +765,36 @@ impl CredentialService {
                 authorization_counts = Some((moved, blocked));
                 (200, "principal", *principal, before, changed || moved > 0)
             }
+            CredentialCommand::Grant { id, principals, .. } => {
+                if find(*id).is_none() {
+                    return Err(ManagementError::NotFound);
+                }
+                let already: Vec<Uuid> = sqlx::query_scalar("SELECT principal_id FROM gw_principal_credentials WHERE credential_id=$1 AND principal_id=ANY($2) ORDER BY principal_id")
+                    .bind(id)
+                    .bind(principals)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                let added: Vec<Uuid> = sorted(principals)
+                    .into_iter()
+                    .filter(|p| !already.contains(p))
+                    .collect();
+                sqlx::query("INSERT INTO gw_principal_credentials(principal_id,provider,credential_id,granted_by) SELECT p,$2,$3,$4 FROM unnest($1::uuid[]) AS p")
+                    .bind(&added)
+                    .bind(provider.name())
+                    .bind(id)
+                    .bind(ctx.actor)
+                    .execute(&mut *tx)
+                    .await?;
+                let changed = !added.is_empty();
+                granted = Some(added);
+                (
+                    200,
+                    "credential",
+                    *id,
+                    json!({"provider":provider.name(),"requested_principal_ids":sorted(principals),"already_authorized_principal_ids":already}),
+                    changed,
+                )
+            }
             CredentialCommand::BindKey {
                 key,
                 credential,
@@ -790,6 +868,9 @@ impl CredentialService {
         } else {
             let mut after = metadata(&mut tx, target, &kek).await?;
             after["moved_keys"] = json!(moved.to_string());
+            if let Some(added) = &granted {
+                after["granted_principal_ids"] = json!(added);
+            }
             let version = after["version"]
                 .as_str()
                 .and_then(|s| s.parse().ok())

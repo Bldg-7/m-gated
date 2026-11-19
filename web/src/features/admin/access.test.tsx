@@ -121,25 +121,93 @@ test('budget_time_zone_is_searched_and_chosen_on_the_settings_screen', async () 
   expect(writes).toEqual([{ timezone: 'Asia/Seoul', expected_version: '3' }]);
 });
 
-test('key_form_requires_an_authorized_provider_key_for_each_chosen_provider', async () => {
-  history.replaceState(null, '', '/dashboard/keys');
+test('key_form_offers_only_authorized_provider_keys_and_only_the_apis_of_a_linked_provider', async () => {
+  history.replaceState(null, '', '/dashboard/keys/new');
   const grants = [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }, { provider: 'openai', model: 'synthetic-gpt', capabilities: ['responses'] }];
   const user = { ...admin, role: 'user', grants, budget_timezone: { ...budgetTimezone, timezone: 'Asia/Seoul' }, provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'b', label: 'team-b', hint: '0002' }] }] };
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input) === '/api/me' ? user : { items: [], next_cursor: null, as_of: 'now' }))));
   render(<App />);
   const form = await screen.findByRole('form', { name: '가상 키 발급' });
-  // API를 고르기 전에는 Provider 키 선택칸이 없다.
-  expect(within(form).queryByLabelText('Anthropic Provider 키')).toBeNull();
-  fireEvent.click(within(form).getByLabelText('anthropic / synthetic-text / messages'));
-  // 인가된 키가 하나뿐이면 그 키를 미리 골라 둔다.
+  const submit = within(form).getByRole('button', { name: '발급 내용 확인' }) as HTMLButtonElement;
+  // 인가된 키가 하나뿐이어도 미리 고르지 않는다. Provider 키를 고르기 전에는 고를 API가 없다.
   const provider = within(form).getByLabelText('Anthropic Provider 키') as HTMLInputElement;
+  expect(selectedValue(provider)).toBe('');
+  expect(optionNames(provider)).toEqual(['연동 안 함', 'team-b (…0002)']);
+  expect(within(form).queryAllByRole('checkbox')).toHaveLength(0);
+  expect(submit.disabled).toBe(true);
+  // 인가된 키가 없는 Provider는 이유만 보여 주고 선택칸을 두지 않는다.
+  expect(within(form).queryByLabelText('OpenAI Provider 키')).toBeNull();
+  expect(within(form).getByText('나에게 인가된 OpenAI Provider 키가 없습니다.')).toBeTruthy();
+  pickOption(provider, 'team-b (…0002)');
   expect(selectedValue(provider)).toBe('b');
   expect(provider.value).toBe('team-b (…0002)');
-  expect((within(form).getByRole('button', { name: '발급 내용 확인' }) as HTMLButtonElement).disabled).toBe(false);
-  // 인가된 키가 없는 Provider의 API를 고르면 이유를 보여 주고 발급을 막는다.
-  fireEvent.click(within(form).getByLabelText('openai / synthetic-gpt / responses'));
-  expect(within(form).getByText('나에게 인가된 OpenAI Provider 키가 없어 OpenAI API를 쓰는 키를 발급할 수 없습니다. 관리자에게 인가를 요청하세요.')).toBeTruthy();
-  expect((within(form).getByRole('button', { name: '발급 내용 확인' }) as HTMLButtonElement).disabled).toBe(true);
+  // 연동한 Provider의 API만 고를 수 있다. 인가된 키가 없는 Provider의 API는 고를 수 없다.
+  expect(within(form).queryByLabelText('openai / synthetic-gpt / responses')).toBeNull();
+  expect(submit.disabled).toBe(true);
+  fireEvent.click(within(form).getByLabelText('anthropic / synthetic-text / messages'));
+  expect(submit.disabled).toBe(false);
   expect(within(form).queryByLabelText(/timezone/)).toBeNull();
   expect(within(form).getByText(/월 예산 기준 시간대: Asia\/Seoul \(관리자 설정\). 이번 기간: 2026-11-01 00:00 ~ 2026-12-01 00:00/)).toBeTruthy();
+});
+
+test('service_account_key_is_issued_on_its_own_page_from_the_keys_authorized_for_the_account', async () => {
+  const grants = [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }];
+  const service = { ...human, kind: 'service', display_name: '배치', email: null, policy: { ...human.policy, grants } };
+  history.replaceState(null, '', '/dashboard/admin/principals/detail?principal_id=human1');
+  const posts: Record<string, unknown>[] = [], reads: string[] = [];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (!init?.method) reads.push(url);
+    if (url === '/api/me') return Promise.resolve(response(admin));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (init?.method === 'POST' && url === '/api/keys') { posts.push(JSON.parse(String(init.body))); return Promise.resolve(response({ key: 'service-secret', metadata: { ...key, id: 'k2' } }, 201)); }
+    if (url === '/api/admin/provider-credentials') return Promise.resolve(response(providerKeys));
+    if (url === '/api/admin/principals/human1') return Promise.resolve(response({ principal: service, execution_ceiling: { grants, limits: human.policy.limits } }));
+    return Promise.resolve(response({ items: [], next_cursor: null, as_of: 'now' }));
+  }));
+  render(<App />);
+  // 사용자 상세에는 발급 폼이 없고, 발급 페이지로 가는 링크만 있다.
+  const link = await screen.findByRole('link', { name: '서비스 계정의 가상 키 발급' });
+  expect(link.getAttribute('href')).toBe('/dashboard/admin/principals/key?principal_id=human1');
+  expect(screen.queryByRole('form', { name: '서비스 계정의 가상 키 발급' })).toBeNull();
+  fireEvent.click(link);
+  const form = await screen.findByRole('form', { name: '서비스 계정의 가상 키 발급' });
+  expect(location.pathname + location.search).toBe('/dashboard/admin/principals/key?principal_id=human1');
+  expect(screen.getByRole('heading', { level: 2, name: '서비스 계정의 가상 키 발급' })).toBeTruthy();
+  expect(screen.getByRole('link', { name: '← 사용자 상세' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
+  expect(within(form).getByRole('link', { name: '취소' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
+  expect(screen.queryByRole('form', { name: '키 조회' })).toBeNull();
+  // 관리자가 아니라 서비스 계정에 인가된 Provider 키 안에서만 고른다.
+  const provider = within(form).getByLabelText('Anthropic Provider 키');
+  expect(optionNames(provider)).toEqual(['연동 안 함', 'team-b (…0002)']);
+  fireEvent.change(within(form).getByLabelText('키 이름'), { target: { value: '배치 키' } });
+  pickOption(within(form).getByLabelText('유효기간'), '1년');
+  pickOption(provider, 'team-b (…0002)');
+  fireEvent.click(within(form).getByLabelText('anthropic / synthetic-text / messages'));
+  fireEvent.submit(form);
+  fireEvent.click(within(await screen.findByRole('dialog', { name: '발급 확인' })).getByRole('button', { name: '발급 확인' }));
+  const secret = await screen.findByRole('dialog', { name: '발급된 키' });
+  expect(posts).toEqual([expect.objectContaining({ service_principal_id: 'human1', name: '배치 키', validity: '1_year', grants, provider_credentials: { anthropic: 'b' } })]);
+  expect(reads.some(url => url === '/api/admin/keys?principal_id=human1')).toBe(true);
+  // 키 창을 닫으면 사용자 상세로 돌아간다.
+  fireEvent.click(within(secret).getByRole('button', { name: '닫기' }));
+  await screen.findByRole('link', { name: '서비스 계정의 가상 키 발급' });
+  expect(location.pathname + location.search).toBe('/dashboard/admin/principals/detail?principal_id=human1');
+  expect(screen.queryByText('service-secret')).toBeNull();
+});
+
+test('service_account_without_an_authorized_provider_key_and_human_users_get_no_issue_form', async () => {
+  const grants = [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }];
+  history.replaceState(null, '', '/dashboard/admin/principals/key?principal_id=human1');
+  stubDetail({ ...human, kind: 'service', policy: { ...human.policy, grants: grants as never[] }, provider_credentials: [] }, [], () => ack());
+  render(<App />);
+  await screen.findByText('이 서비스 계정에 인가된 Provider 키가 없어 가상 키를 발급할 수 없습니다. 사용자 상세의 Provider 키 인가에서 먼저 인가하세요.');
+  expect(screen.queryByRole('form', { name: '서비스 계정의 가상 키 발급' })).toBeNull();
+  cleanup(); session.clear();
+  // 사람 사용자의 가상 키는 관리자가 대신 발급하지 않는다.
+  stubDetail(human, [], () => ack());
+  render(<App />);
+  expect((await screen.findByRole('alert')).textContent).toBe('사람 사용자의 가상 키는 본인이 내 가상 키에서 발급합니다.');
+  expect(screen.queryByRole('form', { name: '서비스 계정의 가상 키 발급' })).toBeNull();
+  expect(screen.getByRole('link', { name: '← 사용자 상세' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
 });

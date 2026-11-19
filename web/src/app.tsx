@@ -2,10 +2,11 @@ import { useEffect, useState, useSyncExternalStore, useRef, type FormEvent } fro
 import { flushSync } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ApiError, session, StaleResponse } from './lib/api';
-import type { Usage } from './lib/types';
+import type { KeyMetadata, Usage } from './lib/types';
+import { PrincipalSelect, useAll } from './features/admin/shared';
 import { UsageView } from './features/usage/usage';
 import { KeysScreen } from './features/keys/keys';
-import { PrincipalDetailScreen, PrincipalsScreen } from './features/admin/principals';
+import { PrincipalDetailScreen, PrincipalKeyIssueScreen, PrincipalsScreen } from './features/admin/principals';
 import { RequestsScreen } from './features/admin/requests';
 import { CredentialsScreen } from './features/admin/credentials';
 import { ModelsScreen } from './features/admin/models';
@@ -13,7 +14,7 @@ import { SettingsScreen } from './features/admin/settings';
 import { isScreen, Link, useRoute, type Screen } from './lib/router';
 import { changeLanguage, languages, msgid } from './lib/i18n';
 import { browserTimeZone, formatTime, timeBasis, useTimeBasis } from './lib/time';
-import { Pill, Select } from './ui/ui';
+import { Pill, SearchSelect, Select } from './ui/ui';
 export function UsageScreen({ admin = false }: { admin?: boolean }) {
   const { t } = useTranslation();
   const auth = useSyncExternalStore(session.subscribe, session.snapshot);
@@ -21,6 +22,9 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
   const [query, setQuery] = useState(() => `group_by=provider${admin && new URLSearchParams(location.search).get('principal_id') ? `&principal_id=${encodeURIComponent(new URLSearchParams(location.search).get('principal_id')!)}` : ''}`);
   const [filters, setFilters] = useState(() => `group_by=provider${admin && new URLSearchParams(location.search).get('principal_id') ? `&principal_id=${encodeURIComponent(new URLSearchParams(location.search).get('principal_id')!)}` : ''}`);
   const [revision, setRevision] = useState(0);
+  // 조회 조건의 사용자(관리자 화면). 고르면 가상 키 후보를 그 사용자의 키로 좁힌다. 내 사용량에서는 내 가상 키가 후보다.
+  const [principalPick, setPrincipalPick] = useState(() => new URLSearchParams(filters).get('principal_id') ?? '');
+  const keys = useAll<KeyMetadata>(admin ? `/api/admin/keys${principalPick ? `?principal_id=${encodeURIComponent(principalPick)}` : ''}` : '/api/keys');
   useEffect(() => {
     let current = true; setUsage(null); setError(null); setLoading(true);
     // 같은 사용자의 refresh 동안 App이 이 화면을 유지하며 Session만 읽기를 재시도한다.
@@ -38,8 +42,8 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
       <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" defaultValue={localTime(selected.get('to'))} /></label>
       <div className="field"><label htmlFor="usage-provider">Provider</label><Select id="usage-provider" name="provider" defaultValue={selected.get('provider') ?? ''} options={[{ value: '', label: t('전체') }, { value: 'anthropic', label: 'Anthropic' }, { value: 'openai', label: 'OpenAI' }, { value: 'deepseek', label: 'DeepSeek' }]} /></div>
       <label>{t('모델')}<input name="model" maxLength={200} defaultValue={selected.get('model') ?? ''} /></label>
-      {admin && <label>{t('사용자 ID')}<input name="principal_id" className="mono" spellCheck={false} defaultValue={selected.get('principal_id') ?? ''} /></label>}
-      <label>{t('키 ID')}<input name="key_id" className="mono" spellCheck={false} defaultValue={selected.get('key_id') ?? ''} /></label>
+      {admin && <div className="field"><label htmlFor="usage-principal">{t('사용자')}</label><PrincipalSelect id="usage-principal" name="principal_id" optional value={principalPick} onChange={setPrincipalPick} /></div>}
+      <div className="field"><label htmlFor="usage-key">{t('가상 키')}</label><SearchSelect key={principalPick} id="usage-key" name="key_id" defaultValue={selected.get('principal_id') === principalPick || !admin ? selected.get('key_id') ?? '' : ''} placeholder={keys.items ? t('선택하세요') : t('키 목록 조회 중…')} options={[{ value: '', label: t('전체') }, ...(keys.items ?? []).map(k => ({ value: k.id, label: `${k.name} (${k.key_hint})` }))]} /></div>
       <div className="field"><label htmlFor="usage-group">{t('그룹')}</label><Select id="usage-group" name="group_by" defaultValue={selected.get('group_by') ?? ''} options={[{ value: '', label: t('없음') }, { value: 'provider', label: 'Provider' }, { value: 'model', label: t('모델') }, { value: 'key', label: t('키') }]} /></div>
       <div className="actions"><button className="btn-primary" disabled={loading} aria-busy={loading || undefined} type="submit">{t('조회')}</button></div>
     </form>
@@ -49,8 +53,11 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
 const pages: Record<Screen, { nav: string; title: string; lead?: string }> = {
   '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 관측한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
   '/dashboard/keys': { nav: msgid('내 가상 키'), title: msgid('내 가상 키') },
+  '/dashboard/keys/new': { nav: msgid('내 가상 키'), title: msgid('가상 키 발급'), lead: msgid('연동할 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.') },
   '/dashboard/admin/principals': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 · 정책 · 키'), lead: msgid('사용자와 서비스 계정의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
   '/dashboard/admin/principals/detail': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 상세'), lead: msgid('사용자 하나의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
+  '/dashboard/admin/principals/key': { nav: msgid('사용자·정책·키 관리'), title: msgid('서비스 계정의 가상 키 발급'), lead: msgid('서비스 계정에 인가된 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.') },
+  '/dashboard/admin/keys': { nav: msgid('가상 키 관리'), title: msgid('가상 키 관리'), lead: msgid('모든 사용자와 서비스 계정의 가상 키를 조회하고 회수합니다. 가상 키가 쓰는 Provider 키도 여기서 바꿉니다.') },
   '/dashboard/admin/usage': { nav: msgid('전체 사용량'), title: msgid('전체 사용량'), lead: msgid('사용자·키별 사용량을 조회합니다. 사용자를 지정하지 않은 전체 합계에는 예산 잔액이 없습니다.') },
   '/dashboard/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
   '/dashboard/admin/models': { nav: msgid('모델·가격'), title: msgid('모델 · 가격 카탈로그'), lead: msgid('공급사 모델과 가격을 공개 가격 목록 models.dev 에서 불러옵니다. 동기화는 변경안만 만들고, 관리자가 이전 값과 비교해 승인해야 적용됩니다. 이미 기록된 요청의 금액은 바뀌지 않습니다.') },
@@ -104,7 +111,7 @@ export function App() {
   }, [route.href]);
   // 하위 페이지(사용자 상세)에 있을 때도 상위 메뉴를 현재 위치로 표시한다.
   const link = (path: Screen) => <Link href={path} aria-current={screen === path || screen.startsWith(`${path}/`) ? 'page' : undefined}>{t(pages[path].nav)}</Link>;
-  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p> : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : <UsageScreen key={principal.current} />;
+  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p> : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/principals/key' ? <PrincipalKeyIssueScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/keys' ? <KeysScreen adminAll key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : screen === '/dashboard/keys/new' ? <KeysScreen key={`${principal.current}:new`} view="issue" /> : <UsageScreen key={principal.current} />;
   return <div className="app">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark" aria-hidden="true">mg</span>m-gated</div>
@@ -115,7 +122,7 @@ export function App() {
       </section>}
       <nav aria-label={t('기본')} className="nav">
         <div className="nav-group"><span className="nav-label">{t('내 계정')}</span>{link('/dashboard/')}{link('/dashboard/keys')}</div>
-        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/dashboard/admin/principals')}{link('/dashboard/admin/usage')}{link('/dashboard/admin/requests')}{link('/dashboard/admin/credentials')}{link('/dashboard/admin/models')}{link('/dashboard/admin/settings')}</div>}
+        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/dashboard/admin/principals')}{link('/dashboard/admin/keys')}{link('/dashboard/admin/usage')}{link('/dashboard/admin/requests')}{link('/dashboard/admin/credentials')}{link('/dashboard/admin/models')}{link('/dashboard/admin/settings')}</div>}
       </nav>
       <div className="sidebar-foot"><TimeSwitch /><LanguageSwitch /></div>
     </aside>

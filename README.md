@@ -404,9 +404,11 @@ For logout, the dashboard navigates to `logout_url`. Cookie-authenticated writes
 
 - a name;
 - a validity period (`3_months`, `6_months`, `1_year`, `3_years` or `unlimited`);
-- grants (provider, model, capabilities) that must be a subset of the owner's current grants;
+- one or more grants (provider, model, capabilities). They must be a subset of the owner's current
+  grants;
 - for each provider in its grants, one provider key the owner is authorized to use (see
-  [Provider keys](#provider-keys));
+  [Provider keys](#provider-keys)). A virtual key is therefore always bound to at least one provider
+  key;
 - optional limits.
 
 The key is shown once. Only a hash is stored. Each
@@ -515,8 +517,11 @@ It has no inline scripts and loads nothing from external CDNs.
 | Screen | Path | Audience |
 |---|---|---|
 | My usage and budget balances | `/dashboard/` | users |
-| My API keys (issue and revoke) | `/dashboard/keys` | users |
+| My virtual keys (list and revoke) | `/dashboard/keys` | users |
+| Issue a virtual key | `/dashboard/keys/new` | users |
 | Principals, policies, service principals, safety-pause release | `/dashboard/admin/principals` | admins |
+| Issue a virtual key for a service principal | `/dashboard/admin/principals/key?principal_id=<id>` | admins |
+| All virtual keys: list them, revoke them, or move one to another provider key | `/dashboard/admin/keys` | admins |
 | Organization-wide usage | `/dashboard/admin/usage` | admins |
 | Requests and manual settlement | `/dashboard/admin/requests` | admins |
 | Provider keys (register, replace, retire) | `/dashboard/admin/credentials` | admins |
@@ -591,12 +596,37 @@ key: every request goes out with the provider key its virtual key is bound to.
 - **Provider key access.** A user (or service principal) can use only the provider keys an admin
   authorized for them, per provider, on the user's detail page. A user with no authorized key for a
   provider cannot use that provider.
-- **Binding virtual keys.** When a virtual key is issued, the caller must choose one authorized
-  provider key for every provider in the key's grants
-  (`"provider_credentials": {"anthropic": "<credential id>"}` in `POST /api/keys`). A missing choice
-  is rejected with `400 provider_credential_required`, and a key outside the owner's access with
-  `403 provider_credential_not_authorized`. The virtual key keeps using that provider key. An admin
-  can later move one virtual key to another provider key the owner may use.
+- **Authorizing one key for many principals.** An admin can authorize one provider key for many
+  principals (users and service principals) in one step. On the provider keys page, each key in use
+  has an **Allow users** button. The button opens a list of all principals. The admin can search the
+  list, filter it by kind (human or service), and select principals. **Select all shown users**
+  selects only the principals that the current search and filter show. When the admin confirms, the
+  dashboard sends one command (`POST /api/admin/provider-credentials/{provider}/{id}`, where `{id}`
+  is the provider key id).
+  - The command only adds authorizations for this provider key. It does not remove any
+    authorization. To remove one, use the principal's detail page.
+  - The command authorizes all the listed principals or none of them. If one principal id does not
+    exist, the gateway rejects the command with `404` and authorizes nobody.
+  - A principal that is already authorized for the key stays authorized. If all the listed
+    principals are already authorized, the result has `"effect": "noop"`.
+  - One command accepts 1 to 500 principal ids. A repeated id is rejected with `400`.
+  - The command does not change which provider key a virtual key is bound to. A virtual key can be
+    blocked because its owner is no longer authorized for the provider key it is bound to. Such a
+    virtual key works again when its owner is authorized for that provider key again.
+- **Binding virtual keys.** A virtual key is issued on its own page, separate from the key list. To
+  issue a virtual key, the caller must choose one authorized provider key for every provider in the
+  key's grants (`"provider_credentials": {"anthropic": "<credential id>"}` in `POST /api/keys`).
+  - If a provider in the grants has no chosen provider key, the gateway rejects the issue request
+    with `400 provider_credential_required`.
+  - If the grants are empty, the gateway rejects the issue request with the same error. Such a
+    virtual key would have no provider key and could not be used for inference.
+  - If the owner is not authorized to use a chosen provider key, the gateway rejects the issue
+    request with `403 provider_credential_not_authorized`.
+
+  The dashboard issue page asks for the provider keys first. It then lists the grants of only those
+  providers that have a chosen provider key. After issue, the virtual key uses the chosen provider
+  key of each provider until an admin changes the binding. An admin can move a virtual key to
+  another provider key that the owner is authorized to use.
 - **Removing access.** If you remove a key from a user's access while some of the user's virtual
   keys are bound to it, the change fails with `409 credential_authorization_in_use` and the number
   of those keys. Send it again with `bound_keys` set to one of these values:
@@ -659,11 +689,12 @@ API (admin only; cookie writes need the usual `Origin` and `X-CSRF-Token`):
 
 | Method and path | Body / query | Result |
 |---|---|---|
-| `GET /api/admin/provider-credentials` | – | Per configured provider: `status` (`missing` with no key in use, `undecryptable` if a key cannot be decrypted, else `active`), keys in use (`id`, `version`, label, number of bound virtual keys) and the last 10 retired keys |
+| `GET /api/admin/provider-credentials` | – | For each configured provider: `status`, the keys in use and the last 10 retired keys. `status` is `missing` if no key is in use, `undecryptable` if a key cannot be decrypted, else `active`. Each key in use has `id`, `version`, its label, the number of bound virtual keys and `authorized_principal_ids` (the principals authorized for it) |
 | `POST /api/admin/provider-credentials/{provider}` | `{"label": "...", "secret": "..."}` | `201`, key added |
 | `PUT /api/admin/provider-credentials/{provider}/{id}` | `{"secret": "...", "expected_version": "<n>"}` | `201` key replaced (new id), `200` no-op if it is the same key |
 | `PATCH /api/admin/provider-credentials/{provider}/{id}` | `{"expected_version": "<n>", "label": "..."}` | `200`, renamed |
 | `DELETE /api/admin/provider-credentials/{provider}/{id}` | `?expected_version=<n>[&move_to=<id>]` | `200`, key retired |
+| `POST /api/admin/provider-credentials/{provider}/{id}` | `{"principal_ids": ["<id>", ...]}` | `200`, the key is authorized for all the listed principals. `credential.granted_principal_ids` in the result lists the principals that were newly authorized |
 | `PUT /api/admin/keys/{key id}/provider-credential` | `{"provider": "...", "credential_id": "<id>", "expected_credential_id": "<id>" \| null}` | `200`, virtual key moved to another provider key the owner may use |
 | `PUT /api/admin/principals/{id}/provider-credentials` | `{"provider": "...", "credential_ids": ["<id>", ...], "expected": {"credential_ids": [...]}, "bound_keys"?: "block" \| {"move_to": "<id>"}}` | `200`, the user's access for that provider is replaced. An empty list removes access to that provider. `expected` is the access you last read (from `GET /api/admin/principals/{id}`) |
 

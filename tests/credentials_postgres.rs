@@ -662,6 +662,16 @@ async fn labeled_keys_are_chosen_explicitly_and_route_requests() {
         (status, err["error"]["code"].clone()),
         (400, json!("provider_credential_required"))
     );
+    // 허용한 API가 없는 가상 키는 연동할 Provider 키도 없다. 아무 요청도 보낼 수 없는 키이므로 발급하지 않는다.
+    let mut empty = issue(None);
+    empty["grants"] = json!([]);
+    let (status, err) = h.call("POST", "/api/keys", &h.bob, Some(empty)).await;
+    assert_eq!(
+        (status, err["error"]["code"].clone()),
+        (400, json!("provider_credential_required"))
+    );
+    let (status, list) = h.call("GET", "/api/keys", &h.bob, None).await;
+    assert_eq!((status, list["items"].as_array().unwrap().len()), (200, 0));
     for (who, keys) in [(bob, vec![a_id]), (alice, vec![a_id, b_id])] {
         let (status, v) = h
             .call(
@@ -1380,4 +1390,212 @@ async fn retiring_a_key_keeps_blocked_virtual_keys_blocked() {
         (200, Some(KEY_A.into()), Some(a_id))
     );
     h.db.close().await;
+}
+
+/// Provider 키 하나를 여러 사용자에게 한 번에 인가한다. 기존 인가는 그대로 두고 이 키만 더하며,
+/// 하나라도 잘못되면 아무도 인가하지 않는다. 막아 둔 가상 키는 그 키가 다시 인가되면 다시 쓸 수 있다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn one_key_is_granted_to_many_principals_at_once() {
+    let h = Http::new().await;
+    let mut ids = Vec::new();
+    for token in [&h.alice, &h.bob] {
+        let (status, me) = h.call("GET", "/api/me", token, None).await;
+        assert_eq!(status, 200);
+        ids.push(id_of(&me["principal"]["id"]));
+    }
+    let (alice, bob) = (ids[0], ids[1]);
+    sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE key_id IS NULL")
+        .bind(
+            json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]),
+        )
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let add = |label: &str, secret: &str| json!({"label":label,"secret":secret});
+    let (_, a) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-a", KEY_A)),
+        )
+        .await;
+    let a_id = id_of(&a["target"]["id"]);
+    let (_, b) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-b", KEY_B)),
+        )
+        .await;
+    let b_id = id_of(&b["target"]["id"]);
+    h.service.refresh().await.unwrap();
+    // bob은 b만 인가받은 상태에서 시작한다.
+    let bob_path = format!("/api/admin/principals/{bob}/provider-credentials");
+    assert_eq!(
+        h.call("PUT", &bob_path, &h.alice, Some(authorize(&[b_id], &[])))
+            .await
+            .0,
+        200
+    );
+    let grant_path = format!("{CREDS}/anthropic/{a_id}");
+    let grant = |who: &[Uuid]| json!({"principal_ids": who});
+    let holders = |list: &serde_json::Value, id: Uuid| -> Vec<Uuid> {
+        list["providers"][0]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| id_of(&c["id"]) == id)
+            .unwrap()["authorized_principal_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(id_of)
+            .collect()
+    };
+    let mut both = vec![alice, bob];
+    both.sort();
+
+    // 관리자가 아니면 인가할 수 없다. 빈 목록·중복·없는 사용자는 거절하고 아무도 인가하지 않는다.
+    assert_eq!(
+        h.call("POST", &grant_path, &h.bob, Some(grant(&[bob])))
+            .await
+            .0,
+        403
+    );
+    for (body, expected) in [
+        (grant(&[]), 400),
+        (grant(&[bob, bob]), 400),
+        (grant(&[alice, Uuid::new_v4()]), 404),
+        (json!({"principal_ids":[alice],"extra":1}), 400),
+    ] {
+        let (status, v) = h.call("POST", &grant_path, &h.alice, Some(body)).await;
+        assert_eq!(status, expected, "{v}");
+    }
+    let (_, list) = h.call("GET", CREDS, &h.alice, None).await;
+    assert!(holders(&list, a_id).is_empty());
+
+    // a를 alice와 bob에게 한 번에 인가한다. bob의 기존 인가(b)는 그대로다.
+    let (status, v) = h
+        .call("POST", &grant_path, &h.alice, Some(grant(&[alice, bob])))
+        .await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["effect"], "changed");
+    assert_eq!(v["target"]["kind"], "credential");
+    assert_eq!(v["credential"]["granted_principal_ids"], json!(both));
+    let (_, list) = h.call("GET", CREDS, &h.alice, None).await;
+    assert_eq!(holders(&list, a_id), both);
+    assert_eq!(holders(&list, b_id), vec![bob]);
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    let mut mine: Vec<Uuid> = me["provider_credentials"][0]["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| id_of(&c["id"]))
+        .collect();
+    mine.sort();
+    let mut keys = vec![a_id, b_id];
+    keys.sort();
+    assert_eq!(mine, keys);
+
+    // 이미 인가된 사용자만 다시 보내면 바뀌는 것이 없다.
+    let (status, v) = h
+        .call("POST", &grant_path, &h.alice, Some(grant(&[bob])))
+        .await;
+    assert_eq!((status, v["effect"].clone()), (200, json!("noop")));
+    let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_audit_events WHERE operation='authorize_principal_credentials' AND target_kind='credential' AND target_id=$1")
+        .bind(a_id)
+        .fetch_one(h.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(audits, 1);
+
+    // 해제된 Provider 키는 인가할 수 없다.
+    let (status, _) = h
+        .call(
+            "DELETE",
+            &format!("{CREDS}/anthropic/{b_id}?expected_version=1"),
+            &h.alice,
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic/{b_id}"),
+            &h.alice,
+            Some(grant(&[alice])),
+        )
+        .await;
+    assert_eq!(status, 404);
+}
+
+/// 관리자의 사용자 목록은 이메일 일부로 찾을 수 있다. 대소문자를 가리지 않고 %와 _는 글자 그대로 본다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn principal_list_is_searched_by_part_of_the_email() {
+    let h = Http::new().await;
+    let mut people = Vec::new();
+    for token in [&h.alice, &h.bob] {
+        let (status, me) = h.call("GET", "/api/me", token, None).await;
+        assert_eq!(status, 200);
+        people.push((
+            id_of(&me["principal"]["id"]),
+            me["principal"]["email"].as_str().unwrap().to_owned(),
+        ));
+    }
+    let (bob, bob_email) = people[1].clone();
+    assert_ne!(people[0].1, bob_email);
+    let found = |v: &serde_json::Value| -> Vec<Uuid> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| id_of(&p["id"]))
+            .collect()
+    };
+    // 이메일 전체, 대문자로 쓴 앞부분(@ 앞) 모두 bob 하나만 찾는다.
+    let local = bob_email.split('@').next().unwrap().to_uppercase();
+    for needle in [bob_email.as_str(), local.as_str()] {
+        let (status, v) = h
+            .call(
+                "GET",
+                &format!("/api/admin/principals?email={needle}"),
+                &h.alice,
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(found(&v), vec![bob], "{needle}");
+    }
+    // %와 _는 아무 글자나 뜻하지 않는다. 맞는 이메일이 없으면 빈 목록이다.
+    for needle in ["%25", "_", "no-such-user"] {
+        let (status, v) = h
+            .call(
+                "GET",
+                &format!("/api/admin/principals?email={needle}"),
+                &h.alice,
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{v}");
+        assert!(found(&v).is_empty(), "{needle}");
+    }
+    // 빈 값은 거절한다. 관리자가 아니면 목록을 볼 수 없다.
+    let (status, _) = h
+        .call("GET", "/api/admin/principals?email=", &h.alice, None)
+        .await;
+    assert_eq!(status, 400);
+    let (status, _) = h
+        .call(
+            "GET",
+            &format!("/api/admin/principals?email={local}"),
+            &h.bob,
+            None,
+        )
+        .await;
+    assert_eq!(status, 403);
 }
