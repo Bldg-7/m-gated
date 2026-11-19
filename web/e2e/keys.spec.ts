@@ -86,8 +86,8 @@ test.beforeEach(async ({ context }) => {
 });
 test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke', async ({ page, context }) => {
   const consoleText: string[] = []; page.on('console', message => consoleText.push(message.text()));
-  let writes = 0, deletes = 0;
-  page.on('request', request => { if (request.url() === `${origin}/api/keys` && request.method() === 'POST') writes++; if (request.method() === 'DELETE') { deletes++; expect(request.postData()).toBeNull(); expect(request.headers()['x-csrf-token']).toBeTruthy(); } });
+  let writes = 0, deletes = 0, patches = 0;
+  page.on('request', request => { if (request.url() === `${origin}/api/keys` && request.method() === 'POST') writes++; if (request.method() === 'PATCH') patches++; if (request.method() === 'DELETE') { deletes++; expect(request.postData()).toBeNull(); expect(request.headers()['x-csrf-token']).toBeTruthy(); } });
   await open(page, context);
   // 목록 페이지에는 발급 폼이 없고, 발급 페이지로 가는 링크만 있다.
   await expect(issueForm(page)).toHaveCount(0); await expect(page.getByLabel('키 이름', { exact: true })).toHaveCount(0);
@@ -131,7 +131,21 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
     expect(await page.locator('main').textContent()).not.toContain(secret);
   }
   expect(writes).toBe(5);
-  await revoke(page, 'duration-unlimited'); expect(deletes).toBe(1);
+  // 방금 발급한 키를 수정 창에서 고친다. 지금 연결한 Provider 키와 허용한 API는 미리 골라져 있어 이름만 바꾼다.
+  await page.getByRole('button', { name: 'duration-unlimited 수정', exact: true }).click();
+  const edit = page.getByRole('dialog', { name: 'duration-unlimited 수정', exact: true });
+  await expect(edit.getByLabel('키 이름', { exact: true })).toHaveValue('duration-unlimited');
+  await ensureProviderKey(edit);
+  await expect(edit.getByLabel('anthropic / synthetic-text / messages', { exact: true })).toBeChecked();
+  await edit.getByLabel('키 이름', { exact: true }).fill('duration-renamed');
+  await edit.getByRole('button', { name: '수정 저장', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'duration-renamed 키를 수정했습니다.' })).toBeVisible();
+  await expect(page.getByRole('cell').getByText('duration-renamed', { exact: true })).toBeVisible();
+  await expect(page.getByRole('cell').getByText('duration-unlimited', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+  expect(patches).toBe(1); expect(writes).toBe(5);
+  await revoke(page, 'duration-renamed'); expect(deletes).toBe(1);
   await page.reload(); await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
   expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
 });

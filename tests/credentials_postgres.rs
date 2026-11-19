@@ -1599,3 +1599,265 @@ async fn principal_list_is_searched_by_part_of_the_email() {
         .await;
     assert_eq!(status, 403);
 }
+
+/// 가상 키 수정: 이름·허용 API·Provider 키 연결을 키 주인과 관리자가 바꾼다. 유효기간·만료일·한도는 바꿀 수 없다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn virtual_key_name_grants_and_provider_keys_are_edited_after_issue() {
+    let h = Http::new().await;
+    let mut ids = Vec::new();
+    for token in [&h.alice, &h.bob] {
+        let (status, me) = h.call("GET", "/api/me", token, None).await;
+        assert_eq!(status, 200);
+        ids.push(id_of(&me["principal"]["id"]));
+    }
+    let (alice, bob) = (ids[0], ids[1]);
+    let messages =
+        json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]);
+    sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE key_id IS NULL")
+        .bind(&messages)
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let add = |label: &str, secret: &str| json!({"label":label,"secret":secret});
+    let (_, a) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-a", KEY_A)),
+        )
+        .await;
+    let a_id = id_of(&a["target"]["id"]);
+    let (_, b) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(add("team-b", KEY_B)),
+        )
+        .await;
+    let b_id = id_of(&b["target"]["id"]);
+    h.service.refresh().await.unwrap();
+    let (status, _) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic/{a_id}"),
+            &h.alice,
+            Some(json!({"principal_ids":[alice, bob]})),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, issued) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(a_id))))
+        .await;
+    assert_eq!(status, 201, "{issued}");
+    let key = id_of(&issued["metadata"]["id"]);
+    let secret = issued["key"].as_str().unwrap().to_owned();
+    let path = format!("/api/keys/{key}");
+    let edit = |version: &str, name: &str, grants: &serde_json::Value, cred: Uuid| json!({"expected_version":version,"name":name,"grants":grants,"provider_credentials":{"anthropic":cred}});
+    let fixed = |pool: sqlx::PgPool| async move {
+        sqlx::query_as::<_, (String, Option<String>, Option<i64>)>("SELECT k.validity_preset,k.expires_at::text,p.rpm_limit FROM gw_virtual_keys k JOIN gw_policies p ON p.key_id=k.id WHERE k.id=$1")
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = fixed(h.db.store.pool().clone()).await;
+
+    // 키 주인이 이름만 바꾼다. 버전이 오르고 요청은 그대로 된다.
+    let (status, v) = h
+        .call(
+            "PATCH",
+            &path,
+            &h.bob,
+            Some(edit("1", "새 이름", &messages, a_id)),
+        )
+        .await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(
+        (v["effect"].clone(), v["result_version"].clone()),
+        (json!("changed"), json!("2"))
+    );
+    assert_eq!(h.infer(&secret).await.0, 200);
+    // 같은 내용을 다시 보내면 바뀌는 것이 없다. 옛 버전으로 보내면 충돌이다.
+    let (status, v) = h
+        .call(
+            "PATCH",
+            &path,
+            &h.bob,
+            Some(edit("2", "새 이름", &messages, a_id)),
+        )
+        .await;
+    assert_eq!((status, v["effect"].clone()), (200, json!("noop")));
+    let (status, v) = h
+        .call(
+            "PATCH",
+            &path,
+            &h.bob,
+            Some(edit("1", "다른 이름", &messages, a_id)),
+        )
+        .await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (409, json!("version_conflict"))
+    );
+
+    // 허용 API를 고치면 가상 키 행과 정책 행에 함께 저장되고, 그 즉시 요청에 적용된다.
+    // 저장된 허용 API를 다른 모델로 바꿔 두면 요청이 거절되고, 수정으로 되돌리면 다시 된다.
+    let other =
+        json!([{"provider":"anthropic","model":"retired-model","capabilities":["messages"]}]);
+    sqlx::query("UPDATE gw_virtual_keys SET grant_snapshot=$2 WHERE id=$1")
+        .bind(key)
+        .bind(&other)
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE key_id=$1")
+        .bind(key)
+        .bind(&other)
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(h.infer(&secret).await.0, 403);
+    let (status, v) = h
+        .call(
+            "PATCH",
+            &path,
+            &h.bob,
+            Some(edit("2", "새 이름", &messages, a_id)),
+        )
+        .await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["result_version"], "3");
+    let stored: (serde_json::Value, serde_json::Value) = sqlx::query_as("SELECT k.grant_snapshot,p.allow_rules FROM gw_virtual_keys k JOIN gw_policies p ON p.key_id=k.id WHERE k.id=$1")
+        .bind(key)
+        .fetch_one(h.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(stored, (messages.clone(), messages.clone()));
+    assert_eq!(h.infer(&secret).await.0, 200);
+
+    // 인가받지 않은 Provider 키로는 바꿀 수 없다. 허용 API가 없거나, Provider 키를 고르지 않거나, 정책 밖의 API면 거절한다.
+    let (status, v) = h
+        .call(
+            "PATCH",
+            &path,
+            &h.bob,
+            Some(edit("3", "새 이름", &messages, b_id)),
+        )
+        .await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (403, json!("provider_credential_not_authorized"))
+    );
+    for (body, expected) in [
+        (
+            json!({"expected_version":"3","name":"새 이름","grants":[],"provider_credentials":{}}),
+            (400, "provider_credential_required"),
+        ),
+        (
+            json!({"expected_version":"3","name":"새 이름","grants":messages,"provider_credentials":{}}),
+            (400, "provider_credential_required"),
+        ),
+        (
+            json!({"expected_version":"3","name":"새 이름","grants":[{"provider":"anthropic","model":"no-such-model","capabilities":["messages"]}],"provider_credentials":{"anthropic":a_id}}),
+            (403, "access_denied"),
+        ),
+        (
+            json!({"expected_version":"3","name":"","grants":messages,"provider_credentials":{"anthropic":a_id}}),
+            (400, "invalid_request"),
+        ),
+        (
+            json!({"expected_version":"3","name":"새 이름","grants":messages,"provider_credentials":{"anthropic":a_id},"limits":{"rpm":1}}),
+            (400, "invalid_request"),
+        ),
+        (
+            json!({"expected_version":"3","name":"새 이름","grants":messages,"provider_credentials":{"anthropic":a_id},"validity":"3_years"}),
+            (400, "invalid_request"),
+        ),
+    ] {
+        let (status, v) = h.call("PATCH", &path, &h.bob, Some(body)).await;
+        assert_eq!(
+            (status, v["error"]["code"].as_str().unwrap()),
+            expected,
+            "{v}"
+        );
+    }
+    // 거절된 수정은 아무것도 바꾸지 않는다.
+    assert_eq!(h.infer(&secret).await.0, 200);
+
+    // 관리자는 다른 사람의 가상 키도 고친다. bob에게 b를 인가한 뒤 연결을 b로 바꾼다.
+    let (status, _) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic/{b_id}"),
+            &h.alice,
+            Some(json!({"principal_ids":[bob]})),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, v) = h
+        .call(
+            "PATCH",
+            &path,
+            &h.alice,
+            Some(edit("3", "관리자가 고친 이름", &messages, b_id)),
+        )
+        .await;
+    assert_eq!(status, 200, "{v}");
+    let (_, list) = h.call("GET", "/api/keys", &h.bob, None).await;
+    let item = &list["items"][0];
+    assert_eq!(item["name"], "관리자가 고친 이름");
+    assert_eq!(item["version"], "4");
+    assert_eq!(item["grants"], messages);
+    assert_eq!(
+        id_of(&item["provider_credentials"][0]["credential_id"]),
+        b_id
+    );
+    assert_eq!(h.infer(&secret).await.0, 200);
+    // 유효기간·만료일·한도는 수정으로 바뀌지 않는다.
+    assert_eq!(fixed(h.db.store.pool().clone()).await, before);
+
+    // 다른 사용자의 가상 키는 관리자가 아니면 고칠 수 없다. 회수된 가상 키는 고치지 않는다.
+    let (status, own) = h
+        .call("POST", "/api/keys", &h.alice, Some(issue(Some(a_id))))
+        .await;
+    assert_eq!(status, 201, "{own}");
+    let alice_key = id_of(&own["metadata"]["id"]);
+    let (status, _) = h
+        .call(
+            "PATCH",
+            &format!("/api/keys/{alice_key}"),
+            &h.bob,
+            Some(edit("1", "남의 키", &messages, a_id)),
+        )
+        .await;
+    assert_eq!(status, 404);
+    let (status, _) = h
+        .call(
+            "DELETE",
+            &format!("{path}?expected_version=4"),
+            &h.bob,
+            None,
+        )
+        .await;
+    assert_eq!(status, 204);
+    let (status, _) = h
+        .call(
+            "PATCH",
+            &path,
+            &h.bob,
+            Some(edit("5", "회수된 키", &messages, b_id)),
+        )
+        .await;
+    assert_eq!(status, 400);
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gw_audit_events WHERE operation='update_key' AND target_id=$1",
+    )
+    .bind(key)
+    .fetch_one(h.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(audits, 3);
+}

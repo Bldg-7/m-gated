@@ -41,6 +41,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         10,
         include_str!("../../migrations/0010_remove_default_keys.sql"),
     ),
+    (11, include_str!("../../migrations/0011_key_edit.sql")),
 ];
 
 pub struct PgIdentityStore {
@@ -155,7 +156,7 @@ impl PgIdentityStore {
             }
         }
         let future: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM gw_schema_migrations WHERE version NOT IN (1,2,3,4,5,6,7,8,9,10))",
+            "SELECT EXISTS(SELECT 1 FROM gw_schema_migrations WHERE version NOT IN (1,2,3,4,5,6,7,8,9,10,11))",
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -171,7 +172,7 @@ impl PgIdentityStore {
             let mut connection = self.pool.acquire().await?;
             sqlx::query("SELECT 1").execute(&mut *connection).await?;
             let schema = async {
-                let rows=sqlx::query("SELECT version,checksum FROM gw_schema_migrations ORDER BY version LIMIT 11").fetch_all(&mut *connection).await?;
+                let rows=sqlx::query("SELECT version,checksum FROM gw_schema_migrations ORDER BY version LIMIT 12").fetch_all(&mut *connection).await?;
                 let versions=rows.len()==MIGRATIONS.len() && rows.iter().zip(MIGRATIONS).all(|(r,(version,sql))|r.get::<i64,_>("version")==*version&&r.get::<Vec<u8>,_>("checksum")==Sha256::digest(sql.as_bytes()).to_vec());
                 let tables:bool=sqlx::query_scalar("SELECT count(*)=18 FROM unnest(ARRAY['gw_principals','gw_virtual_keys','gw_policies','gw_requests','gw_request_budgets','gw_usage_events','gw_usage_totals','gw_rate_windows','gw_commands','gw_audit_events','gw_handoffs','gw_alarm_totals','gw_provider_credentials','gw_model_catalog_proposals','gw_model_catalog_versions','gw_virtual_key_credentials','gw_principal_credentials','gw_budget_timezones']::text[]) AS names(name) WHERE to_regclass(name) IS NOT NULL").fetch_one(&mut *connection).await?;
                 Ok::<_,sqlx::Error>(versions && tables)

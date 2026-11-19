@@ -1703,46 +1703,6 @@ async fn admin_usage_cursor_is_actor_and_scope_bound_and_all_filters_are_bounded
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn keys_freeze_their_issued_policy_at_the_database_boundary() {
-    let db = postgres::TestDb::new().await;
-    let cfg = config();
-    let settings = AccessSettings::from_config(&cfg);
-    let g = grants();
-    let ceiling = Default::default();
-    let actor = finance::human(db.store.pool()).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
-    let body = ledger
-        .management_command(
-            &ctx(
-                actor,
-                Uuid::new_v4(),
-                &settings,
-                &g,
-                &ceiling,
-                "POST",
-                "/api/keys",
-            ),
-            issue(),
-        )
-        .await
-        .unwrap()
-        .body
-        .unwrap();
-    let key = Uuid::parse_str(body["metadata"]["id"].as_str().unwrap()).unwrap();
-    let changed =
-        sqlx::query("UPDATE gw_policies SET rpm_limit=3,version=version+1 WHERE key_id=$1")
-            .bind(key)
-            .execute(db.store.pool())
-            .await
-            .is_ok();
-    db.close().await;
-    assert!(
-        !changed,
-        "S5: 발급 후 key policy 상한은 SQL 경계에서도 불변이어야 한다"
-    );
-}
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn virtual_owner_inactive_has_specific_wire_code_and_blocks_current_balance() {
     let h = Harness::new().await;
     let owner = bob(&h.db).await;

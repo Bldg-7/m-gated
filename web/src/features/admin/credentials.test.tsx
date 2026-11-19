@@ -170,6 +170,11 @@ test('admin_chooses_only_from_own_authorized_provider_keys_when_issuing', async 
   expect(calls.some(c => c.url === '/api/admin/provider-credentials')).toBe(false);
   expect(screen.getAllByText('2026-11-13 00:00').length).toBeGreaterThan(0);
 
-  // 내 가상 키 화면에서는 Provider 키 연결을 바꾸지 않는다(관리자 화면에서만 바꾼다).
-  expect(within(binding).queryByRole('button', { name: 'Provider 키 변경' })).toBeNull();
+  // 내 가상 키는 주인이 수정 창에서 Provider 키 연결을 바꾼다. 후보는 나에게 인가된 키뿐이고, 전체 Provider 키 목록은 읽지 않는다.
+  expect(within(binding).queryByRole('button')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '새 키 수정' }));
+  const edit = within(await screen.findByRole('dialog', { name: '새 키 수정' })).getByLabelText('Anthropic Provider 키');
+  expect(selectedValue(edit)).toBe('credB');
+  expect(optionNames(edit)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
+  expect(calls.some(c => c.url.startsWith('/api/admin/'))).toBe(false);
 });

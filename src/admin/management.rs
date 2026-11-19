@@ -141,7 +141,7 @@ pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> R
         } else if path == "/api/keys" || path == "/api/admin/principals" {
             vec![Method::GET, Method::POST]
         } else if path.starts_with("/api/keys/") {
-            vec![Method::DELETE]
+            vec![Method::DELETE, Method::PATCH]
         } else if path.ends_with("/policy") || path.ends_with("/settlement") {
             vec![Method::PUT]
         } else if path.ends_with("/inference-pause/release") {
@@ -471,6 +471,15 @@ async fn execute(
                 .get(3)
                 .and_then(|s| Uuid::parse_str(s).ok())
                 .ok_or(ManagementError::Invalid)?;
+            if head.method == Method::PATCH {
+                if segments.len() != 4 || head.uri.query().is_some() {
+                    return Err(ManagementError::Invalid);
+                }
+                return Ok(Command::EditKey(
+                    id,
+                    serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
+                ));
+            }
             let mut f = management_query::fields(head.uri.query())?;
             let expected = f
                 .remove("expected_version")

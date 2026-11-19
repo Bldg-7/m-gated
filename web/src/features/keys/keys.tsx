@@ -2,12 +2,12 @@ import { useId, useEffect, useLayoutEffect, useRef, useState, useSyncExternalSto
 import { useTranslation } from 'react-i18next';
 import { ApiError, session, StaleResponse } from '../../lib/api';
 import i18n, { msgid } from '../../lib/i18n';
-import type { AuthorizedCredentials, Grant, IssuedKey, KeyCredential, KeyMetadata, Limits, Page, Validity } from '../../lib/types';
-import type { CredentialList } from '../admin/types';
+import type { AuthorizedCredentials, Grant, IssuedKey, KeyMetadata, Limits, Page, Validity } from '../../lib/types';
 import { credentialLabel, providerNames } from '../admin/credentials';
 import { useTimeFormat } from '../../lib/time';
 import { Link, navigate } from '../../lib/router';
 import { Badge, Modal, SearchSelect, Select, Time } from '../../ui/ui';
+import { EditKeyModal } from './keys-edit';
 
 /** 발급된 키와 복사 버튼. 사용자가 누를 때만 클립보드에 쓰고, 키 창이 닫히면 상태도 함께 사라진다. */
 function SecretValue({ value }: { value: string }) {
@@ -63,14 +63,13 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   // 발급 폼에서 Provider마다 고른 Provider 키와, 그 Provider의 API 가운데 허용한 것.
   const [chosen, setChosen] = useState<Record<string, string>>({});
   const [granted, setGranted] = useState<Set<string>>(() => new Set());
-  // 관리자는 Provider 키 목록을 읽어 두고, 키 주인의 인가를 모를 때(전체 키 목록) 연결을 바꿀 후보로 쓴다.
-  const [providerKeys, setProviderKeys] = useState<CredentialList | null>(null), [rebinding, setRebinding] = useState<string | null>(null);
-  const isAdminUser = auth.me?.role === 'admin';
+  // 수정 창을 연 가상 키.
+  const [editing, setEditing] = useState<KeyMetadata | null>(null);
   const mounted = useRef(true), lock = useRef(false);
   const format = useTimeFormat();
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   // 인증 epoch마다 폼/키/명령 상태를 폐기한다. 같은 사용자 refresh도 예외가 아니다.
-  useLayoutEffect(() => { setSecret(null); setConfirmation(null); setRecovery(null); setPage(null); setError(null); setListError(null); setNotice(null); setBusy(false); setChosen({}); setGranted(new Set()); setRebinding(null); lock.current = false; }, [auth.epoch]);
+  useLayoutEffect(() => { setSecret(null); setConfirmation(null); setRecovery(null); setPage(null); setError(null); setListError(null); setNotice(null); setBusy(false); setChosen({}); setGranted(new Set()); setEditing(null); lock.current = false; }, [auth.epoch]);
   useEffect(() => {
     if (auth.status !== 'ready') return;
     let current = true;
@@ -88,14 +87,6 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
     return () => { current = false; };
     // 같은 사용자 refresh의 재시도는 Session 하나만 소유한다. 다른 인증 변경은 App이 unmount한다.
   }, [query, revision]);
-  useEffect(() => {
-    // 키 주인의 인가를 모르는 관리자 목록(전체 키)에서만 필요하다.
-    if (auth.status !== 'ready' || !isAdminUser || !isAdmin || (adminPrincipal && !adminAll && adminPrincipal.authorized)) return;
-    let current = true;
-    void session.read<CredentialList>('/api/admin/provider-credentials', () => current).then(data => { if (current) setProviderKeys(data); }).catch(() => { /* 읽지 못하면 연결을 바꾸는 버튼을 보이지 않는다 */ });
-    return () => { current = false; };
-    // Provider 키 목록은 키 목록을 다시 읽을 때마다 바뀌지 않으므로 화면을 열 때 한 번만 읽는다.
-  }, [isAdminUser]);
   // 키 주인에게 인가된 Provider 키. 서비스 계정의 가상 키는 그 서비스 계정의 인가, 내 가상 키는 내 인가다.
   // 발급할 때는 관리자도 전체 Provider 키가 아니라 키 주인에게 인가된 키 안에서만 고른다.
   const authorized: AuthorizedCredentials = adminPrincipal ? adminPrincipal.authorized ?? [] : auth.me?.provider_credentials ?? [];
@@ -113,8 +104,6 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
     // 연동을 푼 Provider의 API는 허용 목록에서도 뺀다.
     if (!id) setGranted(prev => new Set([...prev].filter(value => grantList[Number(value.split(':')[0])]?.provider !== provider)));
   };
-  // 가상 키의 Provider 키 연결을 바꿀 후보: 키 주인의 인가를 알면 그 안에서, 모르면 그 Provider의 활성 키 전체(서버가 인가를 다시 검사한다).
-  const rebindOptions = (provider: string): ProviderKey[] => adminPrincipal?.authorized && !adminAll ? authorizedFor(provider) : providerKeys?.providers.find(p => p.provider === provider)?.credentials ?? [];
   const reload = () => { setQuery(''); setStatus(''); setRevision(v => v + 1); };
   const prepare = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setError(null); setSecret(null); setNotice(null);
@@ -177,23 +166,6 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
       }
     } finally { if (current()) { lock.current = false; setBusy(false); } }
   };
-  /** 관리자가 가상 키 하나의 Provider 키 연결을 바꾼다. 지금 연결을 함께 보내 다른 관리자의 변경을 덮어쓰지 않는다. */
-  const rebind = async (key: KeyMetadata, binding: KeyCredential, to: string) => {
-    if (lock.current || to === binding.credential_id) { setRebinding(null); return; }
-    lock.current = true; setBusy(true); setError(null); setNotice(null);
-    const epoch = auth.epoch, commandId = crypto.randomUUID();
-    try {
-      await session.write(`/api/admin/keys/${key.id}/provider-credential`, 'PUT', commandId, { provider: binding.provider, credential_id: to, expected_credential_id: binding.credential_id });
-      if (session.snapshot().epoch !== epoch) return;
-      const target = rebindOptions(binding.provider).find(c => c.id === to);
-      setNotice(i18n.t('{{name}} 키의 Provider 키를 {{label}}로 바꿨습니다.', { name: key.name, label: target ? credentialLabel(target) : to }));
-    } catch (e) {
-      if (e instanceof StaleResponse) return;
-      setError(e instanceof ApiError && e.code === 'provider_credential_not_authorized'
-        ? i18n.t('이 키 주인에게 인가되지 않은 Provider 키입니다. 사용자 상세의 Provider 키 인가를 먼저 바꾸세요. 명령 ID: {{id}}', { id: commandId })
-        : i18n.t('Provider 키 연결을 바꾸지 못했습니다. 목록을 다시 조회했습니다. 명령 ID: {{id}}', { id: commandId }));
-    } finally { lock.current = false; setBusy(false); setRebinding(null); reload(); }
-  };
   if (auth.status !== 'ready') return null;
   const resolved = recovery && page?.items.find(key => recovery.kind === 'issue' ? key.created_command_id === recovery.commandId : key.id === recovery.keyId);
   const issueTitle = adminPrincipal ? t('서비스 계정의 가상 키 발급') : t('가상 키 발급');
@@ -241,6 +213,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
         <div className="actions"><button type="submit" className="btn-primary" disabled={chosenProviders.length === 0 || withoutApi.length > 0}>{t('발급 내용 확인')}</button><Link className="btn btn-quiet" href={listHref}>{t('취소')}</Link></div>
       </fieldset>
     </form>)}
+    {editing && <EditKeyModal target={editing} validity={t(durationName(editing.validity))} owner={adminAll ? null : { grants: grantList, authorized }} onClose={() => setEditing(null)}
+      onDone={message => { setEditing(null); setNotice(message); reload(); }} />}
     {confirmation && <Modal variant={confirmation.kind === 'revoke' ? 'danger' : 'normal'} busy={busy} onClose={() => setConfirmation(null)}
       title={confirmation.kind === 'issue' ? t('발급 확인') : t('회수 확인')}
       confirm={{ label: confirmation.kind === 'issue' ? t('발급 확인') : t('회수 확인'), onConfirm: () => void execute() }}>
@@ -263,14 +237,11 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
           <td>{t(durationName(key.validity))}</td>
           <td>{format(key.created_at)}</td>
           <td>{key.expires_at ? format(key.expires_at) : t('없음')}</td>
-          <td><div className="stack-sm" aria-label={t('{{name}} Provider 키 연결', { name: key.name })}>{(key.provider_credentials ?? []).length === 0 ? <p className="meta">{t('Provider 키: 연결 없음')}</p> : (key.provider_credentials ?? []).map(b => { const options = rebindOptions(b.provider); return <div key={b.provider} className="row">
+          <td><div className="stack-sm" aria-label={t('{{name}} Provider 키 연결', { name: key.name })}>{(key.provider_credentials ?? []).length === 0 ? <p className="meta">{t('Provider 키: 연결 없음')}</p> : (key.provider_credentials ?? []).map(b => { return <div key={b.provider} className="row">
           <span className="meta">{t('Provider 키')}: {providerNames[b.provider] ?? b.provider} · {credentialLabel(b)}{b.state === 'retired' && <> <Badge tone="neutral">{t('해제됨')}</Badge></>}</span>
-          {b.authorized === false && !key.revoked_at && <><Badge tone="critical">{t('인가 해제됨')}</Badge><span className="text-critical">{t('이 Provider 키의 사용 인가가 해제돼 이 키로 보내는 {{provider}} 요청은 거절됩니다.', { provider: providerNames[b.provider] ?? b.provider })}{isAdmin ? ` ${t('Provider 키 변경으로 인가된 키에 연결하세요.')}` : ` ${t('관리자에게 문의하거나 새 키를 발급하세요.')}`}</span></>}
-          {isAdmin && !key.revoked_at && options.some(c => c.id !== b.credential_id) && (rebinding === `${key.id}:${b.provider}`
-            ? <form className="row" aria-label={t('{{name}} Provider 키 변경', { name: key.name })} onSubmit={e => { e.preventDefault(); const to = String(new FormData(e.currentTarget).get('to') ?? ''); if (to) void rebind(key, b, to); }}><SearchSelect name="to" aria-label={t('바꿀 Provider 키')} required placeholder={t('선택하세요')} defaultValue={options.some(c => c.id === b.credential_id) ? b.credential_id : options.length === 1 ? options[0].id : ''} options={options.map(c => ({ value: c.id, label: credentialLabel(c) }))} /><button className="btn-sm btn-primary" disabled={busy}>{t('변경')}</button><button type="button" className="btn-sm btn-quiet" onClick={() => setRebinding(null)}>{t('취소')}</button></form>
-            : <button className="btn-sm" disabled={busy || loading} onClick={() => setRebinding(`${key.id}:${b.provider}`)}>{t('Provider 키 변경')}</button>)}
+          {b.authorized === false && !key.revoked_at && <><Badge tone="critical">{t('인가 해제됨')}</Badge><span className="text-critical">{t('이 Provider 키의 사용 인가가 해제돼 이 키로 보내는 {{provider}} 요청은 거절됩니다.', { provider: providerNames[b.provider] ?? b.provider })}{` ${t('수정에서 인가된 Provider 키로 다시 연결하세요.')}`}</span></>}
         </div>; })}</div></td>
-          <td>{!key.revoked_at && <button className="btn-sm btn-danger-outline" disabled={busy || loading} onClick={() => { setSecret(null); setConfirmation({ kind: 'revoke', key }); }}>{t('{{name}} 회수', { name: key.name })}</button>}</td>
+          <td>{!key.revoked_at && <div className="actions">{!expired && <button className="btn-sm" disabled={busy || loading} onClick={() => { setError(null); setNotice(null); setEditing(key); }}>{t('{{name}} 수정', { name: key.name })}</button>}<button className="btn-sm btn-danger-outline" disabled={busy || loading} onClick={() => { setSecret(null); setConfirmation({ kind: 'revoke', key }); }}>{t('{{name}} 회수', { name: key.name })}</button></div>}</td>
         </tr>; })}</tbody>
       </table></div>}{page.next_cursor && <div className="actions"><button disabled={loading || busy} onClick={() => setQuery(`cursor=${encodeURIComponent(page.next_cursor!)}`)}>{t('다음 키 페이지')}</button></div>}</>}
     </div>}

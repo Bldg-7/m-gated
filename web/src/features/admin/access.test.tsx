@@ -18,7 +18,7 @@ function stubDetail(principal: typeof human, keys: unknown[], write: (body: Reco
     const url = String(input);
     if (url === '/api/me') return Promise.resolve(response(admin));
     if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
-    if (init?.method === 'PUT') { const body = JSON.parse(String(init.body)); writes.push({ url, ...body }); return Promise.resolve(write(body, url)); }
+    if (init?.method === 'PUT' || init?.method === 'PATCH') { const body = JSON.parse(String(init.body)); writes.push({ url, ...body }); return Promise.resolve(write(body, url)); }
     if (url === '/api/admin/provider-credentials') return Promise.resolve(response(providerKeys));
     if (url === '/api/admin/principals/human1') return Promise.resolve(response({ principal, execution_ceiling: { grants: [], limits: human.policy.limits } }));
     if (url.startsWith('/api/admin/keys')) return Promise.resolve(response({ items: keys, next_cursor: null, as_of: 'now' }));
@@ -68,24 +68,55 @@ test('removing_every_provider_key_says_the_user_can_no_longer_use_the_provider',
   expect(writes).toEqual([{ url: '/api/admin/principals/human1/provider-credentials', provider: 'anthropic', credential_ids: [], expected: { credential_ids: ['b'] } }]);
 });
 
-test('admin_rebinds_a_virtual_key_only_to_keys_authorized_for_its_owner', async () => {
+const editGrants = [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }];
+/** 정책이 Anthropic API를 허용하고 team-a·team-b가 인가된 키 주인. team-c는 인가되지 않았다. */
+const editOwner = { ...human, policy: { ...human.policy, grants: editGrants as never[] }, provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'a', label: 'team-a', hint: '0001' }, { id: 'b', label: 'team-b', hint: '0002' }] }] };
+
+test('admin_edits_a_virtual_key_only_to_keys_authorized_for_its_owner', async () => {
   history.replaceState(null, '', '/dashboard/admin/principals/detail?principal_id=human1');
-  const owner = { ...human, provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'a', label: 'team-a', hint: '0001' }, { id: 'b', label: 'team-b', hint: '0002' }] }] };
-  const bound = { ...key, name: '연결 키', provider_credentials: [{ ...key.provider_credentials[0], authorized: true }] };
-  const writes = stubDetail(owner, [bound], () => ack());
+  const bound = { ...key, name: '연결 키', grants: editGrants, provider_credentials: [{ ...key.provider_credentials[0], authorized: true }] };
+  const writes = stubDetail(editOwner, [bound], () => ack());
   render(<App />);
   const binding = await screen.findByLabelText('연결 키 Provider 키 연결');
   expect(binding.textContent).not.toContain('인가 해제됨');
-  fireEvent.click(within(binding).getByRole('button', { name: 'Provider 키 변경' }));
-  const form = within(binding).getByRole('form', { name: '연결 키 Provider 키 변경' });
-  const to = within(form).getByLabelText('바꿀 Provider 키');
+  // 연결마다 따로 두던 「Provider 키 변경」은 없고, 수정 창에서 바꾼다.
+  expect(screen.queryByRole('button', { name: 'Provider 키 변경' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '연결 키 수정' }));
+  const dialog = await screen.findByRole('dialog', { name: '연결 키 수정' });
+  const to = within(dialog).getByLabelText('Anthropic Provider 키');
   expect(selectedValue(to)).toBe('b');
   // 키 주인에게 인가되지 않은 team-c는 후보가 아니다.
-  expect(optionNames(to)).toEqual(['team-a (…0001)', 'team-b (…0002)']);
+  expect(optionNames(to)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
   pickOption(to, 'team-a (…0001)');
-  fireEvent.submit(form);
-  await screen.findByText('연결 키 키의 Provider 키를 team-a (…0001)로 바꿨습니다.');
-  expect(writes).toEqual([{ url: '/api/admin/keys/k1/provider-credential', provider: 'anthropic', credential_id: 'a', expected_credential_id: 'b' }]);
+  fireEvent.click(within(dialog).getByRole('button', { name: '수정 저장' }));
+  expect((await screen.findByRole('status')).textContent).toBe('연결 키 키를 수정했습니다.');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toEqual([{ url: '/api/keys/k1', expected_version: '1', name: '연결 키', grants: editGrants, provider_credentials: { anthropic: 'a' } }]);
+});
+
+test('admin_fixes_a_blocked_binding_by_choosing_a_key_authorized_for_the_owner', async () => {
+  history.replaceState(null, '', '/dashboard/admin/principals/detail?principal_id=human1');
+  // 인가가 풀린 team-c에 연결돼 막힌 가상 키.
+  const blocked = { ...key, grants: editGrants, provider_credentials: [{ provider: 'anthropic', credential_id: 'c', label: 'team-c', hint: '0003', state: 'active', authorized: false }] };
+  const writes = stubDetail(editOwner, [blocked], () => ack());
+  render(<App />);
+  const binding = await screen.findByLabelText('막힌 키 Provider 키 연결');
+  expect(binding.textContent).toContain('인가 해제됨');
+  expect(binding.textContent).toContain('수정에서 인가된 Provider 키로 다시 연결하세요.');
+  expect(within(binding).queryByRole('button')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '막힌 키 수정' }));
+  const dialog = await screen.findByRole('dialog', { name: '막힌 키 수정' });
+  const to = within(dialog).getByLabelText('Anthropic Provider 키'), save = within(dialog).getByRole('button', { name: '수정 저장' }) as HTMLButtonElement;
+  // 인가가 풀린 연결은 처음 값이 아니다. 인가된 키를 다시 골라야 저장할 수 있다.
+  expect(selectedValue(to)).toBe('');
+  expect(optionNames(to)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
+  expect(save.disabled).toBe(true);
+  pickOption(to, 'team-b (…0002)');
+  expect((within(dialog).getByLabelText('anthropic / synthetic-text / messages') as HTMLInputElement).checked).toBe(true);
+  expect(save.disabled).toBe(false);
+  fireEvent.click(save);
+  expect((await screen.findByRole('status')).textContent).toBe('막힌 키 키를 수정했습니다.');
+  expect(writes).toEqual([{ url: '/api/keys/k1', expected_version: '1', name: '막힌 키', grants: editGrants, provider_credentials: { anthropic: 'b' } }]);
 });
 
 test('budget_time_zone_is_searched_and_chosen_on_the_settings_screen', async () => {
@@ -95,7 +126,7 @@ test('budget_time_zone_is_searched_and_chosen_on_the_settings_screen', async () 
     const url = String(input);
     if (url === '/api/me') return Promise.resolve(response(admin));
     if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
-    if (init?.method === 'PUT') { writes.push(JSON.parse(String(init.body))); return Promise.resolve(response({ command_id: 'cmd', effect: 'changed', result_version: '4' })); }
+    if (init?.method === 'PUT' || init?.method === 'PATCH') { writes.push(JSON.parse(String(init.body))); return Promise.resolve(response({ command_id: 'cmd', effect: 'changed', result_version: '4' })); }
     if (url === '/api/admin/settings') return Promise.resolve(response({ budget_timezone: writes.length ? { ...budgetTimezone, version: '4', pending: { timezone: 'Asia/Seoul', effective_from: '2026-12-01T00:00:00.000000Z', first_period_end: '2026-12-31T15:00:00Z' } } : budgetTimezone }));
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: 'now' }));
   }));

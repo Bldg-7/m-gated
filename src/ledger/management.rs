@@ -207,6 +207,16 @@ pub struct IssueKey {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub provider_credentials: std::collections::BTreeMap<String, Uuid>,
 }
+/// 가상 키 수정. 이름·허용 API·Provider 키 연결을 한 번에 정한다. 유효기간·만료일·한도는 바꿀 수 없다.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditKey {
+    pub expected_version: String,
+    pub name: String,
+    pub grants: Vec<Grant>,
+    /// 허용한 API의 Provider마다 연결할 Provider 키. 키 주인에게 인가된 키여야 한다.
+    pub provider_credentials: std::collections::BTreeMap<String, Uuid>,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateService {
@@ -260,6 +270,7 @@ pub struct Settlement {
 pub enum Command {
     Issue(IssueKey),
     Revoke { id: Uuid, expected: String },
+    EditKey(Uuid, EditKey),
     Create(CreateService),
     Update(Uuid, UpdateService),
     Policy(Uuid, ReplacePolicy),
@@ -271,6 +282,7 @@ impl Command {
         match self {
             Self::Issue(_) => "issue_key",
             Self::Revoke { .. } => "revoke_key",
+            Self::EditKey(..) => "update_key",
             Self::Create(_) => "create_service",
             Self::Update(..) => "update_service",
             Self::Policy(..) => "replace_policy",
@@ -282,6 +294,7 @@ impl Command {
         let v = match self {
             Self::Issue(v) => serde_json::to_value(v),
             Self::Revoke { expected, .. } => Ok(json!({"expected_version":expected})),
+            Self::EditKey(_, v) => serde_json::to_value(v),
             Self::Create(v) => serde_json::to_value(v),
             Self::Update(_, v) => serde_json::to_value(v),
             Self::Policy(_, v) => serde_json::to_value(v),
@@ -305,6 +318,18 @@ impl Command {
                     return Err(ManagementError::Invalid);
                 }
                 v.limits.validate()?;
+                v.grants = serde_json::from_value(normalize_grants(v.grants.clone())?)
+                    .map_err(|_| ManagementError::Invalid)?;
+            }
+            Self::EditKey(_, v) => {
+                version(&v.expected_version)?;
+                text(&v.name, 100, 400)?;
+                if v.provider_credentials
+                    .keys()
+                    .any(|p| crate::config::ProviderId::from_name(p).is_none())
+                {
+                    return Err(ManagementError::Invalid);
+                }
                 v.grants = serde_json::from_value(normalize_grants(v.grants.clone())?)
                     .map_err(|_| ManagementError::Invalid)?;
             }

@@ -66,10 +66,10 @@ impl PgLedger {
     ) -> Result<CommandResult, ManagementError> {
         let mut tx = self.database().begin_transaction().await?;
         let admin = !matches!(command,Command::Issue(v) if v.service_principal_id.is_none())
-            && !matches!(command, Command::Revoke { .. });
+            && !matches!(command, Command::Revoke { .. } | Command::EditKey(..));
         let (target, kind) = match command {
             Command::Issue(v) => (v.service_principal_id.unwrap_or(ctx.actor), "key"),
-            Command::Revoke { id, .. } => (*id, "key"),
+            Command::Revoke { id, .. } | Command::EditKey(id, _) => (*id, "key"),
             Command::Create(_) => (Uuid::new_v4(), "principal"),
             Command::Update(id, _) | Command::Policy(id, _) | Command::Release(id, _) => {
                 (*id, "principal")
@@ -77,7 +77,7 @@ impl PgLedger {
             Command::Settle(id, _) => (*id, "request"),
         };
         let target_principal = match command {
-            Command::Revoke { id, .. } => sqlx::query_scalar::<_, Uuid>(
+            Command::Revoke { id, .. } | Command::EditKey(id, _) => sqlx::query_scalar::<_, Uuid>(
                 "SELECT principal_id FROM gw_virtual_keys WHERE id=$1",
             )
             .bind(id)
@@ -142,7 +142,9 @@ impl PgLedger {
             }
         }
         management::check_actor(&mut tx, ctx.actor, ctx.settings, admin).await?;
-        if matches!(command, Command::Revoke { .. }) && target_principal != ctx.actor {
+        if matches!(command, Command::Revoke { .. } | Command::EditKey(..))
+            && target_principal != ctx.actor
+        {
             management::check_actor(&mut tx, ctx.actor, ctx.settings, true)
                 .await
                 .map_err(|_| ManagementError::NotFound)?;
@@ -158,13 +160,16 @@ impl PgLedger {
                 return Err(ManagementError::Busy);
             }
         }
-        if let Command::Revoke { id, .. } = command {
+        if let Command::Revoke { id, .. } | Command::EditKey(id, _) = command {
             sqlx::query("SELECT id FROM gw_virtual_keys WHERE id=$1 FOR UPDATE")
                 .bind(id)
                 .fetch_one(&mut *tx)
                 .await?;
         }
-        if matches!(command, Command::Issue(_) | Command::Policy(..)) {
+        if matches!(
+            command,
+            Command::Issue(_) | Command::Policy(..) | Command::EditKey(..)
+        ) {
             sqlx::query("SELECT id FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL ORDER BY id FOR UPDATE").bind(target_principal).fetch_all(&mut *tx).await?;
         }
         // 정산도 actor/target/owner 전체를 먼저 잠근 후 금융 공통 순서를 따른다.
@@ -280,6 +285,106 @@ impl PgLedger {
                 result_version = Some(current + i64::from(changed));
                 after = json!({"revoked":true,"version":result_version.map(|v|v.to_string())});
                 204
+            }
+            Command::EditKey(id, v) => {
+                let row = sqlx::query("SELECT version,name,grant_snapshot,revoked_at IS NULL AND (expires_at IS NULL OR expires_at>$2::timestamptz) AS active FROM gw_virtual_keys WHERE id=$1")
+                    .bind(id)
+                    .bind(&now)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                // 회수·만료된 가상 키는 고치지 않는다.
+                if !row.get::<bool, _>("active") {
+                    return Err(ManagementError::Invalid);
+                }
+                let current: i64 = row.get("version");
+                cas(&v.expected_version, current)?;
+                let p = sqlx::query(
+                    "SELECT disabled_reason,security_fence_ref FROM gw_principals WHERE id=$1",
+                )
+                .bind(target_principal)
+                .fetch_one(&mut *tx)
+                .await?;
+                if p.get::<Option<String>, _>("disabled_reason").is_some()
+                    || p.get::<Option<String>, _>("security_fence_ref").is_some()
+                {
+                    return Err(ManagementError::Forbidden);
+                }
+                // 발급과 같은 규칙: 허용 API는 서버 상한과 키 주인의 지금 정책 안에 있어야 하고 하나 이상이어야 한다.
+                let policy: Value = sqlx::query_scalar(
+                    "SELECT allow_rules FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL",
+                )
+                .bind(target_principal)
+                .fetch_one(&mut *tx)
+                .await?;
+                let grants = management::normalize_grants(v.grants.clone())?;
+                require_subset(&grants, ctx.grants)?;
+                require_subset(&grants, &policy)?;
+                let providers: std::collections::BTreeSet<String> =
+                    v.grants.iter().map(|g| g.provider.clone()).collect();
+                if providers.is_empty()
+                    || providers
+                        .iter()
+                        .any(|p| !v.provider_credentials.contains_key(p))
+                {
+                    return Err(ManagementError::CredentialRequired);
+                }
+                if v.provider_credentials
+                    .keys()
+                    .any(|p| !providers.contains(p))
+                {
+                    return Err(ManagementError::Invalid);
+                }
+                let old_name: String = row.get("name");
+                let old_grants: Value = row.get("grant_snapshot");
+                let old_bindings = super::credentials::key_bindings(&mut tx, *id).await?;
+                let old_pairs: std::collections::BTreeMap<String, Uuid> = sqlx::query(
+                    "SELECT provider,credential_id FROM gw_virtual_key_credentials WHERE key_id=$1",
+                )
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?
+                .iter()
+                .map(|r| (r.get("provider"), r.get("credential_id")))
+                .collect();
+                let rebind = old_pairs != v.provider_credentials;
+                let regrant = old_grants != grants;
+                changed = rebind || regrant || old_name != v.name;
+                before = json!({"name":old_name,"grants":old_grants,"provider_credentials":old_bindings,"version":current.to_string()});
+                if rebind {
+                    // 연결을 새로 만든다. 고른 Provider 키가 키 주인에게 인가된 사용 중인 키인지 발급 때와 같이 검사한다.
+                    sqlx::query("DELETE FROM gw_virtual_key_credentials WHERE key_id=$1")
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                    super::credentials::bind_new_key(
+                        &mut tx,
+                        *id,
+                        target_principal,
+                        &providers,
+                        &v.provider_credentials,
+                    )
+                    .await?;
+                }
+                if regrant {
+                    sqlx::query("UPDATE gw_policies SET allow_rules=$2,version=version+1,updated_by=$3,updated_at=$4::timestamptz WHERE key_id=$1")
+                        .bind(id)
+                        .bind(&grants)
+                        .bind(ctx.actor)
+                        .bind(&now)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                if changed {
+                    sqlx::query("UPDATE gw_virtual_keys SET name=$2,grant_snapshot=$3,version=version+1 WHERE id=$1")
+                        .bind(id)
+                        .bind(&v.name)
+                        .bind(&grants)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                result_version = Some(current + i64::from(changed));
+                after = json!({"name":v.name,"grants":grants,"provider_credentials":super::credentials::key_bindings(&mut tx, *id).await?,"version":result_version.map(|v|v.to_string())});
+                200
             }
             Command::Create(v) => {
                 management::check_actor(&mut tx, v.management_owner_id, ctx.settings, false)

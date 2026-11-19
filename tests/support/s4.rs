@@ -966,14 +966,7 @@ async fn s4_key_current_revoke_policy_and_independent_balances_are_sql() {
         .admit_scoped(&current, &pending, Some(another), None)
         .await
         .unwrap();
-    assert!(
-        sqlx::query("UPDATE gw_policies SET allow_rules='[]',version=version+1 WHERE key_id=$1")
-            .bind(another.id)
-            .execute(db.store.pool())
-            .await
-            .is_err()
-    );
-    // 발급 상한은 불변이다. 현재 principal 정책 축소가 준비된 키 요청도 무효화한다.
+    // 현재 principal 정책 축소가 준비된 키 요청도 무효화한다.
     sqlx::query("UPDATE gw_policies SET allow_rules='[]',version=version+1 WHERE principal_id=$1 AND key_id IS NULL")
         .bind(id).execute(db.store.pool()).await.unwrap();
     assert_eq!(
