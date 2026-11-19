@@ -90,10 +90,10 @@ pub(crate) fn stamp(e: &str) -> String {
     dashboard::stamp_sql(e)
 }
 pub(crate) async fn key_metadata(c: &mut PgConnection, id: Uuid) -> Result<Value, ManagementError> {
-    let row=sqlx::query(&format!("SELECT k.*,{} AS created,{} AS expires,{} AS revoked,p.budget_mode,p.budget_limit_usd::text AS budget,p.period_timezone,p.rpm_limit,p.tpm_limit,p.count_rpm_limit FROM gw_virtual_keys k JOIN gw_policies p ON p.key_id=k.id WHERE k.id=$1",stamp("k.created_at"),stamp("k.expires_at"),stamp("k.revoked_at"))).bind(id).fetch_optional(&mut *c).await?.ok_or(ManagementError::NotFound)?;
+    let row=sqlx::query(&format!("SELECT k.*,{} AS created,{} AS expires,{} AS revoked,p.budget_mode,p.budget_limit_usd::text AS budget,p.period_timezone,p.rpm_limit,p.tpm_limit,p.count_rpm_limit,o.display_name AS owner_name,o.email AS owner_email,o.kind AS owner_kind FROM gw_virtual_keys k JOIN gw_policies p ON p.key_id=k.id JOIN gw_principals o ON o.id=k.principal_id WHERE k.id=$1",stamp("k.created_at"),stamp("k.expires_at"),stamp("k.revoked_at"))).bind(id).fetch_optional(&mut *c).await?.ok_or(ManagementError::NotFound)?;
     let bindings = super::credentials::key_bindings(c, id).await?;
     Ok(
-        json!({"provider_credentials":bindings,"id":id,"principal_id":row.get::<Uuid,_>("principal_id"),"name":row.get::<String,_>("name"),"key_hint":row.get::<String,_>("public_prefix"),"created_at":row.get::<String,_>("created"),"created_by":row.get::<Uuid,_>("created_by"),"created_command_id":row.get::<Uuid,_>("created_command_id"),"validity":row.get::<String,_>("validity_preset"),"expires_at":row.get::<Option<String>,_>("expires"),"revoked_at":row.get::<Option<String>,_>("revoked"),"version":row.get::<i64,_>("version").to_string(),"grants":row.get::<Value,_>("grant_snapshot"),"limits":limits(&row)}),
+        json!({"provider_credentials":bindings,"id":id,"principal_id":row.get::<Uuid,_>("principal_id"),"owner":{"kind":row.get::<String,_>("owner_kind"),"display_name":row.get::<String,_>("owner_name"),"email":row.get::<Option<String>,_>("owner_email")},"name":row.get::<String,_>("name"),"key_hint":row.get::<String,_>("public_prefix"),"created_at":row.get::<String,_>("created"),"created_by":row.get::<Uuid,_>("created_by"),"created_command_id":row.get::<Uuid,_>("created_command_id"),"validity":row.get::<String,_>("validity_preset"),"expires_at":row.get::<Option<String>,_>("expires"),"revoked_at":row.get::<Option<String>,_>("revoked"),"version":row.get::<i64,_>("version").to_string(),"grants":row.get::<Value,_>("grant_snapshot"),"limits":limits(&row)}),
     )
 }
 pub(crate) fn limits(row: &sqlx::postgres::PgRow) -> Value {
@@ -580,6 +580,33 @@ impl PgIdentityStore {
             }
             tx.commit().await?;
             Ok(value)
+        })
+        .await
+        .map_err(|_| ManagementError::Database)?
+    }
+    /// 요청 기록에 있는 요청 모델 이름. 관리자가 요청을 모델로 걸러 볼 때 고를 후보다.
+    /// 승인된 모델 목록에서 빠진 모델도 기록이 남아 있으면 나온다.
+    pub async fn management_request_models(
+        &self,
+        ctx: &QueryContext<'_>,
+    ) -> Result<Value, ManagementError> {
+        let _gate = self
+            .gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ManagementError::Database)?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut tx = self.begin_transaction().await?;
+            management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
+            let rows = sqlx::query("SELECT DISTINCT provider,requested_model FROM gw_requests ORDER BY requested_model,provider LIMIT 1000")
+                .fetch_all(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            let items: Vec<Value> = rows
+                .iter()
+                .map(|r| json!({"provider":r.get::<String,_>("provider"),"model":r.get::<String,_>("requested_model")}))
+                .collect();
+            Ok(json!({ "items": items }))
         })
         .await
         .map_err(|_| ManagementError::Database)?

@@ -335,6 +335,11 @@ async fn execute(
                 .store
                 .management_list(&ctx, "requests", head.uri.query())
                 .await
+        } else if path == "/api/admin/requests/models" {
+            if head.uri.query().is_some() {
+                return error(ManagementError::Invalid);
+            }
+            state.api.store.management_request_models(&ctx).await
         } else if path == "/api/admin/usage" {
             state
                 .api

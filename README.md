@@ -619,8 +619,9 @@ key: every request goes out with the provider key its virtual key is bound to.
 - **Authorizing one key for many principals.** An admin can authorize one provider key for many
   principals (users and service principals) in one step. On the provider keys page, each key in use
   has an **Allow users** button. The button opens a list of all principals. The admin can search the
-  list, filter it by kind (human or service), and select principals. **Select all shown users**
-  selects only the principals that the current search and filter show. When the admin confirms, the
+  list, filter it by kind (human or service), and select principals. The **Select all** checkbox at
+  the top of the list selects or deselects only the principals that the current search and filter
+  show. When the admin confirms, the
   dashboard sends one command (`POST /api/admin/provider-credentials/{provider}/{id}`, where `{id}`
   is the provider key id).
   - The command only adds authorizations for this provider key. It does not remove any

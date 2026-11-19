@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
 import { pickOption, selectedValue } from '../../test-select';
@@ -48,7 +48,11 @@ test('revoke409_keeps_explanation_after_get_and_requires_new_confirmation_versio
   }, () => [{ ...key, version }]);
   fireEvent.click(screen.getByRole('button', { name: '현재 키 회수' }));
   fireEvent.click(screen.getByRole('button', { name: '회수 확인' }));
-  await screen.findByText(/version 11/);
+  // 거절된 뒤 목록을 다시 읽어 새 버전을 받는다. 버전은 상세 창에 보인다.
+  await screen.findByRole('alert');
+  fireEvent.click(screen.getByRole('button', { name: '현재 키 상세' }));
+  await waitFor(() => expect(within(screen.getByRole('dialog')).getByText('11')).toBeTruthy());
+  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '닫기' }));
   expect(screen.getByRole('alert').textContent).toContain('버전이 변경되었습니다.');
   expect(writes).toBe(1);
   fireEvent.click(screen.getByRole('button', { name: '현재 키 회수' }));

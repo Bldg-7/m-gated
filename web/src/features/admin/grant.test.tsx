@@ -33,11 +33,13 @@ function stub(write: (body: Record<string, unknown>) => Response) {
   vi.stubGlobal('fetch', fetcher);
   return posts;
 }
+/** 표의 「인가된 사용자」 칸(네 번째 열). */
+const holders = () => { const table = screen.getByRole('table', { name: 'Provider 키' }), at = within(table).getAllByRole('columnheader').findIndex(h => h.textContent === '인가된 사용자'); return within(within(table).getByRole('row', { name: 'Provider 키 team-a' })).getAllByRole('cell')[at].textContent; };
 async function open() {
   history.replaceState(null, '', '/dashboard/admin/credentials'); render(<App />);
-  const item = await screen.findByRole('listitem', { name: 'Provider 키 team-a' });
-  expect(within(item).getByText(/인가된 사용자 1명/)).toBeTruthy();
-  fireEvent.click(within(item).getByRole('button', { name: '사용자 인가' }));
+  const row = await screen.findByRole('row', { name: 'Provider 키 team-a' });
+  expect(holders()).toBe('1명');
+  fireEvent.click(within(row).getByRole('button', { name: 'team-a 사용자 인가' }));
   const dialog = await screen.findByRole('dialog', { name: 'team-a 사용자 인가' });
   await within(dialog).findByRole('list', { name: '인가할 사용자' });
   return dialog;
@@ -48,19 +50,19 @@ test('one_provider_key_is_granted_to_many_checked_users_in_one_command', async (
   const posts = stub(() => response({ command_id: 'cmd', operation: 'authorize_principal_credentials', target: { kind: 'credential', id: 'a' }, result_version: '1', effect: 'changed' }));
   const dialog = await open();
   // 두 페이지의 사용자가 모두 보이고, 이미 인가된 사용자는 체크된 채 잠겨 있다.
-  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(4);
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(5);
   expect(box(dialog, /가람/).checked).toBe(true); expect(box(dialog, /가람/).disabled).toBe(true);
   const confirm = within(dialog).getByRole('button', { name: /명에게 인가$/ }) as HTMLButtonElement;
   expect(confirm.disabled).toBe(true);
-  // 전체 선택은 지금 걸러 보고 있는 목록에만 적용한다. 사람만 걸러 보면 서비스 계정은 고르지 않는다.
+  // 맨 위의 모두 선택은 지금 걸러 보고 있는 목록에만 적용한다. 사람만 걸러 보면 서비스 계정은 고르지 않는다.
   pickOption(within(dialog).getByLabelText('종류'), '사람');
   expect(within(dialog).queryByRole('checkbox', { name: /배치 서비스/ })).toBeNull();
-  fireEvent.click(within(dialog).getByRole('button', { name: '보이는 사용자 모두 선택' }));
+  fireEvent.click(within(dialog).getByRole('checkbox', { name: '모두 선택' }));
   pickOption(within(dialog).getByLabelText('종류'), '전체');
   expect(box(dialog, /나래/).checked).toBe(true); expect(box(dialog, /다온/).checked).toBe(true); expect(box(dialog, /배치 서비스/).checked).toBe(false);
   // 검색으로 좁힌 뒤 하나를 뺀다.
   fireEvent.change(within(dialog).getByLabelText('사용자 검색 (이름·이메일·ID)'), { target: { value: 'daon@' } });
-  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(1);
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(2);
   fireEvent.click(box(dialog, /다온/));
   fireEvent.change(within(dialog).getByLabelText('사용자 검색 (이름·이메일·ID)'), { target: { value: '' } });
   fireEvent.click(box(dialog, /배치 서비스/));
@@ -71,7 +73,7 @@ test('one_provider_key_is_granted_to_many_checked_users_in_one_command', async (
   expect(posts[0].url).toBe('/api/admin/provider-credentials/anthropic/a');
   expect([...(posts[0].body.principal_ids as string[])].sort()).toEqual(['h2', 's1']);
   expect((await screen.findByText('team-a (…0001)를 2명에게 인가했습니다.')).getAttribute('role')).toBe('status');
-  expect(await screen.findByText(/인가된 사용자 3명/)).toBeTruthy();
+  await waitFor(() => expect(holders()).toBe('3명'));
 });
 
 test('failed_grant_keeps_the_window_open_and_is_not_sent_again', async () => {

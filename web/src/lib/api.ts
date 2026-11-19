@@ -166,13 +166,26 @@ export class Session {
       void this.validate('automatic');
     }
   }
+  // 서버는 관리 요청을 한 번에 몇 개만 받고(기본 4개) 넘치면 429로 거절한다.
+  // 화면 하나가 조회 여러 개를 한꺼번에 보내도 넘치지 않게, 조회는 한 번에 2개씩만 보낸다.
+  private readsInFlight = 0;
+  private readQueue: (() => void)[] = [];
+  private async limited<T>(run: () => Promise<T>): Promise<T> {
+    if (this.readsInFlight >= 2) await new Promise<void>(resolve => this.readQueue.push(resolve));
+    else this.readsInFlight++;
+    try { return await run(); } finally {
+      const next = this.readQueue.shift();
+      // 기다리던 조회에 자리를 그대로 넘긴다.
+      if (next) next(); else this.readsInFlight--;
+    }
+  }
   async read<T>(url: string, isCurrent: () => boolean = () => true): Promise<T> {
     if (!url.startsWith('/api/') || url.startsWith('//')) throw new Error('same-origin 관리 읽기만 허용');
     const previous = this.state.me;
     const epoch = this.state.epoch;
     if (!previous) throw new StaleResponse();
     try {
-      const data = await this.json<T>(url, epoch);
+      const data = await this.limited(() => this.json<T>(url, epoch));
       if (epoch !== this.state.epoch || this.logoutLatched
         || this.state.me?.principal.id !== previous.principal.id) throw new StaleResponse();
       return data;
@@ -186,7 +199,7 @@ export class Session {
         if (!isCurrent() || retryEpoch !== this.state.epoch || this.logoutLatched
           || this.state.me?.principal.id !== previous.principal.id) throw new StaleResponse();
         try {
-          const data = await this.json<T>(url, retryEpoch);
+          const data = await this.limited(() => this.json<T>(url, retryEpoch));
           if (retryEpoch !== this.state.epoch || this.logoutLatched
             || this.state.me?.principal.id !== previous.principal.id) throw new StaleResponse();
           return data;

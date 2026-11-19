@@ -10,7 +10,7 @@ const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@exa
 const adminMe = { ...me, principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [], provider_credentials: [] };
 const id = '00000000-0000-4000-8000-000000000001';
 const bound = (credential_id: string, label: string, hint: string, isAuthorized = true) => ({ provider: 'anthropic', credential_id, label, hint, state: 'active', authorized: isAuthorized });
-const key = { id, principal_id: 'human1', name: '현재 키', key_hint: 'mgw_v1_x', version: '7', created_at: '2026-01-01T00:00:00Z', created_by: 'human1', created_command_id: 'original', validity: '1_year', expires_at: '2027-01-01T00:00:00Z', revoked_at: null, grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], limits: { budget: null, rpm: 60, tpm: null, count_rpm: null }, provider_credentials: [bound('cred1', 'team-a', '0001')] };
+const key = { id, principal_id: 'human1', owner: { kind: 'human', display_name: '사람', email: 'human@example.test' }, name: '현재 키', key_hint: 'mgw_v1_x', version: '7', created_at: '2026-01-01T00:00:00Z', created_by: 'human1', created_command_id: 'original', validity: '1_year', expires_at: '2027-01-01T00:00:00Z', revoked_at: null, grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], limits: { budget: null, rpm: 60, tpm: null, count_rpm: null }, provider_credentials: [bound('cred1', 'team-a', '0001')] };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const ack = () => response({ command_id: 'cmd', operation: 'update_key', target: { kind: 'key', id }, result_version: '8', effect: 'changed', replayed: false });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
@@ -168,7 +168,7 @@ test('admin_key_list_reads_the_key_owner_before_showing_the_edit_form', async ()
   const owner = deferred<Response>();
   const ownerPolicy = [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }];
   const principal = { id: 'svc1', kind: 'service', display_name: '배치', email: null, management_owner_id: 'human1', version: '2', policy: { id: 'p1', version: '4', disabled: false, grants: ownerPolicy, limits: { budget: null, rpm: null, tpm: null, count_rpm: null } }, provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'cred2', label: 'team-b', hint: '0002' }, { id: 'cred1', label: 'team-a', hint: '0001' }] }] };
-  const calls = await mount({ path: '/dashboard/admin/keys', user: adminMe, items: () => [{ ...key, principal_id: 'svc1' }], read: url => url === '/api/admin/principals/svc1' ? owner.promise : undefined });
+  const calls = await mount({ path: '/dashboard/admin/keys', user: adminMe, items: () => [{ ...key, principal_id: 'svc1', owner: { kind: 'service', display_name: '배치 서비스', email: null } }], read: url => url === '/api/admin/principals/svc1' ? owner.promise : undefined });
   expect(lists(calls, '/api/admin/keys')).toBe(1);
   // 수정 창을 열기 전에는 키 주인을 읽지 않는다.
   expect(lists(calls, '/api/admin/principals/svc1')).toBe(0);
@@ -199,7 +199,7 @@ test('admin_key_list_reads_the_key_owner_before_showing_the_edit_form', async ()
 });
 
 test('admin_key_list_shows_no_edit_form_when_the_key_owner_cannot_be_read', async () => {
-  const calls = await mount({ path: '/dashboard/admin/keys', user: adminMe, items: () => [{ ...key, principal_id: 'svc1' }], read: url => url === '/api/admin/principals/svc1' ? Promise.resolve(response({ error: { code: 'resource_not_found' } }, 404)) : undefined });
+  const calls = await mount({ path: '/dashboard/admin/keys', user: adminMe, items: () => [{ ...key, principal_id: 'svc1', owner: { kind: 'service', display_name: '배치 서비스', email: null } }], read: url => url === '/api/admin/principals/svc1' ? Promise.resolve(response({ error: { code: 'resource_not_found' } }, 404)) : undefined });
   const dialog = await openEdit();
   await within(dialog).findByRole('alert');
   expect(within(dialog).queryByRole('button', { name: '수정 저장' })).toBeNull();

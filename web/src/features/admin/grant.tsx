@@ -25,6 +25,9 @@ export function GrantModal({ provider, providerName, credential, onClose, onDone
   const needle = search.trim().toLowerCase();
   const shown = (principals ?? []).filter(p => (!kind || p.kind === kind) && (!needle || p.display_name.toLowerCase().includes(needle) || (p.email ?? '').toLowerCase().includes(needle) || p.id.includes(needle)));
   const selectable = shown.filter(p => !holders.has(p.id));
+  const pickedShown = selectable.filter(p => picked.has(p.id)).length;
+  // 맨 위 체크박스는 지금 목록에 보이는 사용자만 고르거나 뺀다.
+  const toggleAll = (on: boolean) => setPicked(prev => { const next = new Set(prev); for (const p of selectable) { if (on) next.add(p.id); else next.delete(p.id); } return next; });
   const toggle = (id: string, on: boolean) => setPicked(prev => { const next = new Set(prev); if (on) next.add(id); else next.delete(id); return next; });
   const submit = async () => {
     if (busy || picked.size === 0 || picked.size > MAX_GRANT) return;
@@ -49,21 +52,17 @@ export function GrantModal({ provider, providerName, credential, onClose, onDone
         <label>{t('사용자 검색 (이름·이메일·ID)')}<input type="search" value={search} onChange={e => setSearch(e.currentTarget.value)} autoComplete="off" spellCheck={false} /></label>
         <div className="field"><label htmlFor={`${prefix}-kind`}>{t('종류')}</label><Select id={`${prefix}-kind`} value={kind} onChange={value => setKind(value as Kind)} options={[{ value: '', label: t('전체') }, { value: 'human', label: t('사람') }, { value: 'service', label: t('서비스') }]} /></div>
       </div>
-      <div className="row row-between">
-        <p className="meta" role="status">{t('{{picked}}명 선택 · 이미 인가됨 {{held}}명 · 보이는 사용자 {{shown}}명', { picked: picked.size, held: holders.size, shown: shown.length })}</p>
-        <div className="actions">
-          <button type="button" className="btn-sm" disabled={busy || selectable.every(p => picked.has(p.id))} onClick={() => setPicked(prev => new Set([...prev, ...selectable.map(p => p.id)]))}>{t('보이는 사용자 모두 선택')}</button>
-          <button type="button" className="btn-sm btn-quiet" disabled={busy || picked.size === 0} onClick={() => setPicked(new Set())}>{t('선택 해제')}</button>
-        </div>
-      </div>
+      <p className="meta" role="status">{t('{{picked}}명 선택 · 이미 인가됨 {{held}}명', { picked: picked.size, held: holders.size })}</p>
       {picked.size > MAX_GRANT && <p role="alert">{t('한 번에 {{max}}명까지 인가할 수 있습니다. 선택을 줄이세요.', { max: MAX_GRANT })}</p>}
       {shown.length === 0 ? <p className="empty">{t('조건에 맞는 사용자가 없습니다.')}</p>
-        : <ul className="list grant-list" aria-label={t('인가할 사용자')}>{shown.map(p => {
+        : <div className="grant-list">
+          <label className="row grant-all"><input type="checkbox" ref={el => { if (el) el.indeterminate = pickedShown > 0 && pickedShown < selectable.length; }} checked={selectable.length > 0 && pickedShown === selectable.length} disabled={busy || selectable.length === 0} onChange={e => toggleAll(e.currentTarget.checked)} /><span>{t('모두 선택')}</span></label>
+          <ul className="list" aria-label={t('인가할 사용자')}>{shown.map(p => {
           const held = holders.has(p.id);
           return <li key={p.id}><label className="row"><input type="checkbox" checked={held || picked.has(p.id)} disabled={held || busy} onChange={e => toggle(p.id, e.currentTarget.checked)} />
             <span>{p.display_name}</span><Pill>{p.kind === 'service' ? t('서비스') : t('사람')}</Pill>{held && <Pill>{t('이미 인가됨')}</Pill>}{p.disabled && <Pill>{t('정지')}</Pill>}
             <span className="meta mono">{p.email ?? p.id}</span></label></li>;
-        })}</ul>}
+        })}</ul></div>}
     </>}
   </Modal>;
 }

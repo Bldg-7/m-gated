@@ -6,7 +6,7 @@ import type { AuthorizedCredentials, Grant, IssuedKey, KeyMetadata, Limits, Page
 import { credentialLabel, providerNames } from '../admin/credentials';
 import { useTimeFormat } from '../../lib/time';
 import { Link, navigate } from '../../lib/router';
-import { Badge, Modal, SearchSelect, Select, Time } from '../../ui/ui';
+import { Badge, IconButton, Modal, Pill, SearchSelect, Select, Time } from '../../ui/ui';
 import { EditKeyModal } from './keys-edit';
 
 /** 발급된 키와 복사 버튼. 사용자가 누를 때만 클립보드에 쓰고, 키 창이 닫히면 상태도 함께 사라진다. */
@@ -64,7 +64,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   const [chosen, setChosen] = useState<Record<string, string>>({});
   const [granted, setGranted] = useState<Set<string>>(() => new Set());
   // 수정 창을 연 가상 키.
-  const [editing, setEditing] = useState<KeyMetadata | null>(null);
+  const [editing, setEditing] = useState<KeyMetadata | null>(null), [detail, setDetail] = useState<KeyMetadata | null>(null);
   const mounted = useRef(true), lock = useRef(false);
   const format = useTimeFormat();
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -172,6 +172,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   // 발급 페이지에서 키 창을 닫으면 목록 페이지로 돌아간다.
   const closeSecret = () => { setSecret(null); if (issuing) navigate(listHref); };
   const labelOf = (provider: string, id: string) => { const c = authorizedFor(provider).find(x => x.id === id); return c ? credentialLabel(c) : id; };
+  // 상세 창은 목록을 다시 읽으면 새 값을 보여 준다.
+  const shown = detail && (page?.items.find(k => k.id === detail.id) ?? detail);
   return <section aria-labelledby={`${prefix}-keys-heading`} className="stack-lg">
     {issuing && <p><Link href={listHref}>{adminPrincipal ? t('← 사용자 상세') : t('← 내 가상 키')}</Link></p>}
     <div className="stack-sm"><div className="row row-between"><h2 id={`${prefix}-keys-heading`}>{issuing ? issueTitle : isAdmin ? t('사용자의 가상 키') : t('내 가상 키')}</h2>{!issuing && canIssue && <Link className="btn btn-primary" href={issueHref}>{issueTitle}</Link>}</div>
@@ -225,14 +227,22 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
         <p className="meta">{t('만료일과 실효 상한은 서버가 계산합니다.')}</p>
       </> : <p>{t('{{name}} · {{id}} · version {{version}} 키를 회수합니다. 되돌릴 수 없습니다.', { name: confirmation.key.name, id: confirmation.key.id, version: confirmation.key.version })}</p>}
     </Modal>}
+    {shown && <Modal title={t('{{name}} 상세', { name: shown.name })} onClose={() => setDetail(null)} actions={<button type="button" onClick={() => setDetail(null)}>{t('닫기')}</button>}>
+      <dl className="kv">
+        <dt>ID</dt><dd className="mono">{shown.id}</dd>
+        <dt>{t('키 앞부분')}</dt><dd className="mono">{shown.key_hint}</dd>
+        <dt>{t('버전')}</dt><dd className="mono">{shown.version}</dd>
+        <dt>{t('발급 명령')}</dt><dd className="mono">{shown.created_command_id}</dd>
+      </dl>
+      <p className="meta">{t('발급 권한·고정 상한')}</p><pre>{JSON.stringify({ grants: shown.grants, limits: shown.limits }, null, 2)}</pre>
+    </Modal>}
     {!issuing && <div className="stack">
       <form aria-label={t('키 조회')} className="filters" onSubmit={e => { e.preventDefault(); setQuery(status ? `status=${status}` : ''); setRevision(v => v + 1); }}><div className="field"><label htmlFor={`${prefix}-key-status`}>{t('키 상태')}</label><Select id={`${prefix}-key-status`} value={status} onChange={setStatus} options={[{ value: '', label: t('전체') }, { value: 'active', label: t('활성') }, { value: 'revoked', label: t('회수') }, { value: 'expired', label: t('만료') }]} /></div><div className="actions"><button disabled={loading || busy}>{t('키 조회')}</button></div></form>
       {loading && <p role="status">{t('키 목록 조회 중…')}</p>}{page && <><p className="meta">{t('목록 관측 시각')}: <Time value={page.as_of} /></p>{!page.items.length && <p className="empty">{t('키가 없습니다.')}</p>}{page.items.length > 0 && <div className="table-wrap"><table>
         <thead><tr><th>{t('이름')}</th>{adminAll && <th>{t('키 주인')}</th>}<th>{t('상태')}</th><th>{t('유효기간')}</th><th>{t('생성')}</th><th>{t('만료')}</th><th>{t('Provider 키')}</th><th>{t('동작')}</th></tr></thead>
         <tbody>{page.items.map(key => { const expired = !key.revoked_at && !!key.expires_at && new Date(key.expires_at).getTime() <= new Date(page.as_of).getTime(); return <tr key={key.id}>
-          <td><div className="stack-sm"><strong>{key.name}</strong><span className="meta mono">{key.key_hint}</span>
-            <details><summary>{t('상세')}</summary><p className="meta mono">{t('ID: {{id}} · {{hint}} · version {{version}}', { id: key.id, hint: key.key_hint, version: key.version })}</p><p className="meta">{t('발급 명령: {{id}}', { id: key.created_command_id })}</p><p className="meta">{t('발급 권한·고정 상한')}</p><pre>{JSON.stringify({ grants: key.grants, limits: key.limits }, null, 2)}</pre></details></div></td>
-          {adminAll && <td><Link className="mono" href={keyListHref(key.principal_id)}>{key.principal_id}</Link></td>}
+          <td><div className="stack-sm"><strong>{key.name}</strong><span className="meta mono">{key.key_hint}</span></div></td>
+          {adminAll && <td><Link href={keyListHref(key.principal_id)}>{key.owner.email ?? key.owner.display_name}</Link>{key.owner.kind === 'service' && <> <Pill>{t('서비스')}</Pill></>}</td>}
           <td>{key.revoked_at ? <Badge tone="neutral">{t('회수됨')}</Badge> : expired ? <Badge tone="neutral">{t('만료')}</Badge> : <Badge tone="success">{t('활성')}</Badge>}{key.revoked_at && <p className="meta">{format(key.revoked_at)}</p>}</td>
           <td>{t(durationName(key.validity))}</td>
           <td>{format(key.created_at)}</td>
@@ -241,7 +251,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
           <span className="meta">{t('Provider 키')}: {providerNames[b.provider] ?? b.provider} · {credentialLabel(b)}{b.state === 'retired' && <> <Badge tone="neutral">{t('해제됨')}</Badge></>}</span>
           {b.authorized === false && !key.revoked_at && <><Badge tone="critical">{t('인가 해제됨')}</Badge><span className="text-critical">{t('이 Provider 키의 사용 인가가 해제돼 이 키로 보내는 {{provider}} 요청은 거절됩니다.', { provider: providerNames[b.provider] ?? b.provider })}{` ${t('수정에서 인가된 Provider 키로 다시 연결하세요.')}`}</span></>}
         </div>; })}</div></td>
-          <td>{!key.revoked_at && <div className="actions">{!expired && <button className="btn-sm" disabled={busy || loading} onClick={() => { setError(null); setNotice(null); setEditing(key); }}>{t('{{name}} 수정', { name: key.name })}</button>}<button className="btn-sm btn-danger-outline" disabled={busy || loading} onClick={() => { setSecret(null); setConfirmation({ kind: 'revoke', key }); }}>{t('{{name}} 회수', { name: key.name })}</button></div>}</td>
+          <td><div className="actions"><IconButton icon="detail" label={t('{{name}} 상세', { name: key.name })} tip={t('상세')} onClick={() => setDetail(key)} />{!key.revoked_at && <>{!expired && <IconButton icon="edit" label={t('{{name}} 수정', { name: key.name })} tip={t('수정')} disabled={busy || loading} onClick={() => { setError(null); setNotice(null); setEditing(key); }} />}<IconButton icon="revoke" danger label={t('{{name}} 회수', { name: key.name })} tip={t('키 회수')} disabled={busy || loading} onClick={() => { setSecret(null); setConfirmation({ kind: 'revoke', key }); }} /></>}</div></td>
         </tr>; })}</tbody>
       </table></div>}{page.next_cursor && <div className="actions"><button disabled={loading || busy} onClick={() => setQuery(`cursor=${encodeURIComponent(page.next_cursor!)}`)}>{t('다음 키 페이지')}</button></div>}</>}
     </div>}

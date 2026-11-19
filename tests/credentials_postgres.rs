@@ -1864,3 +1864,81 @@ async fn virtual_key_name_grants_and_provider_keys_are_edited_after_issue() {
     .unwrap();
     assert_eq!(audits, 3);
 }
+
+/// 관리자 화면이 쓰는 두 값: 요청 기록에 있는 모델 이름 목록과, 가상 키 목록의 키 주인 정보.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn admin_reads_request_models_and_key_owner() {
+    let h = Http::new().await;
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    let (bob, bob_email) = (
+        id_of(&me["principal"]["id"]),
+        me["principal"]["email"].as_str().unwrap().to_owned(),
+    );
+    assert_eq!(h.call("GET", "/api/me", &h.alice, None).await.0, 200);
+    let messages =
+        json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]);
+    sqlx::query("UPDATE gw_policies SET allow_rules=$1 WHERE key_id IS NULL")
+        .bind(&messages)
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let (_, a) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(json!({"label":"team-a","secret":KEY_A})),
+        )
+        .await;
+    let a_id = id_of(&a["target"]["id"]);
+    h.service.refresh().await.unwrap();
+    let (status, _) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic/{a_id}"),
+            &h.alice,
+            Some(json!({"principal_ids":[bob]})),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // 요청 기록이 없으면 빈 목록이다. 관리자만 읽고, 조회 조건은 받지 않는다.
+    let models = "/api/admin/requests/models";
+    let (status, v) = h.call("GET", models, &h.alice, None).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["items"], json!([]));
+    assert_eq!(h.call("GET", models, &h.bob, None).await.0, 403);
+    let with_query = format!("{models}?limit=1");
+    assert_eq!(h.call("GET", &with_query, &h.alice, None).await.0, 400);
+
+    let (status, issued) = h
+        .call("POST", "/api/keys", &h.bob, Some(issue(Some(a_id))))
+        .await;
+    assert_eq!(status, 201, "{issued}");
+    let secret = issued["key"].as_str().unwrap().to_owned();
+    assert_eq!(h.infer(&secret).await.0, 200);
+    assert_eq!(h.infer(&secret).await.0, 200);
+
+    // 같은 모델로 온 요청이 여러 개여도 한 번만 나온다.
+    let (status, v) = h.call("GET", models, &h.alice, None).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(
+        v["items"],
+        json!([{"provider":"anthropic","model":"synthetic-text"}])
+    );
+
+    // 가상 키 목록의 키 주인은 ID와 함께 이름·이메일로도 온다.
+    let (status, v) = h.call("GET", "/api/admin/keys", &h.alice, None).await;
+    assert_eq!(status, 200, "{v}");
+    let owner = &v["items"][0]["owner"];
+    assert_eq!(v["items"][0]["principal_id"], json!(bob));
+    assert_eq!(owner["kind"], "human");
+    assert_eq!(owner["email"], json!(bob_email));
+    assert!(
+        owner["display_name"]
+            .as_str()
+            .is_some_and(|n| !n.is_empty())
+    );
+    h.db.close().await;
+}

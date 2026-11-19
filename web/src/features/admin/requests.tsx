@@ -20,6 +20,12 @@ export function RequestsScreen() {
   // 조회 조건의 사용자. 고르면 가상 키 후보를 그 사용자의 키로 좁힌다.
   const [principal, setPrincipal] = useState(initial ?? '');
   const keys = useAll<KeyMetadata>(`/api/admin/keys${principal ? `?principal_id=${encodeURIComponent(principal)}` : ''}`);
+  // 요청 모델 후보는 요청 기록에 있는 모델 이름이다. 승인된 모델 목록에서 빠진 모델도 기록이 있으면 나온다.
+  const models = useResource<{ items: { provider: string; model: string }[] }>('/api/admin/requests/models');
+  // 조회 조건은 모델 이름만 본다. 같은 이름이 여러 Provider에 있으면 후보 하나로 묶는다.
+  const byModel = new Map<string, string[]>();
+  for (const m of models.data?.items ?? []) byModel.set(m.model, [...(byModel.get(m.model) ?? []), m.provider]);
+  const modelOptions = [...byModel].map(([model, list]) => ({ value: model, label: `${model} (${list.join(', ')})` }));
   const page = useResource<Page<RequestSummary>>(`/api/admin/requests${query ? `?${query}` : ''}`);
   return <div className="stack-lg">
     <form aria-label={t('요청 조회')} className="filters" onSubmit={e => { const f = fields(e), q = new URLSearchParams(); for (const key of ['principal_id', 'key_id', 'provider', 'model', 'phase', 'outcome', 'accounting_state']) if (f.get(key)) q.set(key, String(f.get(key))); for (const key of ['from', 'to']) { const at = new Date(String(f.get(key) ?? '')); if (!Number.isNaN(at.getTime())) q.set(key, at.toISOString()); } if (q.toString() === query) void page.reload().catch(() => {}); else setQuery(q.toString()); }}>
@@ -29,7 +35,7 @@ export function RequestsScreen() {
       <div className="field"><label htmlFor="request-outcome">{t('결과')}</label><Select id="request-outcome" name="outcome" defaultValue="" options={[all, ...options(outcomes)]} /></div>
       <div className="field"><label htmlFor="request-principal">{t('사용자')}</label><PrincipalSelect id="request-principal" name="principal_id" optional value={principal} onChange={setPrincipal} /></div>
       <div className="field"><label htmlFor="request-key">{t('가상 키')}</label><SearchSelect key={principal} id="request-key" name="key_id" defaultValue="" placeholder={keys.items ? t('선택하세요') : t('키 목록 조회 중…')} options={[all, ...(keys.items ?? []).map(k => ({ value: k.id, label: `${k.name} (${k.key_hint})` }))]} /></div>
-      <label>{t('요청 모델')}<input name="model" maxLength={200} /></label>
+      <div className="field"><label htmlFor="request-model">{t('요청 모델')}</label><SearchSelect id="request-model" name="model" defaultValue="" placeholder={models.data ? t('선택하세요') : t('모델 목록 조회 중…')} options={[all, ...modelOptions]} /></div>
       <label>{t('시작 (현지 시각)')}<input type="datetime-local" name="from" /></label>
       <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" /></label>
       <div className="actions"><button className="btn-primary">{t('요청 조회')}</button></div>
@@ -49,7 +55,6 @@ export function RequestsScreen() {
         {page.data.next_cursor && <div className="actions"><button onClick={() => setQuery(`cursor=${encodeURIComponent(page.data!.next_cursor!)}`)}>{t('다음 요청 페이지')}</button></div>}
       </>}
     </section>
-    <form aria-label={t('요청 ID 조회')} className="filters" onSubmit={e => setId(String(fields(e).get('id')))}><label>{t('요청 ID')}<input name="id" className="mono" spellCheck={false} required /></label><div className="actions"><button>{t('요청 상세 조회')}</button></div></form>
     {id && <RequestEditor id={id} key={id} />}
   </div>;
 }

@@ -66,6 +66,7 @@ export function Time({ value }: { value: string }) {
 
 export { Select, SearchSelect, type SelectOption, type SelectProps } from './select';
 export { Modal, type ModalProps } from './modal';
+export { IconButton, type IconName } from './icon-button';
 
 /**
  * 크기 조절 손잡이 없이 rows로 처음 높이를 정한다.

@@ -58,7 +58,7 @@ test('service_is_created_from_a_window_opened_by_a_button', async () => {
 
 test('principal_list_is_a_table_and_all_keys_live_on_their_own_page', async () => {
   const person = { id: 'human1', kind: 'human', display_name: '가람', email: 'garam@example.test', management_owner_id: null, version: '2', policy_version: '4', disabled: false, inference_safety: { paused: false, version: '1', reason: null, paused_at: null, trigger_request_id: null }, block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } };
-  const key = { provider_credentials: [], id: 'k1', principal_id: 'human1', name: '가람 키', key_hint: 'mgw_v1_k1', created_at: '2026-11-01T00:00:00Z', created_by: 'human1', created_command_id: 'c1', validity: '1_year', expires_at: '2027-11-01T00:00:00Z', revoked_at: null, version: '1', grants: [], limits: { budget: null, rpm: null, tpm: null, count_rpm: null } };
+  const key = { provider_credentials: [], id: 'k1', principal_id: 'human1', owner: { kind: 'human', display_name: '가람', email: 'garam@example.test' }, name: '가람 키', key_hint: 'mgw_v1_k1', created_at: '2026-11-01T00:00:00Z', created_by: 'human1', created_command_id: 'c1', validity: '1_year', expires_at: '2027-11-01T00:00:00Z', revoked_at: null, version: '1', grants: [], limits: { budget: null, rpm: null, tpm: null, count_rpm: null } };
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
     if (url === '/api/me') return Promise.resolve(response(admin));
@@ -76,7 +76,7 @@ test('principal_list_is_a_table_and_all_keys_live_on_their_own_page', async () =
   fireEvent.click(screen.getByRole('link', { name: '가상 키 관리' }));
   const keyRow = (await screen.findByRole('button', { name: '가람 키 회수' })).closest('tr')!;
   expect(location.pathname).toBe('/dashboard/admin/keys');
-  expect(within(keyRow).getByRole('link', { name: 'human1' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
+  expect(within(keyRow).getByRole('link', { name: 'garam@example.test' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
   expect(within(keyRow).getByText('활성')).toBeTruthy();
   expect(screen.getAllByRole('columnheader').map(h => h.textContent)).toEqual(['이름', '키 주인', '상태', '유효기간', '생성', '만료', 'Provider 키', '동작']);
 });
