@@ -250,7 +250,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
     </Modal>}
     {!issuing && <div className="stack">
       <form aria-label={t('키 조회')} className="filters" onSubmit={e => { e.preventDefault(); setQuery(status ? `status=${status}` : ''); setRevision(v => v + 1); }}><div className="field"><label htmlFor={`${prefix}-key-status`}>{t('키 상태')}</label><Select id={`${prefix}-key-status`} value={status} onChange={setStatus} options={[{ value: '', label: t('전체') }, { value: 'active', label: t('활성') }, { value: 'revoked', label: t('회수') }, { value: 'expired', label: t('만료') }]} /></div><div className="actions"><button disabled={loading || busy}>{t('키 조회')}</button></div></form>
-      {loading && <p role="status">{t('키 목록 조회 중…')}</p>}{page && <><p className="meta">{t('목록 관측 시각')}: <Time value={page.as_of} /></p>{!page.items.length && <p className="empty">{t('키가 없습니다.')}</p>}{page.items.length > 0 && <div className="table-wrap"><table>
+      {loading && <p role="status">{t('키 목록 조회 중…')}</p>}{page && <><p className="meta">{t('목록 조회 시각')}: <Time value={page.as_of} /></p>{!page.items.length && <p className="empty">{t('키가 없습니다.')}</p>}{page.items.length > 0 && <div className="table-wrap"><table>
         <thead><tr><th>{t('이름')}</th>{adminAll && <th>{t('키 주인')}</th>}<th>{t('상태')}</th><th>{t('유효기간')}</th><th>{t('생성')}</th><th>{t('만료')}</th><th>{t('Provider 키')}</th><th>{t('동작')}</th></tr></thead>
         <tbody>{page.items.map(key => { const expired = !key.revoked_at && !!key.expires_at && new Date(key.expires_at).getTime() <= new Date(page.as_of).getTime(); return <tr key={key.id}>
           <td><div className="stack-sm"><strong>{key.name}</strong><span className="meta mono">{key.key_hint}</span></div></td>

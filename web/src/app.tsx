@@ -55,7 +55,7 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
 type Back = { href: string; label: string; name: string };
 const toPrincipals: Back = { href: '/dashboard/admin/principals', label: msgid('사용자 목록'), name: msgid('사용자 목록으로 돌아가기') };
 const pages: Record<Screen, { nav: string; title: string; lead?: string; back?: (search: URLSearchParams) => Back }> = {
-  '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 관측한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
+  '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 조회한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
   '/dashboard/keys': { nav: msgid('내 가상 키'), title: msgid('내 가상 키') },
   '/dashboard/keys/new': { nav: msgid('내 가상 키'), title: msgid('가상 키 발급'), lead: msgid('연동할 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.'), back: () => ({ href: '/dashboard/keys', label: msgid('내 가상 키'), name: msgid('내 가상 키로 돌아가기') }) },
   '/dashboard/admin/principals': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 · 정책 · 키'), lead: msgid('사용자와 서비스 계정의 정책, 자동 안전차단, 가상 키를 관리합니다.') },

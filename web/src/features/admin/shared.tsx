@@ -33,7 +33,7 @@ export function ReadState({ loading, error, reload, asOf }: { loading: boolean; 
   const { t } = useTranslation();
   return <div className="stack-sm">
     {loading && <p role="status">{t('서버 조회 중…')}</p>}{error && <p role="alert">{error}</p>}
-    <div className="row row-between">{asOf ? <span className="meta">{t('관측 시각')}: <Time value={asOf} /></span> : <span />}<button className="btn-sm" disabled={loading} aria-busy={loading || undefined} onClick={() => void Promise.resolve(reload()).catch(() => {})}><RefreshIcon />{t('서버 다시 조회')}</button></div>
+    <div className="row row-between">{asOf ? <span className="meta">{t('조회 시각')}: <Time value={asOf} /></span> : <span />}<button className="btn-sm" disabled={loading} aria-busy={loading || undefined} onClick={() => void Promise.resolve(reload()).catch(() => {})}><RefreshIcon />{t('서버 다시 조회')}</button></div>
   </div>;
 }
 /** label은 msgid로 표시한 한국어 원문(화면에서 번역). danger: 되돌릴 수 없는 명령. 확인 창의 실행 버튼을 위험 색으로 그린다. */

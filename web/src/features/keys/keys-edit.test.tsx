@@ -211,7 +211,7 @@ test('admin_key_list_shows_no_edit_form_when_the_key_owner_cannot_be_read', asyn
 });
 
 test('revoked_and_expired_keys_have_no_edit_button', async () => {
-  // 목록 관측 시각(2026-06-01)보다 만료일이 이른 키는 만료된 키다.
+  // 목록 조회 시각(2026-06-01)보다 만료일이 이른 키는 만료된 키다.
   await mount({ items: () => [key, { ...key, id: 'revoked-id', name: '회수된 키', revoked_at: '2026-02-01T00:00:00Z' }, { ...key, id: 'expired-id', name: '만료된 키', expires_at: '2026-05-01T00:00:00Z' }] });
   expect(screen.getByRole('button', { name: '현재 키 수정' })).toBeTruthy();
   expect(screen.getByRole('button', { name: '현재 키 회수' })).toBeTruthy();

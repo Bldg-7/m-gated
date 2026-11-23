@@ -91,6 +91,6 @@ function RequestEditor({ id, onChanged }: { id: string; onChanged: () => Promise
           <div className="actions"><button className="btn-primary">{t('수동 정산 확인')}</button></div></fieldset></form>}
       </div>
     </div>
-    <section aria-label={t('선택 usage')} className="card"><h3>{t('관측 출처와 token')}</h3><dl className="kv">{(['partial', 'final', 'late_final'] as const).map(kind => <Fragment key={kind}><dt className="mono">{kind}</dt><dd>{r.usage[kind] ? <div className="stack-sm"><span>{t('출처: {{source}} · 입력 {{input}} / 출력 {{output}}', { source: r.usage[kind]!.source, input: r.usage[kind]!.input_tokens ?? t('미확인'), output: r.usage[kind]!.output_tokens ?? t('미확인') })}</span><pre>{JSON.stringify(r.usage[kind], null, 2)}</pre></div> : <span className="meta">{t('관측 없음')}</span>}</dd></Fragment>)}</dl></section>
+    <section aria-label={t('선택 usage')} className="card"><h3>{t('사용량 출처와 token')}</h3><dl className="kv">{(['partial', 'final', 'late_final'] as const).map(kind => <Fragment key={kind}><dt className="mono">{kind}</dt><dd>{r.usage[kind] ? <div className="stack-sm"><span>{t('출처: {{source}} · 입력 {{input}} / 출력 {{output}}', { source: r.usage[kind]!.source, input: r.usage[kind]!.input_tokens ?? t('미확인'), output: r.usage[kind]!.output_tokens ?? t('미확인') })}</span><pre>{JSON.stringify(r.usage[kind], null, 2)}</pre></div> : <span className="meta">{t('기록 없음')}</span>}</dd></Fragment>)}</dl></section>
   </>}</section>;
 }

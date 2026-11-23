@@ -21,7 +21,7 @@ export function UsageView({ usage }: { usage: Usage }) {
   return <>
     <section aria-labelledby="period-heading" className="stack">
       <div className="stack-sm"><h2 id="period-heading">{t('조회 기간 사용량')}</h2>
-        <p className="meta"><Time value={usage.from} /> ~ <Time value={usage.to} /> {t('(끝 시각 제외)')} · {t('관측')}: <Time value={usage.as_of} /> · {t('집계 모드')}: {usage.aggregation === 'detail' ? t('상세') : t('보관된 기간 합계')}</p>
+        <p className="meta"><Time value={usage.from} /> ~ <Time value={usage.to} /> {t('(끝 시각 제외)')} · {t('조회 시각')}: <Time value={usage.as_of} /> · {t('집계 모드')}: {usage.aggregation === 'detail' ? t('상세') : t('보관된 기간 합계')}</p>
         {usage.detail_available_from && <p className="meta">{t('상세 가용 시작')}: <Time value={usage.detail_available_from} /></p>}
       </div>
       <dl className="stats">
@@ -35,7 +35,7 @@ export function UsageView({ usage }: { usage: Usage }) {
       </div></div>
     </section>
     <section aria-labelledby="balance-heading" className="stack">
-      <div className="stack-sm"><h2 id="balance-heading">{t('현재 scope별 예산 잔액')}</h2><p className="lead">{t('아래 잔액은 조회 필터와 무관한 현재 예산 기간의 서버 관측입니다. 다음 호출 허가를 보장하지 않습니다.')}</p></div>
+      <div className="stack-sm"><h2 id="balance-heading">{t('현재 scope별 예산 잔액')}</h2><p className="lead">{t('아래 잔액은 조회 필터와 무관한 현재 예산 기간을 서버에서 조회한 값입니다. 다음 호출 허가를 보장하지 않습니다.')}</p></div>
       {usage.balance_context === 'aggregate_no_balance' && <p className="callout callout-neutral">{t('전체 합계: 사용자별 예산을 합산한 잔액은 제공하지 않습니다.')}</p>}
       {usage.budget_balances.length > 0 && <div className="grid-cards">{usage.budget_balances.map(b => <article key={b.scope_id} className={b.balance_state === 'unresolved' || b.blocked ? 'card card-critical' : 'card'}>
         <div className="stack-sm">
@@ -53,7 +53,7 @@ export function UsageView({ usage }: { usage: Usage }) {
         {b.blocked && <p className="callout callout-critical">{t('차단 사유: {{reasons}}', { reasons: b.reasons.join(', ') })}</p>}
         <div className="stack-sm">
           <p className="meta">{t('이 scope 미정산 {{scope}} · 사용자 전체 미정산 {{principal}}', { scope: b.scope_unknown_count, principal: b.principal_unknown_count })}</p>
-          <p className="meta">{t('관측')}: <Time value={b.as_of} />, {t('정책 버전')}: {b.policy_version}</p>
+          <p className="meta">{t('조회 시각')}: <Time value={b.as_of} />, {t('정책 버전')}: {b.policy_version}</p>
           <p className="meta">scope ID: <span className="mono">{b.scope_id}</span> · {t('설정 지문')}: <span className="mono">{b.config_digest}</span></p>
         </div>
       </article>)}</div>}
