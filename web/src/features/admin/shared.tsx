@@ -6,7 +6,7 @@ import type { Page } from '../../lib/types';
 import type { CommandAck, PrincipalSummary } from './types';
 import { formatTime } from '../../lib/time';
 import { Modal, RefreshIcon, SearchSelect, Time } from '../../ui/ui';
-const messages: Record<string, string> = { version_conflict: msgid('버전이 변경되었습니다. 서버를 다시 조회했습니다. 새 상태를 확인하고 다시 선택하세요.'), execution_not_final: msgid('실행 종료를 확인할 수 없거나 알려진 sender가 실행 중입니다. 정산하지 않았습니다.'), settlement_conflict: msgid('다른 수동 처리와 상충합니다. 서버 처리 내역을 확인하세요.'), security_fence_conflict: msgid('자기·마지막 관리자 정지 또는 보안 fence 해제 조건을 만족하지 못했습니다.'), policy_period_conflict: msgid('기존 장부·예약이 있어 예산 기간 또는 모드를 변경할 수 없습니다.'), resource_not_found: msgid('대상이 없거나 현재 권한으로 조회할 수 없습니다.'), invalid_request: msgid('입력이 올바르지 않습니다.'), access_denied: msgid('현재 관리자 권한이 없습니다.'), invalid_filter: msgid('조회 필터가 올바르지 않습니다.'), invalid_cursor: msgid('페이지가 만료되었거나 조회 조건이 다릅니다. 처음부터 조회하세요.') };
+const messages: Record<string, string> = { version_conflict: msgid('버전이 변경되었습니다. 서버를 다시 조회했습니다. 새 상태를 확인하고 다시 선택하세요.'), execution_not_final: msgid('실행 종료를 확인할 수 없거나 알려진 sender가 실행 중입니다. 정산하지 않았습니다.'), settlement_conflict: msgid('다른 수동 처리와 상충합니다. 서버 처리 내역을 확인하세요.'), security_fence_conflict: msgid('자기 자신과 마지막 활성 관리자는 정지할 수 없습니다. 이관 중 잠긴 계정은 이 화면에서 바꿀 수 없습니다.'), policy_period_conflict: msgid('기존 장부·예약이 있어 예산 기간 또는 모드를 변경할 수 없습니다.'), resource_not_found: msgid('대상이 없거나 현재 권한으로 조회할 수 없습니다.'), invalid_request: msgid('입력이 올바르지 않습니다.'), access_denied: msgid('현재 관리자 권한이 없습니다.'), invalid_filter: msgid('조회 필터가 올바르지 않습니다.'), invalid_cursor: msgid('페이지가 만료되었거나 조회 조건이 다릅니다. 처음부터 조회하세요.') };
 export function failure(error: unknown) {
   const t = (key: string, values?: Record<string, string>) => i18n.t(key, values);
   if (!(error instanceof ApiError)) return t('서버에 연결할 수 없습니다. 자동 재전송하지 않았습니다.');
@@ -44,7 +44,8 @@ export function useCommand(onRead: (ack?: CommandAck) => Promise<void>) {
   const lock = useRef(false), mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const prepare = (action: Action) => { setMessage(null); setPending(action); };
-  const execute = async () => {
+  const execute = async (action: Action | null = pending) => {
+    const pending = action;
     if (!pending || lock.current) return;
     lock.current = true; setBusy(true); setPending(null); setMessage(null);
     const epoch = session.snapshot().epoch, commandId = crypto.randomUUID();
@@ -66,7 +67,8 @@ export function useCommand(onRead: (ack?: CommandAck) => Promise<void>) {
     } catch (e) { if (current() && !(e instanceof StaleResponse)) setMessage(i18n.t('{{outcome}} 재조회 실패. {{reason}}', { outcome, reason: failure(e) })); }
     finally { if (current()) { lock.current = false; setBusy(false); } }
   };
-  return { prepare, busy, view: <>{message && <p role="status">{message}</p>}{busy && <p role="status">{t('명령 처리·서버 확인 중…')}</p>}{pending && <Modal title={t(pending.label)} variant={pending.danger ? 'danger' : 'normal'} busy={busy} onClose={() => setPending(null)} confirm={{ label: t('명령 실행'), onConfirm: () => void execute() }}><pre>{JSON.stringify(pending.body, null, 2)}</pre><p className="meta">{t('서버 상태와 CAS 버전을 확인했습니다. 성공 후 서버를 다시 조회하며 자동 재전송하지 않습니다.')}</p></Modal>}</> };
+  // run: 호출한 쪽이 이미 확인 창에서 확인을 받은 명령을 바로 보낸다.
+  return { prepare, run: (action: Action) => void execute(action), busy, view: <>{message && <p role="status">{message}</p>}{busy && <p role="status">{t('명령 처리·서버 확인 중…')}</p>}{pending && <Modal title={t(pending.label)} variant={pending.danger ? 'danger' : 'normal'} busy={busy} onClose={() => setPending(null)} confirm={{ label: t('명령 실행'), onConfirm: () => void execute() }}><pre>{JSON.stringify(pending.body, null, 2)}</pre><p className="meta">{t('서버 상태와 CAS 버전을 확인했습니다. 성공 후 서버를 다시 조회하며 자동 재전송하지 않습니다.')}</p></Modal>}</> };
 }
 export function fields(event: FormEvent<HTMLFormElement>) { event.preventDefault(); return new FormData(event.currentTarget); }
 export function directId(name: string) { return new URLSearchParams(location.search).get(name) ?? ''; }
@@ -90,6 +92,19 @@ export function useAll<T>(url: string) {
   return { items, error };
 }
 /** 사용자(사람·서비스 계정)를 이름·이메일로 찾아 고르는 칸. 폼에는 고른 사용자의 ID가 전송된다. */
+/**
+ * 요청 기록에 나온 모델을 고르는 SearchSelect. 값은 모델 이름이고 첫 항목은 '전체'(빈 값)다.
+ * mine이면 내 요청 기록(/api/usage/models), 아니면 전체 요청 기록(관리자 전용)에서 읽는다.
+ * 승인된 모델 목록에서 빠진 모델도 기록이 있으면 나온다. 같은 이름이 여러 Provider에 있으면 후보 하나로 묶는다.
+ */
+export function RequestModelSelect({ mine = false, ...props }: { id?: string; name?: string; defaultValue?: string; 'aria-label'?: string; mine?: boolean }) {
+  const { t } = useTranslation();
+  const models = useResource<{ items: { provider: string; model: string }[] }>(mine ? '/api/usage/models' : '/api/admin/requests/models');
+  const byModel = new Map<string, string[]>();
+  for (const m of models.data?.items ?? []) byModel.set(m.model, [...(byModel.get(m.model) ?? []), m.provider]);
+  const options = [{ value: '', label: t('전체') }, ...[...byModel].map(([model, list]) => ({ value: model, label: `${model} (${list.join(', ')})` }))];
+  return <SearchSelect {...props} placeholder={models.data ? t('선택하세요') : t('모델 목록 조회 중…')} options={options} />;
+}
 export function PrincipalSelect({ kind, optional = false, ...props }: { id?: string; name?: string; value?: string; defaultValue?: string; onChange?: (value: string) => void; required?: boolean; kind?: 'human' | 'service'; optional?: boolean; 'aria-label'?: string }) {
   const { t } = useTranslation();
   const { items, error } = useAll<PrincipalSummary>(`/api/admin/principals${kind ? `?kind=${kind}` : ''}`);

@@ -8,6 +8,7 @@ import { credentialLabel, providerNames } from '../admin/credentials';
 import { failure, useResource } from '../admin/shared';
 import { useTimeFormat } from '../../lib/time';
 import { Modal, SearchSelect } from '../../ui/ui';
+import { GrantTable } from '../../ui/grant-table';
 
 /** 키 주인의 지금 정책(고를 수 있는 API)과 인가된 Provider 키. */
 export type KeyOwner = { grants: Grant[]; authorized: AuthorizedCredentials };
@@ -48,6 +49,8 @@ function EditKeyForm({ target, owner, validity, onClose, onDone }: Props & { own
     setChosen(prev => ({ ...prev, [provider]: id }));
     if (!id) setGranted(prev => new Set([...prev].filter(value => owner.grants[Number(value.split(':')[0])]?.provider !== provider)));
   };
+  // 허용할 API 표의 줄. Provider 키를 고른 Provider의 API만 보인다. key는 `정책 grant 순번:기능 순번`이다.
+  const grantRows = owner.grants.flatMap((g, gi) => chosenProviders.includes(g.provider) ? g.capabilities.map((capability, ci) => ({ key: `${gi}:${ci}`, provider: g.provider, providerLabel: providerNames[g.provider] ?? g.provider, model: g.model, capability })) : []);
   const ready = name.trim().length > 0 && chosenProviders.length > 0 && withoutApi.length === 0;
   const submit = async () => {
     if (busy || !ready) return;
@@ -86,7 +89,9 @@ function EditKeyForm({ target, owner, validity, onClose, onDone }: Props & { own
     </fieldset>
     <fieldset className="stack-sm"><legend>{t('허용할 API (연동한 Provider마다 1개 이상 필수)')}</legend>
       {chosenProviders.length === 0 ? <p className="meta">{t('Provider 키를 먼저 고르면 그 Provider의 API를 고를 수 있습니다.')}</p>
-        : <div className="checks">{owner.grants.flatMap((g, gi) => chosenProviders.includes(g.provider) ? g.capabilities.map((cap, ci) => { const value = `${gi}:${ci}`; return <label key={value}><input type="checkbox" checked={granted.has(value)} disabled={busy} onChange={e => { const on = e.currentTarget.checked; setGranted(prev => { const next = new Set(prev); if (on) next.add(value); else next.delete(value); return next; }); }} />{g.provider} / {g.model} / {cap}</label>; }) : [])}</div>}
+        : <GrantTable rows={grantRows} selected={granted} disabled={busy}
+            onToggle={(value, on) => setGranted(prev => { const next = new Set(prev); if (on) next.add(value); else next.delete(value); return next; })}
+            onAll={on => setGranted(prev => { const next = new Set(prev); for (const r of grantRows) { if (on) next.add(r.key); else next.delete(r.key); } return next; })} />}
       {dropped.length > 0 && <p className="meta">{t('키 주인의 지금 정책에 없어 저장하면 빠지는 API: {{list}}', { list: dropped.join(', ') })}</p>}
     </fieldset>
     <div className="stack-sm"><p className="meta">{t('유효기간 {{validity}} · 만료 {{expires}}', { validity, expires: target.expires_at ? format(target.expires_at) : t('없음') })}</p>

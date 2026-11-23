@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { session } from '../../lib/api';
 import { msgid } from '../../lib/i18n';
@@ -6,8 +6,10 @@ import { Link, navigate, useRoute } from '../../lib/router';
 import type { Page, Grant, Limits } from '../../lib/types';
 import { useTimeFormat } from '../../lib/time';
 import { Badge, Modal, Pill, Select, StatusBadge } from '../../ui/ui';
+import { GrantTable } from '../../ui/grant-table';
 import { BudgetTimezoneNote, KeysScreen } from '../keys/keys';
 import { CredentialAccess } from './access';
+import { providerNames } from './credentials';
 import type { Policy, PrincipalDetail, PrincipalSummary } from './types';
 import { directId, fields, PrincipalSelect, ReadState, useCommand, useResource } from './shared';
 /** 사용자 상세 하위 페이지 주소. */
@@ -47,7 +49,7 @@ export function PrincipalsScreen() {
             <td><div className="stack-sm"><strong>{p.display_name}</strong><span className="meta mono">{p.id}</span></div></td>
             <td><Pill>{p.kind === 'service' ? t('서비스') : t('사람')}</Pill></td>
             <td>{p.email ?? <span className="meta">{t('이메일 없음')}</span>}</td>
-            <td><div className="row">{p.disabled ? <Badge tone="critical">{t('계정 정지')}</Badge> : <Badge tone="success">{t('계정 활성')}</Badge>}{p.inference_safety.paused && <Badge tone="critical">{t('자동 안전차단')}</Badge>}{p.block_state.reasons.map(reason => <StatusBadge key={reason} kind="block" value={reason} />)}</div></td>
+            <td><div className="row">{p.disabled ? <Badge tone="critical">{t('계정 정지')}</Badge> : <Badge tone="success">{t('계정 활성')}</Badge>}{p.inference_safety.paused && <Badge tone="critical">{t('자동 안전차단')}</Badge>}{p.block_state.reasons.filter(reason => !(reason === 'disabled' && p.disabled) && !(reason === 'inference_paused' && p.inference_safety.paused)).map(reason => <StatusBadge key={reason} kind="block" value={reason} />)}</div></td>
             <td className="mono">{p.version} / {p.policy_version} / {p.inference_safety.version}</td>
             <td className="mono">{p.management_owner_id ?? <span className="meta">{t('없음')}</span>}</td>
             <td><Link className="btn btn-sm" aria-label={t('{{name}} 상세', { name: p.display_name })} href={principalHref(p.id)}>{t('상세')}</Link></td>
@@ -63,7 +65,6 @@ export function PrincipalDetailScreen() {
   const { t } = useTranslation();
   const id = new URLSearchParams(useRoute().search).get('principal_id') ?? '';
   return <div className="stack-lg">
-    <p><Link href="/dashboard/admin/principals">{t('← 사용자 목록')}</Link></p>
     {id ? <PrincipalEditor key={id} id={id} /> : <p role="alert">{t('사용자 ID가 없습니다. 사용자 목록에서 상세를 여세요.')}</p>}
   </div>;
 }
@@ -80,7 +81,7 @@ function PrincipalKeyIssue({ id }: { id: string }) {
     <ReadState {...detail} />
     {p && (p.kind === 'service'
       ? <KeysScreen key={`${p.id}:${session.snapshot().epoch}`} view="issue" adminPrincipal={{ id: p.id, service: true, grants: p.policy.grants, authorized: p.provider_credentials ?? [] }} />
-      : <><p><Link href={principalHref(p.id)}>{t('← 사용자 상세')}</Link></p><p role="alert">{t('사람 사용자의 가상 키는 본인이 내 가상 키에서 발급합니다.')}</p></>)}
+      : <p role="alert">{t('사람 사용자의 가상 키는 본인이 내 가상 키에서 발급합니다.')}</p>)}
   </div>;
 }
 function PrincipalEditor({ id }: { id: string }) {
@@ -88,8 +89,14 @@ function PrincipalEditor({ id }: { id: string }) {
   const detail = useResource<PrincipalDetail>(`/api/admin/principals/${encodeURIComponent(id)}`);
   const command = useCommand(async () => { await detail.reload(); });
   const [formError, setFormError] = useState<string | null>(null), p = detail.data?.principal, format = useTimeFormat();
+  // Provider 키 인가를 저장한 결과. 상세를 다시 읽는 동안에도 보이게 상세 내용 밖에 둔다.
+  const [accessNote, setAccessNote] = useState<string | null>(null);
+  // 계정 정지·정지 해제 확인 창. 사유를 여기서 받는다.
+  const [suspending, setSuspending] = useState(false);
+  const me = useSyncExternalStore(session.subscribe, session.snapshot).me?.principal.id;
+  const pauseReasons: Record<string, string> = { cost_bound_violation: t('실제 사용량이 요청을 받을 때 정한 상한을 넘었습니다.'), amount_overflow: t('금액이 계산할 수 있는 범위를 넘었습니다.') };
   return <section aria-label={t('사용자 상세')} className="stack">
-    <ReadState {...detail} />{formError && <p role="alert">{formError}</p>}{command.view}{p && <>
+    <ReadState {...detail} />{formError && <p role="alert">{formError}</p>}{command.view}{accessNote && <p role="status">{accessNote}</p>}{p && <>
     <div className={p.block_state.reasons.length ? 'card card-critical' : 'card'}>
       <div className="stack-sm">
         <div className="row"><h3>{p.display_name}</h3><Pill>{p.kind === 'service' ? t('서비스') : t('사람')}</Pill>{p.block_state.reasons.map(reason => <StatusBadge key={reason} kind="block" value={reason} />)}</div>
@@ -97,14 +104,28 @@ function PrincipalEditor({ id }: { id: string }) {
         <p className="meta">owner: <span className="mono">{p.management_owner_id ?? t('없음')}</span> · {t('과금 차단')}: {p.block_state.reasons.join(', ') || t('없음')} · {t('전체 미정산 {{count}}', { count: p.block_state.global_unknown_count })}</p>
       </div>
       <details><summary>{t('실행 설정 상한 (편집 불가)')}</summary><pre>{JSON.stringify(detail.data!.execution_ceiling, null, 2)}</pre></details>
-      <div className="actions"><Link className="btn btn-sm" href={`/dashboard/admin/usage?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 사용량·현재 잔액')}</Link><Link className="btn btn-sm" href={`/dashboard/admin/requests?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 미정산')}</Link></div>
+      <div className="actions"><Link className="btn btn-sm" href={`/dashboard/admin/usage?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 사용량·현재 잔액')}</Link><Link className="btn btn-sm" href={`/dashboard/admin/requests?principal_id=${encodeURIComponent(p.id)}`}>{t('이 사용자 미정산')}</Link>
+        {p.policy.disabled
+          ? <button className="btn-sm" disabled={command.busy} onClick={() => setSuspending(true)}>{t('정지 해제')}</button>
+          : <button className="btn-sm btn-danger-outline" disabled={command.busy || p.id === me} title={p.id === me ? t('자기 계정은 정지할 수 없습니다.') : undefined} onClick={() => setSuspending(true)}>{t('이 계정 정지')}</button>}
+      </div>
     </div>
-    <div className="grid-2">
+    {suspending && <Modal variant={p.policy.disabled ? 'normal' : 'danger'} title={p.policy.disabled ? t('{{name}} 정지 해제', { name: p.display_name }) : t('{{name}} 계정 정지', { name: p.display_name })} onClose={() => setSuspending(false)}
+      actions={<><button type="submit" form="principal-suspend-form" className={p.policy.disabled ? 'btn-primary' : 'btn-danger'}>{p.policy.disabled ? t('정지 해제') : t('이 계정 정지')}</button><button type="button" className="btn-quiet" data-modal-cancel="" onClick={() => setSuspending(false)}>{t('취소')}</button></>}>
+      <form id="principal-suspend-form" className="stack-sm" onSubmit={e => { const f = fields(e); setSuspending(false); command.run({ label: p.policy.disabled ? msgid('정지 해제') : msgid('이 계정 정지'), url: `/api/admin/principals/${p.id}/policy`, method: 'PUT', body: { expected_version: p.policy.version, disabled: !p.policy.disabled, grants: p.policy.grants, limits: p.policy.limits, reason: String(f.get('reason')) } }); }}>
+        <p>{p.policy.disabled
+          ? t('다음 요청부터 이 계정의 추론과 대시보드 접근을 다시 허용합니다.')
+          : p.kind === 'service' ? t('다음 요청부터 이 서비스 계정의 추론을 막습니다. 정책과 가상 키는 지우지 않습니다.') : t('다음 요청부터 이 사람의 추론과 대시보드 접근을 막습니다. 이 사람이 owner인 서비스 계정도 막힙니다. 정책과 가상 키는 지우지 않습니다.')}</p>
+        <label>{p.policy.disabled ? t('정지 해제 사유') : t('정지 사유')}<input name="reason" required maxLength={1000} /></label>
+      </form>
+    </Modal>}
+    {/* 자동과금 차단은 차단 중일 때만 보여 준다. 해제 상태에는 할 일이 없다. */}
+    {(p.kind === 'service' || p.inference_safety.paused) && <div className="grid-2">
       {p.kind === 'service' && <form key={`principal-${p.version}`} aria-label={t('서비스 변경')} onSubmit={e => { const f = fields(e); command.prepare({ label: msgid('서비스 변경 확인'), url: `/api/admin/principals/${p.id}`, method: 'PATCH', body: { expected_version: p.version, display_name: String(f.get('display_name')), management_owner_id: String(f.get('owner')) } }); }}><fieldset disabled={command.busy} className="group"><legend>{t('서비스 변경')}</legend><label>{t('서비스 이름')}<input name="display_name" defaultValue={p.display_name} required maxLength={100} /></label><div className="field"><label htmlFor="service-owner">{t('서비스 owner')}</label><PrincipalSelect id="service-owner" name="owner" kind="human" defaultValue={p.management_owner_id ?? ''} required /></div><div className="actions"><button className="btn-primary">{t('서비스 변경 확인')}</button></div></fieldset></form>}
-      <section aria-label={t('자동 안전차단')} className={p.inference_safety.paused ? 'card card-critical' : 'card'}><h3>{t('자동 과금 안전차단')}</h3><p className="meta">{t('{{state}} · 안전 버전 {{version}} · 사유 {{reason}} · 시각 {{at}} · 원인 요청 {{request}}', { state: p.inference_safety.paused ? t('차단 중') : t('해제 상태'), version: p.inference_safety.version, reason: p.inference_safety.reason ?? t('없음'), at: p.inference_safety.paused_at ? format(p.inference_safety.paused_at) : t('없음'), request: p.inference_safety.trigger_request_id ?? t('없음') })}</p><p className="meta">{t('별도 해제는 unknown·계정 정지·fence·예산·키 회수를 해제하지 않습니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/api/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>
-    </div>
+      {p.inference_safety.paused && <section aria-labelledby="principal-safety-heading" className="card card-alert"><h3 id="principal-safety-heading">{t('자동과금 차단됨')}</h3><p>{p.inference_safety.paused_at ? t('{{at}}부터 이 사용자의 유료 요청을 막고 있습니다.', { at: format(p.inference_safety.paused_at) }) : t('이 사용자의 유료 요청을 막고 있습니다.')} {p.inference_safety.reason ? pauseReasons[p.inference_safety.reason] ?? p.inference_safety.reason : ''}</p>{p.inference_safety.trigger_request_id && <p><Link href={`/dashboard/admin/requests?principal_id=${encodeURIComponent(p.id)}&request_id=${encodeURIComponent(p.inference_safety.trigger_request_id)}`}>{t('원인이 된 요청 보기')}</Link></p>}<p className="meta">{t('여기서 해제해도 미정산 차단, 계정 정지, 예산 소진, 회수된 키는 그대로입니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/api/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>}
+    </div>}
     <PolicyForm key={`policy-${p.policy.version}`} principalId={p.id} policy={p.policy} ceiling={detail.data!.execution_ceiling.grants} busy={command.busy} onSubmit={body => command.prepare({ label: msgid('정책 전체 교체 확인'), url: `/api/admin/principals/${p.id}/policy`, method: 'PUT', body })} onError={setFormError} />
-    <CredentialAccess principalId={p.id} authorized={p.provider_credentials ?? []} onChanged={async () => { await detail.reload(); }} />
+    <CredentialAccess principalId={p.id} authorized={p.provider_credentials ?? []} onChanged={async () => { await detail.reload(); }} onNotice={setAccessNote} />
     <div className="card"><KeysScreen key={`${p.id}:${session.snapshot().epoch}:${JSON.stringify(p.provider_credentials ?? [])}`} adminPrincipal={{ id: p.id, service: p.kind === 'service', grants: p.policy.grants, authorized: p.provider_credentials ?? [] }} /></div>
   </>}</section>;
 }
@@ -119,7 +140,7 @@ export function toUsd(raw: string): string | null {
   const m = /^(0|[1-9][0-9]{0,15})(?:\.([0-9]{1,12}))?$/.exec(raw.trim());
   return m ? `${m[1]}.${(m[2] ?? '').padEnd(12, '0')}` : null;
 }
-/** 정책 편집. 쓸 수 있는 모델·API는 체크박스로, 한도는 입력칸으로 고르고 서버 형식으로 바꿔 보낸다. */
+/** 정책 편집. 쓸 수 있는 모델·API는 표(GrantTable)에서, 한도는 입력칸으로 고르고 서버 형식으로 바꿔 보낸다. */
 function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId: string; policy: Policy; ceiling: Grant[]; busy: boolean; onSubmit: (body: Record<string, unknown>) => void; onError: (message: string | null) => void }) {
   const { t } = useTranslation();
   const flatten = (grants: Grant[]) => grants.flatMap(g => g.capabilities.map(capability => ({ provider: g.provider, model: g.model, capability })));
@@ -129,7 +150,6 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
   for (const c of [...flatten(ceiling), ...flatten(policy.grants)]) if (!choices.some(x => choiceKey(x) === choiceKey(c))) choices.push({ ...c, known: known.has(choiceKey(c)) });
   const [selected, setSelected] = useState(() => new Set(flatten(policy.grants).map(choiceKey)));
   const [budgetMode, setBudgetMode] = useState<string>(policy.limits.budget?.mode ?? 'none');
-  const all = choices.length > 0 && choices.every(c => selected.has(choiceKey(c)));
   const toggle = (key: string, on: boolean) => setSelected(prev => { const next = new Set(prev); if (on) next.add(key); else next.delete(key); return next; });
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     const f = fields(event); onError(null);
@@ -151,18 +171,16 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
       if (!amount) { onError(t('월 예산은 USD 금액으로 입력하세요(예: 100 또는 12.5, 소수점 12자리까지).')); return; }
       limits.budget = { mode: budgetMode === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month' } };
     }
-    const body: Record<string, unknown> = { expected_version: policy.version, disabled: f.has('disabled'), grants, limits, reason: String(f.get('reason')) };
-    if (f.has('fence_confirmed')) body.fence_release = { fence_ref: String(f.get('fence_ref')), old_processes_stopped_ref: String(f.get('stopped_ref')), confirmed: true };
-    onSubmit(body);
+    // 계정 정지는 요약 카드의 버튼으로 따로 바꾼다. 여기서는 지금 상태를 그대로 보낸다.
+    onSubmit({ expected_version: policy.version, disabled: policy.disabled, grants, limits, reason: String(f.get('reason')) });
   };
   const budget = policy.limits.budget;
   return <form aria-label={t('정책 교체')} onSubmit={submit}><fieldset disabled={busy} className="group"><legend>{t('정책 전체 교체')}</legend>
-    <p className="meta">{t('저장하면 정책 전체가 이 내용으로 바뀝니다. 빈 한도는 정책에서 제한하지 않는다는 뜻이고, 서버 실행 상한(설정 파일)은 그래도 적용됩니다. 자동 안전차단은 이 폼으로 해제되지 않습니다.')}</p>
-    <label><input type="checkbox" name="disabled" defaultChecked={policy.disabled} />{t('관리용 계정 정지')}</label>
+    <p className="meta">{t('저장하면 정책 전체가 이 내용으로 바뀝니다. 빈 한도는 정책에서 제한하지 않는다는 뜻이고, 서버 실행 상한(설정 파일)은 그래도 적용됩니다. 계정 정지와 자동 안전차단은 이 폼으로 바뀌지 않습니다.')}</p>
     <fieldset className="stack-sm"><legend>{t('사용할 수 있는 모델·API')}</legend>
-      {choices.length === 0 ? <p className="meta">{t('고를 수 있는 모델이 없습니다. 모델·가격 화면에서 모델을 먼저 승인하세요.')}</p> : <>
-        <label><input type="checkbox" checked={all} onChange={e => setSelected(e.currentTarget.checked ? new Set(choices.map(choiceKey)) : new Set())} />{t('전체 선택')}</label>
-        <div className="checks">{choices.map(c => { const key = choiceKey(c); return <label key={key}><input type="checkbox" checked={selected.has(key)} onChange={e => toggle(key, e.currentTarget.checked)} />{c.provider} / <span className="mono">{c.model}</span> / {c.capability}{!c.known && <span className="text-warning"> ({t('지금은 쓸 수 없는 모델')})</span>}</label>; })}</div>
+      {choices.length === 0 ? <p className="meta">{t('고를 수 있는 모델이 없습니다. 모델을 먼저 승인하세요.')} <Link href="/dashboard/admin/models">{t('모델·가격 화면 열기')}</Link></p> : <>
+        <GrantTable rows={choices.map(c => ({ key: choiceKey(c), provider: c.provider, providerLabel: providerNames[c.provider] ?? c.provider, model: c.model, capability: c.capability, note: c.known ? undefined : <Badge tone="warning">{t('지금은 쓸 수 없는 모델')}</Badge> }))}
+          selected={selected} onToggle={toggle} onAll={on => setSelected(on ? new Set(choices.map(choiceKey)) : new Set())} />
       </>}
     </fieldset>
     <fieldset className="stack-sm"><legend>{t('한도')}</legend>
@@ -176,7 +194,6 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
       {budgetMode !== 'none' && <BudgetTimezoneNote />}
     </fieldset>
     <label>{t('정책 변경 사유')}<input name="reason" required maxLength={1000} /></label>
-    <details><summary>{t('보안 설정 fence 해제 진술')}</summary><div className="stack"><p className="meta">{t('fence 설정 사유는 security_config_fence:승인참조입니다. 구 프로세스 종료 확인 전 해제하지 마세요.')}</p><label>{t('Fence 참조')}<input name="fence_ref" className="mono" spellCheck={false} /></label><label>{t('구 프로세스 종료 확인 참조')}<input name="stopped_ref" className="mono" spellCheck={false} /></label><label className="attest"><input name="fence_confirmed" type="checkbox" />{t('구 설정 프로세스 종료를 확인했습니다')}</label></div></details>
     <div className="actions"><button className="btn-primary">{t('정책 교체 확인')}</button></div>
   </fieldset></form>;
 }

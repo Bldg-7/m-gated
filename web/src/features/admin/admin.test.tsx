@@ -23,7 +23,11 @@ test('admin_direct_route_uses_separate_principal_policy_safety_cas_and_ack_get',
   await screen.findByRole('heading', { name: '사용자 상세' });
   // 예전 주소는 사용자 상세 하위 페이지로 옮겨지고, 목록으로 돌아가는 링크가 있다.
   expect(location.pathname + location.search).toBe('/dashboard/admin/principals/detail?principal_id=service1');
-  expect(screen.getByRole('link', { name: '← 사용자 목록' }).getAttribute('href')).toBe('/dashboard/admin/principals');
+  const back = screen.getByRole('link', { name: '사용자 목록으로 돌아가기' });
+  expect(back.getAttribute('href')).toBe('/dashboard/admin/principals');
+  expect(back.textContent).toBe('사용자 목록');
+  // 돌아가는 링크는 페이지 제목 바로 위에 있다.
+  expect(back.nextElementSibling).toBe(screen.getByRole('heading', { level: 1, name: '사용자 상세' }));
   expect(screen.getByRole('link', { name: '사용자·정책·키 관리' }).getAttribute('aria-current')).toBe('page');
   fireEvent.change(screen.getByLabelText('서비스 이름'), { target: { value: '새 서비스' } });
   fireEvent.submit(screen.getByRole('form', { name: '서비스 변경' }));
@@ -40,13 +44,34 @@ test('admin_direct_route_uses_separate_principal_policy_safety_cas_and_ack_get',
   fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
   await screen.findByText(/서버 재조회 완료/);
   expect(calls.find(c => c.method === 'PUT')?.body?.expected_version).toBe('13');
-  fireEvent.change(screen.getByLabelText('안전차단 해제 사유'), { target: { value: '원인 확인' } });
+  // 차단 중이면 옅은 붉은 배경의 자동과금 차단 섹션에서 명시 해제한다.
+  const safety = screen.getByRole('region', { name: '자동과금 차단됨' });
+  expect(safety.className).toContain('card-alert');
+  expect(safety.textContent).toContain('이 사용자의 유료 요청을 막고 있습니다.');
+  fireEvent.change(within(safety).getByLabelText('안전차단 해제 사유'), { target: { value: '원인 확인' } });
   fireEvent.click(screen.getByLabelText('과금 원인과 남은 차단을 확인했습니다'));
   fireEvent.submit(screen.getByRole('form', { name: '명시 안전차단 해제' }));
   fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
   await screen.findByText(/서버 재조회 완료/);
   expect(calls.find(c => c.method === 'POST')?.body?.expected_version).toBe('29');
   for (let i = 0; i < calls.length; i++) if (['PATCH', 'PUT', 'POST'].includes(calls[i].method)) expect(calls.slice(i + 1).some(c => c.method === 'GET' && c.url.endsWith('/service1'))).toBe(true);
+});
+
+test('safety_section_appears_only_while_inference_is_paused', async () => {
+  history.replaceState(null, '', '/dashboard/admin/principals/detail?principal_id=service1');
+  const released = { ...principal, inference_safety: { paused: false, version: '30', reason: null, paused_at: null, trigger_request_id: null }, block_state: { ...principal.block_state, blocked: false, reasons: [] } };
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === '/api/me') return Promise.resolve(response(me));
+    if (url === '/api/admin/principals/service1') return Promise.resolve(response({ principal: released, execution_ceiling: { grants: [], limits: principal.policy.limits } }));
+    return Promise.resolve(response({ items: [], next_cursor: null, as_of: 'now' }));
+  }));
+  render(<App />);
+  await screen.findByLabelText('서비스 이름');
+  // 해제 상태에서는 자동과금 차단 섹션 자체가 없다.
+  expect(screen.queryByRole('region', { name: '자동과금 차단됨' })).toBeNull();
+  expect(screen.queryByRole('form', { name: '명시 안전차단 해제' })).toBeNull();
+  expect(screen.queryByLabelText('안전차단 해제 사유')).toBeNull();
 });
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
@@ -97,6 +122,19 @@ test('policy_form_turns_checkboxes_and_limit_fields_into_the_server_policy', asy
   const group = await screen.findByRole('group', { name: '사용할 수 있는 모델·API' });
   // 지금 정책에만 남은 모델도 보여 주어 뺄 수 있게 한다. 현재 값은 입력칸에 짧게 보인다.
   const old = within(group).getByLabelText(/claude-old-1/) as HTMLInputElement;
+  expect(old.checked).toBe(true);
+  // 모델·API는 표로 고른다. 한 줄이 (Provider, 모델, API) 하나이고, 머리 칸 체크박스가 전체 선택이다.
+  expect(within(group).getAllByRole('columnheader').map(h => h.textContent)).toEqual(['', 'Provider', '모델', 'API']);
+  expect(within(group).getAllByRole('row')).toHaveLength(5);
+  const all = within(group).getByLabelText('전체 선택') as HTMLInputElement;
+  expect(all.indeterminate).toBe(true);
+  const boxes = () => within(group).getAllByRole('checkbox').filter(box => box !== all) as HTMLInputElement[];
+  fireEvent.click(all);
+  expect(boxes().every(box => box.checked)).toBe(true);
+  fireEvent.click(all);
+  expect(boxes().some(box => box.checked)).toBe(false);
+  // 줄의 글자를 눌러도 고른다.
+  fireEvent.click(within(group).getByText('claude-old-1'));
   expect(old.checked).toBe(true);
   expect(group.textContent).toContain('지금은 쓸 수 없는 모델');
   expect((screen.getByLabelText('월 예산 (USD)') as HTMLInputElement).value).toBe('100.5');

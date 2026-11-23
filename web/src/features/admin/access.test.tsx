@@ -102,7 +102,17 @@ test('admin_fixes_a_blocked_binding_by_choosing_a_key_authorized_for_the_owner',
   render(<App />);
   const binding = await screen.findByLabelText('막힌 키 Provider 키 연결');
   expect(binding.textContent).toContain('인가 해제됨');
-  expect(binding.textContent).toContain('수정에서 인가된 Provider 키로 다시 연결하세요.');
+  // 설명은 배지 말풍선이다. 배지는 키보드로 옮겨 갈 수 있고, 설명은 늘 aria-describedby로 이어져 있다.
+  const badge = within(binding).getByText('인가 해제됨');
+  expect(badge.getAttribute('tabindex')).toBe('0');
+  const tip = document.getElementById(badge.getAttribute('aria-describedby')!)!;
+  expect(tip.getAttribute('role')).toBe('tooltip');
+  expect(tip.textContent).toContain('수정에서 인가된 Provider 키로 다시 연결하세요.');
+  expect(tip.className).toBe('sr-only');
+  fireEvent.focus(badge);
+  expect(tip.className).toContain('tooltip');
+  fireEvent.keyDown(badge, { key: 'Escape' });
+  expect(tip.className).toBe('sr-only');
   expect(within(binding).queryByRole('button')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '막힌 키 수정' }));
   const dialog = await screen.findByRole('dialog', { name: '막힌 키 수정' });
@@ -204,8 +214,8 @@ test('service_account_key_is_issued_on_its_own_page_from_the_keys_authorized_for
   fireEvent.click(link);
   const form = await screen.findByRole('form', { name: '서비스 계정의 가상 키 발급' });
   expect(location.pathname + location.search).toBe('/dashboard/admin/principals/key?principal_id=human1');
-  expect(screen.getByRole('heading', { level: 2, name: '서비스 계정의 가상 키 발급' })).toBeTruthy();
-  expect(screen.getByRole('link', { name: '← 사용자 상세' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
+  expect(screen.getByRole('region', { name: '서비스 계정의 가상 키 발급' })).toBeTruthy();
+  expect(screen.getByRole('link', { name: '사용자 상세로 돌아가기' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
   expect(within(form).getByRole('link', { name: '취소' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
   expect(screen.queryByRole('form', { name: '키 조회' })).toBeNull();
   // 관리자가 아니라 서비스 계정에 인가된 Provider 키 안에서만 고른다.
@@ -240,5 +250,5 @@ test('service_account_without_an_authorized_provider_key_and_human_users_get_no_
   render(<App />);
   expect((await screen.findByRole('alert')).textContent).toBe('사람 사용자의 가상 키는 본인이 내 가상 키에서 발급합니다.');
   expect(screen.queryByRole('form', { name: '서비스 계정의 가상 키 발급' })).toBeNull();
-  expect(screen.getByRole('link', { name: '← 사용자 상세' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
+  expect(screen.getByRole('link', { name: '사용자 상세로 돌아가기' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
 });

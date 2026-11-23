@@ -24,7 +24,7 @@ afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/d
 test('personal_keys_issue_route_requires_explicit_duration_and_clears_one_time_secret', async () => {
   history.replaceState(null, '', '/dashboard/keys/new');
   const fetcher = stub(); render(<App />);
-  await screen.findByRole('heading', { level: 2, name: '가상 키 발급' });
+  await screen.findByRole('region', { name: '가상 키 발급' });
   const duration = screen.getByLabelText('유효기간') as HTMLButtonElement;
   expect(duration.labels?.[0].textContent).toBe('유효기간');
   expect(selectedValue(duration)).toBe('');
@@ -63,7 +63,7 @@ test('personal_keys_issue_route_requires_explicit_duration_and_clears_one_time_s
   // 키 창을 닫으면 키를 지우고 목록 페이지로 돌아간다.
   fireEvent.click(within(secret).getByRole('button', { name: '닫기' }));
   expect(screen.queryByText('one-time-synthetic-secret')).toBeNull();
-  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
+  await screen.findByRole('region', { name: '내 가상 키' });
   expect(location.pathname).toBe('/dashboard/keys');
   expect(screen.queryByRole('form', { name: '가상 키 발급' })).toBeNull();
   expect(localStorage.length + sessionStorage.length).toBe(0);
@@ -72,7 +72,7 @@ test('personal_keys_issue_route_requires_explicit_duration_and_clears_one_time_s
 test('key_list_has_no_issue_form_and_links_to_the_issue_page', async () => {
   history.replaceState(null, '', '/dashboard/keys');
   const fetcher = stub(); render(<App />);
-  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
+  await screen.findByRole('region', { name: '내 가상 키' });
   await screen.findByText('키가 없습니다.');
   expect(screen.queryByRole('form', { name: '가상 키 발급' })).toBeNull();
   expect(screen.queryByLabelText('키 이름')).toBeNull();
@@ -81,19 +81,19 @@ test('key_list_has_no_issue_form_and_links_to_the_issue_page', async () => {
   expect(link.getAttribute('href')).toBe('/dashboard/keys/new');
   fireEvent.click(link);
   // 발급 페이지에는 발급 폼만 있고 키 목록은 없다.
-  await screen.findByRole('heading', { level: 2, name: '가상 키 발급' });
+  await screen.findByRole('region', { name: '가상 키 발급' });
   expect(location.pathname).toBe('/dashboard/keys/new');
   expect(screen.getByRole('form', { name: '가상 키 발급' })).toBeTruthy();
   expect(screen.queryByRole('form', { name: '키 조회' })).toBeNull();
   expect(screen.queryByText('키가 없습니다.')).toBeNull();
   expect(screen.queryByRole('link', { name: '가상 키 발급' })).toBeNull();
-  expect(screen.getByRole('link', { name: '← 내 가상 키' }).getAttribute('href')).toBe('/dashboard/keys');
+  expect(screen.getByRole('link', { name: '내 가상 키로 돌아가기' }).getAttribute('href')).toBe('/dashboard/keys');
   // 상위 메뉴는 발급 페이지에서도 내 가상 키를 현재 위치로 표시한다.
   expect(screen.getByRole('link', { name: '내 가상 키' }).getAttribute('aria-current')).toBe('page');
   const cancel = screen.getByRole('link', { name: '취소' });
   expect(cancel.getAttribute('href')).toBe('/dashboard/keys');
   fireEvent.click(cancel);
-  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
+  await screen.findByRole('region', { name: '내 가상 키' });
   expect(location.pathname).toBe('/dashboard/keys');
   expect(posts(fetcher)).toHaveLength(0);
 });
@@ -115,7 +115,13 @@ test('issue_submit_stays_disabled_until_a_provider_key_and_an_api_are_chosen', a
   expect(screen.queryByRole('dialog')).toBeNull();
   // Provider 키를 고르면 그 Provider의 API만 나타나고, API를 고를 때까지 버튼은 꺼져 있다.
   pickOption(anthropic, 'team-a (…0001)');
-  expect(within(form).getAllByRole('checkbox')).toHaveLength(1);
+  // 허용할 API는 표로 고른다. 머리 칸의 전체 선택과 고른 Provider의 API 줄만 있다.
+  expect(within(form).getAllByRole('checkbox').map(box => box.getAttribute('aria-label'))).toEqual(['전체 선택', 'anthropic / synthetic-text / messages']);
+  const all = within(form).getByLabelText('전체 선택') as HTMLInputElement;
+  fireEvent.click(all);
+  expect((within(form).getByLabelText('anthropic / synthetic-text / messages') as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(all);
+  expect((within(form).getByLabelText('anthropic / synthetic-text / messages') as HTMLInputElement).checked).toBe(false);
   expect(within(form).queryByLabelText('openai / synthetic-gpt / responses')).toBeNull();
   expect(submitButton().disabled).toBe(true);
   fireEvent.submit(form);
@@ -148,11 +154,11 @@ test('issue_submit_stays_disabled_until_a_provider_key_and_an_api_are_chosen', a
 test('user_without_an_authorized_provider_key_sees_the_reason_and_no_issue_form', async () => {
   history.replaceState(null, '', '/dashboard/keys/new');
   const fetcher = stub(noKeys); render(<App />);
-  await screen.findByRole('heading', { level: 2, name: '가상 키 발급' });
+  await screen.findByRole('region', { name: '가상 키 발급' });
   expect(screen.getByText('나에게 인가된 Provider 키가 없어 가상 키를 발급할 수 없습니다. 관리자에게 Provider 키 인가를 요청하세요.')).toBeTruthy();
   expect(screen.queryByRole('form', { name: '가상 키 발급' })).toBeNull();
   expect(screen.queryByLabelText('키 이름')).toBeNull();
   expect(screen.queryByRole('button', { name: '발급 내용 확인' })).toBeNull();
-  expect(screen.getByRole('link', { name: '← 내 가상 키' }).getAttribute('href')).toBe('/dashboard/keys');
+  expect(screen.getByRole('link', { name: '내 가상 키로 돌아가기' }).getAttribute('href')).toBe('/dashboard/keys');
   expect(posts(fetcher)).toHaveLength(0);
 });

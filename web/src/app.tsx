@@ -3,10 +3,10 @@ import { flushSync } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ApiError, session, StaleResponse } from './lib/api';
 import type { KeyMetadata, Usage } from './lib/types';
-import { PrincipalSelect, useAll } from './features/admin/shared';
+import { PrincipalSelect, RequestModelSelect, useAll } from './features/admin/shared';
 import { UsageView } from './features/usage/usage';
 import { KeysScreen } from './features/keys/keys';
-import { PrincipalDetailScreen, PrincipalKeyIssueScreen, PrincipalsScreen } from './features/admin/principals';
+import { principalHref, PrincipalDetailScreen, PrincipalKeyIssueScreen, PrincipalsScreen } from './features/admin/principals';
 import { RequestsScreen } from './features/admin/requests';
 import { CredentialsScreen } from './features/admin/credentials';
 import { ModelsScreen } from './features/admin/models';
@@ -41,7 +41,8 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
       <label>{t('시작 (현지 시각)')}<input type="datetime-local" name="from" defaultValue={localTime(selected.get('from'))} /></label>
       <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" defaultValue={localTime(selected.get('to'))} /></label>
       <div className="field"><label htmlFor="usage-provider">Provider</label><Select id="usage-provider" name="provider" defaultValue={selected.get('provider') ?? ''} options={[{ value: '', label: t('전체') }, { value: 'anthropic', label: 'Anthropic' }, { value: 'openai', label: 'OpenAI' }, { value: 'deepseek', label: 'DeepSeek' }]} /></div>
-      <label>{t('모델')}<input name="model" maxLength={200} defaultValue={selected.get('model') ?? ''} /></label>
+      {/* 요청 기록의 모델에서 고른다. 전체 사용량은 전체 기록, 내 사용량은 내 기록이 후보다. */}
+      <div className="field"><label htmlFor="usage-model">{t('모델')}</label><RequestModelSelect id="usage-model" name="model" mine={!admin} defaultValue={selected.get('model') ?? ''} /></div>
       {admin && <div className="field"><label htmlFor="usage-principal">{t('사용자')}</label><PrincipalSelect id="usage-principal" name="principal_id" optional value={principalPick} onChange={setPrincipalPick} /></div>}
       <div className="field"><label htmlFor="usage-key">{t('가상 키')}</label><SearchSelect key={principalPick} id="usage-key" name="key_id" defaultValue={selected.get('principal_id') === principalPick || !admin ? selected.get('key_id') ?? '' : ''} placeholder={keys.items ? t('선택하세요') : t('키 목록 조회 중…')} options={[{ value: '', label: t('전체') }, ...(keys.items ?? []).map(k => ({ value: k.id, label: `${k.name} (${k.key_hint})` }))]} /></div>
       <div className="field"><label htmlFor="usage-group">{t('그룹')}</label><Select id="usage-group" name="group_by" defaultValue={selected.get('group_by') ?? ''} options={[{ value: '', label: t('없음') }, { value: 'provider', label: 'Provider' }, { value: 'model', label: t('모델') }, { value: 'key', label: t('키') }]} /></div>
@@ -50,13 +51,16 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
     {loading && <p role="status">{t('사용량 조회 중…')}</p>}{error && <p role="alert">{error}</p>}{usage && <><UsageView usage={usage} />{usage.buckets.next_cursor && <div className="actions"><button onClick={() => setQuery(`cursor=${encodeURIComponent(usage.buckets.next_cursor!)}`)}>{t('다음 그룹 페이지')}</button></div>}</>}
   </>;
 }
-const pages: Record<Screen, { nav: string; title: string; lead?: string }> = {
+/** 하위 페이지의 상위로 돌아가는 링크. label은 화면에 보이는 글, name은 읽기 도구가 읽는 전체 이름(label을 포함한다). */
+type Back = { href: string; label: string; name: string };
+const toPrincipals: Back = { href: '/dashboard/admin/principals', label: msgid('사용자 목록'), name: msgid('사용자 목록으로 돌아가기') };
+const pages: Record<Screen, { nav: string; title: string; lead?: string; back?: (search: URLSearchParams) => Back }> = {
   '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 관측한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
   '/dashboard/keys': { nav: msgid('내 가상 키'), title: msgid('내 가상 키') },
-  '/dashboard/keys/new': { nav: msgid('내 가상 키'), title: msgid('가상 키 발급'), lead: msgid('연동할 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.') },
+  '/dashboard/keys/new': { nav: msgid('내 가상 키'), title: msgid('가상 키 발급'), lead: msgid('연동할 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.'), back: () => ({ href: '/dashboard/keys', label: msgid('내 가상 키'), name: msgid('내 가상 키로 돌아가기') }) },
   '/dashboard/admin/principals': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 · 정책 · 키'), lead: msgid('사용자와 서비스 계정의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
-  '/dashboard/admin/principals/detail': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 상세'), lead: msgid('사용자 하나의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
-  '/dashboard/admin/principals/key': { nav: msgid('사용자·정책·키 관리'), title: msgid('서비스 계정의 가상 키 발급'), lead: msgid('서비스 계정에 인가된 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.') },
+  '/dashboard/admin/principals/detail': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 상세'), lead: msgid('사용자 하나의 정책, 자동 안전차단, 가상 키를 관리합니다.'), back: () => toPrincipals },
+  '/dashboard/admin/principals/key': { nav: msgid('사용자·정책·키 관리'), title: msgid('서비스 계정의 가상 키 발급'), lead: msgid('서비스 계정에 인가된 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.'), back: search => { const id = search.get('principal_id'); return id ? { href: principalHref(id), label: msgid('사용자 상세'), name: msgid('사용자 상세로 돌아가기') } : toPrincipals; } },
   '/dashboard/admin/keys': { nav: msgid('가상 키 관리'), title: msgid('가상 키 관리'), lead: msgid('모든 사용자와 서비스 계정의 가상 키를 조회하고 회수합니다. 가상 키가 쓰는 Provider 키도 여기서 바꿉니다.') },
   '/dashboard/admin/usage': { nav: msgid('전체 사용량'), title: msgid('전체 사용량'), lead: msgid('사용자·키별 사용량을 조회합니다. 사용자를 지정하지 않은 전체 합계에는 예산 잔액이 없습니다.') },
   '/dashboard/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
@@ -71,7 +75,7 @@ function screenOf(path: string): Screen {
 /** 언어 선택. 각 언어 이름은 그 언어로 적는다. */
 function LanguageSwitch() {
   const { t, i18n } = useTranslation();
-  return <fieldset className="lang-switch"><legend className="sr-only">{t('언어')}</legend>
+  return <fieldset className="segment segment-sm"><legend className="sr-only">{t('언어')}</legend>
     {languages.map(language => <label key={language.code} lang={language.code}><input type="radio" name="language" value={language.code} checked={i18n.language === language.code} onChange={() => changeLanguage(language.code)} />{language.label}</label>)}
   </fieldset>;
 }
@@ -102,7 +106,7 @@ export function App() {
   }, []);
   const route = useRoute(), screen = screenOf(route.path), page = pages[screen];
   const title = useRef<HTMLHeadingElement>(null), firstRoute = useRef(true);
-  const pageTitle = t(page.title);
+  const pageTitle = t(page.title), back = page.back?.(new URLSearchParams(route.search));
   useEffect(() => { document.title = `${pageTitle} · m-gated`; }, [pageTitle]);
   useEffect(() => {
     // 첫 진입은 브라우저 기본 초점을 두고, 화면 전환 뒤에만 새 화면 제목으로 초점을 옮긴다.
@@ -127,7 +131,9 @@ export function App() {
       <div className="sidebar-foot"><TimeSwitch /><LanguageSwitch /></div>
     </aside>
     <main className="content"><div className="page">
-      <header className="page-header"><h1 className="page-title" tabIndex={-1} ref={title}>{pageTitle}</h1>{page.lead && <p className="lead">{t(page.lead)}</p>}</header>
+      <header className="page-header">
+        {back && <Link className="back-link" href={back.href} aria-label={t(back.name)}><svg className="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" /></svg>{t(back.label)}</Link>}
+        <h1 className="page-title" tabIndex={-1} ref={title}>{pageTitle}</h1>{page.lead && <p className="lead">{t(page.lead)}</p>}</header>
       {auth.status === 'checking' && <p role="status">{t('인증 확인 중…')}</p>}
       {auth.status === 'error' && <div className="auth-state"><p role="alert">{auth.error && t(auth.error)}</p><div className="actions"><a className="btn btn-primary" href="/auth/login">{t('SSO 로그인')}</a><button onClick={() => void session.validate()}>{t('다시 확인')}</button></div></div>}
       {(auth.status === 'ready' || auth.refreshing) && <div key={route.href} className="stack-lg">{content}</div>}

@@ -6,7 +6,8 @@ import type { AuthorizedCredentials, Grant, IssuedKey, KeyMetadata, Limits, Page
 import { credentialLabel, providerNames } from '../admin/credentials';
 import { useTimeFormat } from '../../lib/time';
 import { Link, navigate } from '../../lib/router';
-import { Badge, IconButton, Modal, Pill, SearchSelect, Select, Time } from '../../ui/ui';
+import { Badge, IconButton, Modal, Pill, SearchSelect, Select, Time, TipBadge } from '../../ui/ui';
+import { GrantTable } from '../../ui/grant-table';
 import { EditKeyModal } from './keys-edit';
 
 /** 발급된 키와 복사 버튼. 사용자가 누를 때만 클립보드에 쓰고, 키 창이 닫히면 상태도 함께 사라진다. */
@@ -49,7 +50,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   const { t } = useTranslation();
   const issuing = view === 'issue', canIssue = !adminAll && (!adminPrincipal || adminPrincipal.service);
   const issueHref = keyIssueHref(adminPrincipal?.id), listHref = keyListHref(adminPrincipal?.id);
-  const prefix = useId(), isAdmin = !!adminPrincipal || adminAll;
+  const prefix = useId();
   const listUrl = adminPrincipal ? `/api/admin/keys?principal_id=${encodeURIComponent(adminPrincipal.id)}` : adminAll ? '/api/admin/keys' : '/api/keys';
   const availableGrants = adminPrincipal?.grants;
   const auth = useSyncExternalStore(session.subscribe, session.snapshot);
@@ -96,6 +97,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   const policyProviders = [...new Set(grantList.map(grant => grant.provider))];
   const linkable = policyProviders.filter(provider => authorizedFor(provider).length > 0);
   const chosenProviders = linkable.filter(provider => authorizedFor(provider).some(c => c.id === chosen[provider]));
+  // 허용할 API 표의 줄. Provider 키를 고른 Provider의 API만 보인다. key는 `정책 grant 순번:기능 순번`이다.
+  const grantRows = grantList.flatMap((g, gi) => chosenProviders.includes(g.provider) ? g.capabilities.map((capability, ci) => ({ key: `${gi}:${ci}`, provider: g.provider, providerLabel: providerNames[g.provider] ?? g.provider, model: g.model, capability })) : []);
   const grantedProviders = new Set(grantList.flatMap((grant, gi) => grant.capabilities.some((_, ci) => granted.has(`${gi}:${ci}`)) ? [grant.provider] : []));
   // Provider 키를 골랐는데 그 Provider의 API를 하나도 허용하지 않은 Provider.
   const withoutApi = chosenProviders.filter(provider => !grantedProviders.has(provider));
@@ -174,18 +177,25 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   const labelOf = (provider: string, id: string) => { const c = authorizedFor(provider).find(x => x.id === id); return c ? credentialLabel(c) : id; };
   // 상세 창은 목록을 다시 읽으면 새 값을 보여 준다.
   const shown = detail && (page?.items.find(k => k.id === detail.id) ?? detail);
-  return <section aria-labelledby={`${prefix}-keys-heading`} className="stack-lg">
-    {issuing && <p><Link href={listHref}>{adminPrincipal ? t('← 사용자 상세') : t('← 내 가상 키')}</Link></p>}
-    <div className="stack-sm"><div className="row row-between"><h2 id={`${prefix}-keys-heading`}>{issuing ? issueTitle : isAdmin ? t('사용자의 가상 키') : t('내 가상 키')}</h2>{!issuing && canIssue && <Link className="btn btn-primary" href={issueHref}>{issueTitle}</Link>}</div>
-    <p className="lead">{t('가상 키는 추론 전용이며, 추론 요청은 가상 키로만 보냅니다. 권한·한도는 현재 서버 정책과 발급 상한의 교집합이며 키는 다시 볼 수 없습니다.')}</p></div>
+  // 발급할 수 없는 이유. 정책에 허용된 API가 없거나, 그 Provider에 인가된 Provider 키가 없을 때다.
+  const blocked = !canIssue ? null : !grantList.length
+    ? (adminPrincipal ? t('정책에 허용된 API가 없어 가상 키를 발급할 수 없습니다. 이 서비스 계정의 정책에서 API를 먼저 허용하세요.') : t('정책에 허용된 API가 없어 가상 키를 발급할 수 없습니다. 관리자에게 쓸 모델·API를 허용해 달라고 요청하세요.'))
+    : linkable.length === 0 ? (adminPrincipal ? t('이 서비스 계정에 인가된 Provider 키가 없어 가상 키를 발급할 수 없습니다. 사용자 상세의 Provider 키 인가에서 먼저 인가하세요.') : t('나에게 인가된 Provider 키가 없어 가상 키를 발급할 수 없습니다. 관리자에게 Provider 키 인가를 요청하세요.')) : null;
+  // 페이지 제목이 이미 화면 이름을 말하는 곳(내 가상 키, 가상 키 발급, 가상 키 관리)에서는 소제목과 설명을 다시 적지 않는다.
+  // 사용자 상세 안에 들어간 목록만 소제목을 둔다.
+  const embedded = !!adminPrincipal && !issuing;
+  return <section aria-labelledby={embedded ? `${prefix}-keys-heading` : undefined} aria-label={embedded ? undefined : issuing ? issueTitle : adminAll ? t('가상 키 관리') : t('내 가상 키')} className="stack-lg">
+    {embedded && <div className="stack-sm"><h2 id={`${prefix}-keys-heading`}>{t('사용자의 가상 키')}</h2>
+    <p className="lead">{t('가상 키는 추론 전용이며, 추론 요청은 가상 키로만 보냅니다. 권한·한도는 현재 서버 정책과 발급 상한의 교집합이며 키는 다시 볼 수 없습니다.')}</p></div>}
+    {!issuing && canIssue && (blocked ? <p className="callout callout-neutral">{blocked}</p> : <div className="actions"><Link className="btn btn-primary" href={issueHref}>{issueTitle}</Link></div>)}
     {error && <p role="alert">{error}</p>}{listError && (!issuing || recovery) && <p role="alert">{listError}</p>}{notice && <p role="status">{notice}</p>}
     {secret?.epoch === auth.epoch && <Modal title={t('발급된 키')} closeOnBackdrop={false} onClose={closeSecret} actions={<button type="button" className="btn-primary" onClick={closeSecret}>{t('닫기')}</button>}>
       <p className="text-warning">{t('키는 다시 볼 수 없습니다. 안전한 곳에 옮긴 뒤 닫으세요. 자동으로 복사·저장하지 않으며, 복사 버튼을 누를 때만 클립보드에 넣습니다.')}</p>
       <SecretValue value={secret.value} />
     </Modal>}
     {recovery && <section aria-label={t('명령 결과 확인')} className="panel-warning"><h3>{t('명령 결과 확인')}</h3><p>{t('명령 ID')}: <code>{recovery.commandId}</code></p><p className="meta">{t('자동 재발급·재전송하지 않습니다. 목록은 페이지 단위이므로 다음 페이지도 확인하세요.')}</p>{resolved ? <p>{t('연결된 키: {{id}} · {{state}}', { id: resolved.id, state: resolved.revoked_at ? t('회수됨') : t('키 복구 불가, 회수 후 명시적으로 새 발급') })}</p> : <p>{t('현재 페이지에서 결과를 찾지 못했습니다. 실패로 단정하거나 다시 발급하지 마세요.')}</p>}<div className="actions"><button className="btn-sm" disabled={loading || busy} onClick={reload}>{t('명령 결과 다시 조회')}</button></div></section>}
-    {issuing && canIssue && (linkable.length === 0
-      ? <p className="callout callout-critical">{!grantList.length ? t('정책에 허용된 API가 없어 가상 키를 발급할 수 없습니다.') : adminPrincipal ? t('이 서비스 계정에 인가된 Provider 키가 없어 가상 키를 발급할 수 없습니다. 사용자 상세의 Provider 키 인가에서 먼저 인가하세요.') : t('나에게 인가된 Provider 키가 없어 가상 키를 발급할 수 없습니다. 관리자에게 Provider 키 인가를 요청하세요.')}</p>
+    {issuing && canIssue && (blocked
+      ? <p className="callout callout-critical">{blocked}</p>
       : <form key={auth.epoch} aria-label={issueTitle} onSubmit={prepare}>
       <fieldset disabled={busy || !!recovery} className="group"><legend>{issueTitle}</legend>
         <div className="form-grid">
@@ -203,7 +213,9 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
         </fieldset>
         <fieldset className="stack-sm"><legend>{t('허용할 API (연동한 Provider마다 1개 이상 필수)')}</legend>
           {chosenProviders.length === 0 ? <p className="meta">{t('Provider 키를 먼저 고르면 그 Provider의 API를 고를 수 있습니다.')}</p>
-            : <div className="checks">{grantList.flatMap((g, gi) => chosenProviders.includes(g.provider) ? g.capabilities.map((cap, ci) => { const value = `${gi}:${ci}`; return <label key={value}><input type="checkbox" name="grant" value={value} checked={granted.has(value)} onChange={e => { const on = e.currentTarget.checked; setGranted(prev => { const next = new Set(prev); if (on) next.add(value); else next.delete(value); return next; }); }} />{g.provider} / {g.model} / {cap}</label>; }) : [])}</div>}
+            : <GrantTable rows={grantRows} selected={granted}
+              onToggle={(value, on) => setGranted(prev => { const next = new Set(prev); if (on) next.add(value); else next.delete(value); return next; })}
+              onAll={on => setGranted(prev => { const next = new Set(prev); for (const r of grantRows) { if (on) next.add(r.key); else next.delete(r.key); } return next; })} />}
         </fieldset>
         <p className="meta">{t('빈 한도는 서버의 실행 상한으로 정규화됩니다. 현재 정책을 우회하지 않습니다.')}</p>
         <div className="form-grid">
@@ -245,11 +257,11 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
           {adminAll && <td><Link href={keyListHref(key.principal_id)}>{key.owner.email ?? key.owner.display_name}</Link>{key.owner.kind === 'service' && <> <Pill>{t('서비스')}</Pill></>}</td>}
           <td>{key.revoked_at ? <Badge tone="neutral">{t('회수됨')}</Badge> : expired ? <Badge tone="neutral">{t('만료')}</Badge> : <Badge tone="success">{t('활성')}</Badge>}{key.revoked_at && <p className="meta">{format(key.revoked_at)}</p>}</td>
           <td>{t(durationName(key.validity))}</td>
-          <td>{format(key.created_at)}</td>
-          <td>{key.expires_at ? format(key.expires_at) : t('없음')}</td>
-          <td><div className="stack-sm" aria-label={t('{{name}} Provider 키 연결', { name: key.name })}>{(key.provider_credentials ?? []).length === 0 ? <p className="meta">{t('Provider 키: 연결 없음')}</p> : (key.provider_credentials ?? []).map(b => { return <div key={b.provider} className="row">
-          <span className="meta">{t('Provider 키')}: {providerNames[b.provider] ?? b.provider} · {credentialLabel(b)}{b.state === 'retired' && <> <Badge tone="neutral">{t('해제됨')}</Badge></>}</span>
-          {b.authorized === false && !key.revoked_at && <><Badge tone="critical">{t('인가 해제됨')}</Badge><span className="text-critical">{t('이 Provider 키의 사용 인가가 해제돼 이 키로 보내는 {{provider}} 요청은 거절됩니다.', { provider: providerNames[b.provider] ?? b.provider })}{` ${t('수정에서 인가된 Provider 키로 다시 연결하세요.')}`}</span></>}
+          <td className="nowrap">{format(key.created_at)}</td>
+          <td className="nowrap">{key.expires_at ? format(key.expires_at) : t('없음')}</td>
+          <td><div className="stack-sm" aria-label={t('{{name}} Provider 키 연결', { name: key.name })}>{(key.provider_credentials ?? []).length === 0 ? <p className="meta">{t('연결 없음')}</p> : (key.provider_credentials ?? []).map(b => { return <div key={b.provider} className="row">
+          <span className="meta">{providerNames[b.provider] ?? b.provider} · {b.label}{b.state === 'retired' && <> <Badge tone="neutral">{t('해제됨')}</Badge></>}</span>
+          {b.authorized === false && !key.revoked_at && <TipBadge tone="critical" tip={`${t('이 Provider 키의 사용 인가가 해제돼 이 키로 보내는 {{provider}} 요청은 거절됩니다.', { provider: providerNames[b.provider] ?? b.provider })} ${t('수정에서 인가된 Provider 키로 다시 연결하세요.')}`}>{t('인가 해제됨')}</TipBadge>}
         </div>; })}</div></td>
           <td><div className="actions"><IconButton icon="detail" label={t('{{name}} 상세', { name: key.name })} tip={t('상세')} onClick={() => setDetail(key)} />{!key.revoked_at && <>{!expired && <IconButton icon="edit" label={t('{{name}} 수정', { name: key.name })} tip={t('수정')} disabled={busy || loading} onClick={() => { setError(null); setNotice(null); setEditing(key); }} />}<IconButton icon="revoke" danger label={t('{{name}} 회수', { name: key.name })} tip={t('키 회수')} disabled={busy || loading} onClick={() => { setSecret(null); setConfirmation({ kind: 'revoke', key }); }} /></>}</div></td>
         </tr>; })}</tbody>

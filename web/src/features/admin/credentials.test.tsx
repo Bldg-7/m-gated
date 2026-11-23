@@ -205,7 +205,10 @@ test('admin_chooses_only_from_own_authorized_provider_keys_when_issuing', async 
   // 키 창을 닫으면 목록 페이지로 돌아가 새 키와 그 Provider 키 연결을 보여 준다.
   const binding = await screen.findByLabelText('새 키 Provider 키 연결');
   expect(location.pathname).toBe('/dashboard/keys');
-  expect(binding.textContent).toContain('Provider 키: Anthropic · team-b (…0002)');
+  // 표의 Provider 키 칸은 열 이름과 겹치는 앞말과 끝 4자리 없이 Provider와 이름만 보여 준다.
+  expect(binding.textContent).toContain('Anthropic · team-b');
+  expect(binding.textContent).not.toContain('…0002');
+  expect(binding.textContent).not.toContain('Provider 키:');
   expect(calls.find(c => c.method === 'POST' && c.url === '/api/keys')?.body?.provider_credentials).toEqual({ anthropic: 'credB' });
   // 관리자도 발급할 때 전체 Provider 키 목록을 읽지 않는다.
   expect(calls.some(c => c.url === '/api/admin/provider-credentials')).toBe(false);

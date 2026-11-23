@@ -1,4 +1,4 @@
-import { test, expect, type BrowserContext, type Page, type Route } from '@playwright/test';
+import { test, expect, type BrowserContext, type Locator, type Page, type Route } from '@playwright/test';
 import { ensureProviderKey, pickOption, pickValue } from './select';
 const origin = 'https://m-gated.example.test', transport = process.env.E2E_BASE_URL!;
 const service = process.env.E2E_SERVICE_ID!, alice = process.env.E2E_ADMIN_ID!, bob = process.env.E2E_BOB_ID!;
@@ -8,9 +8,11 @@ async function auth(context: BrowserContext, token = process.env.E2E_TOKEN!) { a
 async function forward(route: Route, base = transport) { const r = route.request(), u = new URL(r.url()); return route.fetch({ url: `${base}${u.pathname}${u.search}`, headers: await r.allHeaders(), maxRetries: 0, maxRedirects: 0 }); }
 async function open(page: Page, context: BrowserContext, path: string) { page.on('response', r => { const p = new URL(r.url()).pathname; if (p.startsWith('/api/')) test.info().annotations.push({ type: 'admin-http', description: `${p === '/api/me' ? 'me' : p.includes('/settlement') ? 'settle' : p.includes('/policy') ? 'policy' : p.includes('/release') ? 'release' : p.includes('/usage') ? 'usage' : p.includes('/requests') ? 'requests' : 'principals'}:${r.status()}` }); }); await auth(context); await page.goto(`${origin}${path}`); }
 async function execute(page: Page) { await page.getByRole('button', { name: '명령 실행', exact: true }).focus(); await page.keyboard.press('Enter'); await expect(page.getByRole('status').filter({ hasText: '서버 재조회 완료' })).toBeVisible(); }
+/** 요약 카드의 정지·정지 해제 버튼을 누르고 확인 창에서 사유를 넣어 실행한다. 서버 재조회가 끝날 때까지 기다린다. */
+async function suspend(page: Page, detail: Locator, button: string, label: string, reason: string) { await detail.getByRole('button', { name: button, exact: true }).click(); const dialog = page.getByRole('dialog'); await dialog.getByLabel(label, { exact: true }).fill(reason); await dialog.getByRole('button', { name: button, exact: true }).click(); await expect(page.getByRole('status').filter({ hasText: '서버 재조회 완료' })).toBeVisible(); }
 async function json(page: Page, path: string) { return page.evaluate(async path => { const r = await fetch(path); return { status: r.status, body: await r.json() }; }, path); }
 async function cookieCommand(page: Page, path: string, body: unknown) { return page.evaluate(async ({ path, body }) => { const csrf = await (await fetch('/api/csrf')).json(); const r = await fetch(path, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf.token, 'X-Gateway-Command-ID': crypto.randomUUID() }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; }, { path, body }); }
-async function prepareSettlement(page: Page, cost: string, reason: string) { await pickOption(page.getByLabel('처리 결정', { exact: true }), cost === '0.000000000000' ? '무과금' : '과금'); await page.getByLabel('처리 금액 USD', { exact: true }).fill(cost); await page.getByLabel('수동 처리 사유', { exact: true }).fill(reason); const confirm = page.getByLabel('대상 executor 실행 종료를 확인했습니다 (관리자 진술)', { exact: true }); if (await confirm.count()) await confirm.check(); await page.getByRole('button', { name: '수동 정산 확인', exact: true }).click(); }
+async function prepareSettlement(page: Page, cost: string, reason: string) { await page.getByRole('group', { name: '처리 결정', exact: true }).getByText(cost === '0.000000000000' ? '무과금' : '과금', { exact: true }).click(); await page.getByLabel('처리 금액 USD', { exact: true }).fill(cost); await page.getByLabel('수동 처리 사유', { exact: true }).fill(reason); const confirm = page.getByLabel('대상 executor 실행 종료를 확인했습니다 (관리자 진술)', { exact: true }); if (await confirm.count()) await confirm.check(); await page.getByRole('button', { name: '수동 정산 확인', exact: true }).click(); }
 test.beforeEach(async ({ context }) => { await context.route('**/*', async route => { if (new URL(route.request().url()).origin !== origin) return route.abort('blockedbyclient'); const response = await forward(route); await route.fulfill({ response }); }); });
 
 test('admin_principal_separate_three_cas_ack_get_policy_conflict_and_safety', async ({ page, context }) => {
@@ -26,7 +28,7 @@ test('admin_principal_separate_three_cas_ack_get_policy_conflict_and_safety', as
   await detail.getByLabel('분당 요청 수 한도 (RPM)', { exact: true }).fill('11');
   await detail.getByLabel('정책 변경 사유', { exact: true }).fill('안전차단 비승계 정책 확인');
   await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click(); await execute(page);
-  expect(writes[1].version).toBe('13'); await expect(detail.getByRole('region', { name: '자동 안전차단', exact: true })).toContainText('차단 중 · 안전 버전 29');
+  expect(writes[1].version).toBe('13'); await expect(detail.getByRole('region', { name: '자동과금 차단됨', exact: true })).toContainText('유료 요청을 막고 있습니다');
   await detail.getByLabel('정책 변경 사유', { exact: true }).fill('stale 편집');
   await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click();
   await page.request.post(`${process.env.E2E_CONTROL_URL}/stale-policy`);
@@ -132,7 +134,7 @@ test('admin_direct_ids_role_demotion403_purges_forms_cache_and_late_payload', as
     // 상세를 다시 읽는 중에 목록으로 돌아가면, 목록 조회가 강등된 권한으로 403을 받는다. 늦게 온 상세 응답은 그리지 않는다.
     await page.route(`${origin}/api/admin/principals`, async route => route.fulfill({ response: await forward(route, process.env.E2E_DEMOTED_URL!) }));
     await page.route(`${origin}/api/me`, async route => route.fulfill({ response: await forward(route, process.env.E2E_DEMOTED_URL!) }));
-    await page.getByRole('link', { name: '← 사용자 목록', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('관리자 권한이 없습니다'); release.release();
+    await page.getByRole('link', { name: '사용자 목록으로 돌아가기', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('관리자 권한이 없습니다'); release.release();
     await expect(page.getByRole('region', { name: '사용자 상세', exact: true })).toHaveCount(0); expect(await page.locator('main').textContent()).not.toContain('비공개 관리자 폼'); await expect(page.getByRole('link', { name: '사용자·정책·키 관리', exact: true })).toHaveCount(0);
   } finally { release.release(); }
   const regular = await context.newPage(); await auth(context, process.env.E2E_USER_TOKEN!); await regular.goto(`${origin}/dashboard/admin/requests?request_id=${process.env.E2E_RUNTIME_REQUEST}`); await expect(regular.getByRole('alert')).toContainText('관리자 권한이 없습니다'); expect((await json(regular, `/api/admin/requests/${process.env.E2E_RUNTIME_REQUEST}`)).status).toBe(403); expect((await json(regular, `/api/admin/principals/${service}`)).status).toBe(403); await regular.close();
@@ -153,12 +155,22 @@ test('admin_failed_empty_loading_and_lost_ack_never_replays_writes', async ({ pa
 test('admin_self_fence_and_stale_safety_require_separate_explicit_confirmation', async ({ page, context }) => {
   await open(page, context, `/dashboard/admin/principals?principal_id=${alice}`);
   let detail = page.getByRole('region', { name: '사용자 상세', exact: true });
-  await detail.getByLabel('관리용 계정 정지', { exact: true }).check(); await detail.getByLabel('정책 변경 사유', { exact: true }).fill('자기 정지 거부'); await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click(); await execute(page); await expect(detail).toContainText('자기·마지막 관리자 정지'); expect((await json(page, `/api/admin/principals/${alice}`)).body.principal.policy.disabled).toBe(false);
+  // 자기 계정의 정지 버튼은 눌리지 않는다. 화면을 거치지 않고 보내도 서버가 거절한다.
+  await expect(detail.getByRole('button', { name: '이 계정 정지', exact: true })).toBeDisabled();
+  const self = (await json(page, `/api/admin/principals/${alice}`)).body.principal;
+  expect((await cookieCommand(page, `/api/admin/principals/${alice}/policy`, { expected_version: self.policy.version, disabled: true, grants: self.policy.grants, limits: self.policy.limits, reason: '자기 정지 거부' })).status).toBe(409);
+  expect((await json(page, `/api/admin/principals/${alice}`)).body.principal.policy.disabled).toBe(false);
   await page.goto(`${origin}/dashboard/admin/principals?principal_id=${service}`); detail = page.getByRole('region', { name: '사용자 상세', exact: true });
-  await detail.getByLabel('관리용 계정 정지', { exact: true }).check(); await detail.getByLabel('정책 변경 사유', { exact: true }).fill('security_config_fence:u2-ref'); await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click(); await execute(page);
-  await detail.getByLabel('관리용 계정 정지', { exact: true }).uncheck(); await detail.getByLabel('정책 변경 사유', { exact: true }).fill('일반 해제로 fence 우회 금지'); await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click(); await execute(page); await expect(detail).toContainText('보안 fence 해제 조건'); expect((await json(page, `/api/admin/principals/${service}`)).body.principal.policy.disabled).toBe(true);
-  await detail.getByLabel('관리용 계정 정지', { exact: true }).uncheck(); await detail.getByLabel('정책 변경 사유', { exact: true }).fill('구 프로세스 종료 확인'); await detail.getByText('보안 설정 fence 해제 진술', { exact: true }).click(); await detail.getByLabel('Fence 참조', { exact: true }).fill('u2-ref'); await detail.getByLabel('구 프로세스 종료 확인 참조', { exact: true }).fill('synthetic-processes-stopped'); await detail.getByLabel('구 설정 프로세스 종료를 확인했습니다', { exact: true }).check(); await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click(); await execute(page); expect((await json(page, `/api/admin/principals/${service}`)).body.principal.policy.disabled).toBe(false);
-  await detail.getByLabel('안전차단 해제 사유', { exact: true }).fill('새 원인 경합'); await detail.getByLabel('과금 원인과 남은 차단을 확인했습니다', { exact: true }).check(); await detail.getByRole('button', { name: '명시 해제 확인', exact: true }).click(); const cause = await page.request.post(`${process.env.E2E_CONTROL_URL}/new-safety-cause`); expect(cause.status()).toBe(204); await execute(page); await expect(detail).toContainText('버전이 변경되었습니다.');
+  // 정지는 요약 카드의 버튼으로 하고, 사유는 확인 창에서 받는다.
+  await suspend(page, detail, '이 계정 정지', '정지 사유', 'security_config_fence:u2-ref'); expect((await json(page, `/api/admin/principals/${service}`)).body.principal.policy.disabled).toBe(true);
+  // 서버가 잠근 계정은 화면의 정지 해제로 풀리지 않는다.
+  await suspend(page, detail, '정지 해제', '정지 해제 사유', '일반 해제로 잠금 우회 금지'); await expect(detail).toContainText('이관 중 잠긴 계정'); expect((await json(page, `/api/admin/principals/${service}`)).body.principal.policy.disabled).toBe(true);
+  const fenced = (await json(page, `/api/admin/principals/${service}`)).body.principal;
+  expect((await cookieCommand(page, `/api/admin/principals/${service}/policy`, { expected_version: fenced.policy.version, disabled: false, grants: fenced.policy.grants, limits: fenced.policy.limits, reason: '구 프로세스 종료 확인', fence_release: { fence_ref: 'u2-ref', old_processes_stopped_ref: 'synthetic-processes-stopped', confirmed: true } })).status).toBe(200);
+  await page.reload(); expect((await json(page, `/api/admin/principals/${service}`)).body.principal.policy.disabled).toBe(false);
+  // 해제 상태에서는 자동과금 차단 섹션이 없다. 새 원인으로 다시 차단되면 그 차단을 따로 확인하고 명시 해제해야 한다.
+  const safety = detail.getByRole('region', { name: '자동과금 차단됨', exact: true }); await expect(safety).toHaveCount(0); await expect(detail.getByLabel('안전차단 해제 사유', { exact: true })).toHaveCount(0);
+  const cause = await page.request.post(`${process.env.E2E_CONTROL_URL}/new-safety-cause`); expect(cause.status()).toBe(204); await page.reload(); await expect(safety).toContainText('유료 요청을 막고 있습니다');
   const paused = (await json(page, `/api/admin/principals/${service}`)).body.principal; expect(paused.inference_safety.paused).toBe(true); expect(paused.block_state.global_unknown_count).toBe('2');
   await detail.getByLabel('안전차단 해제 사유', { exact: true }).fill('새 원인을 재확인한 명시 해제'); await detail.getByLabel('과금 원인과 남은 차단을 확인했습니다', { exact: true }).check(); await detail.getByRole('button', { name: '명시 해제 확인', exact: true }).click(); await execute(page); const released = (await json(page, `/api/admin/principals/${service}`)).body.principal; expect(released.inference_safety.paused).toBe(false); expect(released.block_state.global_unknown_count).toBe('2'); expect(released.block_state.blocked).toBe(true);
 });
@@ -168,8 +180,8 @@ test('admin_mutual_last_admin_policy_race_preserves_one_current_admin', async ({
   const other = await browser.newContext(); await auth(other, process.env.E2E_BOB_TOKEN!); await other.route('**/*', async route => { if (new URL(route.request().url()).origin !== origin) return route.abort(); return route.fulfill({ response: await forward(route, process.env.E2E_PEER_URL!) }); }); const second = await other.newPage(); await second.goto(`${origin}/dashboard/admin/principals?principal_id=${alice}`);
   const entered1 = barrier(), entered2 = barrier(), release = barrier(), statuses: number[] = [];
   for (const [p, target, entered, base] of [[page, bob, entered1, transport], [second, alice, entered2, process.env.E2E_PEER_URL!]] as const) {
-    const detail = p.getByRole('region', { name: '사용자 상세', exact: true }); await detail.getByLabel('관리용 계정 정지', { exact: true }).check(); await detail.getByLabel('정책 변경 사유', { exact: true }).fill('동시 상호 마지막 admin 정지 보호'); await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click();
+    const detail = p.getByRole('region', { name: '사용자 상세', exact: true }); await detail.getByRole('button', { name: '이 계정 정지', exact: true }).click(); await p.getByRole('dialog').getByLabel('정지 사유', { exact: true }).fill('동시 상호 마지막 admin 정지 보호');
     await p.route(`${origin}/api/admin/principals/${target}/policy`, async route => { entered.release(); await release.promise; const response = await forward(route, base); statuses.push(response.status()); test.info().annotations.push({ type: 'admin-http', description: `policy:${response.status()}` }); return route.fulfill({ response }); });
   }
-  try { await Promise.all([page.getByRole('button', { name: '명령 실행', exact: true }).click(), second.getByRole('button', { name: '명령 실행', exact: true }).click()]); await Promise.all([entered1.promise, entered2.promise]); release.release(); await expect(page.getByRole('status').filter({hasText:'서버 재조회 완료'}).or(page.getByRole('alert'))).toBeVisible(); await expect(second.getByRole('status').filter({hasText:'서버 재조회 완료'}).or(second.getByRole('alert'))).toBeVisible(); expect(statuses.sort()).toEqual([200, 403]); } finally { release.release(); await other.close(); }
+  try { await Promise.all([page.getByRole('dialog').getByRole('button', { name: '이 계정 정지', exact: true }).click(), second.getByRole('dialog').getByRole('button', { name: '이 계정 정지', exact: true }).click()]); await Promise.all([entered1.promise, entered2.promise]); release.release(); await expect(page.getByRole('status').filter({hasText:'서버 재조회 완료'}).or(page.getByRole('alert'))).toBeVisible(); await expect(second.getByRole('status').filter({hasText:'서버 재조회 완료'}).or(second.getByRole('alert'))).toBeVisible(); expect(statuses.sort()).toEqual([200, 403]); } finally { release.release(); await other.close(); }
 });

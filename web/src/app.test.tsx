@@ -1,14 +1,18 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from './app';
 import { session } from './lib/api';
 import type { Me, Usage } from './lib/types';
 import { shownText } from './test-text';
+import { pickOption, selectedValue } from './test-select';
 
 const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', sso: { refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const usage: Usage = { currency: 'USD', from: '2026-01-01T00:00:00Z', to: '2026-02-01T00:00:00Z', as_of: '2026-02-01T00:00:00Z', detail_available_from: null, aggregation: 'detail', settled_usd: '0.000000000001', held_reservation_usd: '0.000000000000', period_unknown_count: '0', global_unknown_count: '0', global_expired_dispatch_count: '0', block_state: null, balance_context: 'current_principal', budget_balances: [], buckets: { items: [], next_cursor: null, as_of: '2026-02-01T00:00:00Z' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
+// 내 사용량의 모델 칸은 내 요청 기록의 모델(/api/usage/models)에서 고른다.
+const myModels = () => response({ items: ['same-human', 'old-private-filter', 'private-query'].map(model => ({ provider: 'anthropic', model })) });
+const pickModel = (model: string) => waitFor(() => pickOption(screen.getByLabelText('모델'), new RegExp(`^${model}`)));
 afterEach(() => { cleanup(); session.clear(); vi.unstubAllGlobals(); });
 
 test('app_refresh_retries_the_same_usage_url_once_and_preserves_explicit_queries', async () => {
@@ -20,12 +24,13 @@ test('app_refresh_retries_the_same_usage_url_once_and_preserves_explicit_queries
     if (path === '/api/me') return Promise.resolve(response(me));
     if (path === me.sso.refresh_url) return refresh.promise;
     if (path === url && ++reads === 1) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
+    if (String(input) === '/api/usage/models') return Promise.resolve(myModels());
     return Promise.resolve(response(usage));
   });
   vi.stubGlobal('fetch', fetcher);
   render(<App />);
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
-  fireEvent.change(screen.getByLabelText('모델'), { target: { value: 'same-human' } });
+  await pickModel('same-human');
   fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   await screen.findByText('인증 확인 중…');
   expect(screen.queryByText('Synthetic')).toBeNull();
@@ -34,7 +39,7 @@ test('app_refresh_retries_the_same_usage_url_once_and_preserves_explicit_queries
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
   expect(reads).toBe(2);
   expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
-  expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('same-human');
+  expect(selectedValue(screen.getByLabelText('모델'))).toBe('same-human');
   fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
   expect(reads).toBe(3);
@@ -50,17 +55,18 @@ test('app_refresh_to_another_principal_discards_the_old_query_and_payload', asyn
     if (path === '/api/me') return Promise.resolve(response(++meReads === 1 ? me : other));
     if (path === me.sso.refresh_url) return refresh.promise;
     if (path.includes('old-private-filter')) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
+    if (String(input) === '/api/usage/models') return Promise.resolve(myModels());
     return Promise.resolve(response(usage));
   }));
   render(<App />);
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
-  fireEvent.change(screen.getByLabelText('모델'), { target: { value: 'old-private-filter' } });
+  await pickModel('old-private-filter');
   fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   await screen.findByText('인증 확인 중…');
   await act(async () => { refresh.resolve(response({})); });
   await screen.findByText('Second');
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
-  expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('');
+  expect(selectedValue(screen.getByLabelText('모델'))).toBe('');
   expect(paths.filter(path => path.includes('old-private-filter'))).toHaveLength(1);
   expect(paths.filter(path => path === '/api/usage?group_by=provider')).toHaveLength(2);
 });
@@ -84,12 +90,13 @@ test.each(['validate', 'refresh'] as const)('app_discards_final_me_after_microta
     if (url === '/api/me') return Promise.resolve(path === 'validate' || ++meReads === 2 ? held : response(me));
     if (url === me.sso.refresh_url) return Promise.resolve(response({}));
     if (url.includes('private-query')) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
+    if (String(input) === '/api/usage/models') return Promise.resolve(myModels());
     return Promise.resolve(response(usage));
   }));
   render(<App />);
   if (path === 'refresh') {
     await screen.findByRole('heading', { name: '조회 기간 사용량' });
-    fireEvent.change(screen.getByLabelText('모델'), { target: { value: 'private-query' } });
+    await pickModel('private-query');
     fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   }
   await enteredJson.promise;
@@ -129,11 +136,12 @@ test.each(['initial', 'retry'] as const)('app_stale_401_after_logout_never_resto
       if (path === 'retry' && reads === 1) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
       if (reads === (path === 'retry' ? 2 : 1)) return Promise.resolve(held);
     }
+    if (String(input) === '/api/usage/models') return Promise.resolve(myModels());
     return Promise.resolve(response(usage));
   }));
   render(<App />);
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
-  fireEvent.change(screen.getByLabelText('모델'), { target: { value: 'private-query' } });
+  await pickModel('private-query');
   fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   await enteredJson.promise;
   const before = paths.length;
@@ -172,11 +180,12 @@ test.each(['initial', 'retry'] as const)('app_discards_delayed_success_after_mic
       if (path === 'retry' && reads === 1) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
       return Promise.resolve(held);
     }
+    if (String(input) === '/api/usage/models') return Promise.resolve(myModels());
     return Promise.resolve(response(usage));
   }));
   render(<App />);
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
-  fireEvent.change(screen.getByLabelText('모델'), { target: { value: 'private-query' } });
+  await pickModel('private-query');
   fireEvent.submit(screen.getByRole('form', { name: '사용량 조회' }));
   await enteredJson.promise;
   const before = paths.length;
@@ -206,6 +215,7 @@ test.each(['logout', 'auth-change'] as const)('app_consumer_discards_already_com
   let meReads = 0, usageReads = 0;
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     if (String(input) === '/api/me') return Promise.resolve(response(++meReads === 1 ? me : other));
+    if (String(input) === '/api/usage/models') return Promise.resolve(myModels());
     return Promise.resolve(response({ ...usage, settled_usd: ++usageReads === 1 ? '123.000000000001' : '2.000000000002' }));
   });
   vi.stubGlobal('fetch', fetcher);
@@ -213,7 +223,8 @@ test.each(['logout', 'auth-change'] as const)('app_consumer_discards_already_com
   let deliveries = 0;
   const delayedConsumer = vi.spyOn(session, 'read').mockImplementation(async <T,>(url: string): Promise<T> => {
     const data = await read<T>(url);
-    if (++deliveries === 1) {
+    // 모델 후보 읽기는 세지 않는다. 사용량 읽기의 첫 전달만 보류한다.
+    if (url.startsWith('/api/usage?') && ++deliveries === 1) {
       // Session이 정상 반환을 완료한 뒤 화면 소비만 보류한다. API의 미래 예측 시험이 아니다.
       committed.resolve();
       await consume.promise;
@@ -228,7 +239,7 @@ test.each(['logout', 'auth-change'] as const)('app_consumer_discards_already_com
     else {
       await screen.findByText('Second');
       await screen.findByRole('heading', { name: '조회 기간 사용량' });
-      expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('');
+      expect(selectedValue(screen.getByLabelText('모델'))).toBe('');
     }
     const requests = fetcher.mock.calls.length;
     await act(async () => { consume.resolve(); });

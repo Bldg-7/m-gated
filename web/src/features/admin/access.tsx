@@ -14,7 +14,8 @@ type Body = { provider: string; credential_ids: string[]; expected: { credential
  * 사용자 하나가 쓸 수 있는 Provider 키(인가). 사용자는 관리자가 인가한 Provider 키로만 그 Provider를 쓸 수 있고,
  * 가상 키를 발급할 때 Provider마다 인가된 키 하나를 고른다. 아무것도 인가하지 않은 Provider는 쓸 수 없다.
  */
-export function CredentialAccess({ principalId, authorized, onChanged }: { principalId: string; authorized: AuthorizedCredentials; onChanged: () => Promise<void> }) {
+/** onNotice: 저장 결과 문구를 부모에게도 알린다. 부모가 사용자 상세를 다시 읽는 동안 이 구역은 화면에서 사라지기 때문이다. */
+export function CredentialAccess({ principalId, authorized, onChanged, onNotice }: { principalId: string; authorized: AuthorizedCredentials; onChanged: () => Promise<void>; onNotice?: (text: string | null) => void }) {
   const { t } = useTranslation();
   const list = useResource<CredentialList>('/api/admin/provider-credentials');
   const providers = (list.data?.providers ?? []).filter(p => p.credentials.length > 0 || authorized.some(a => a.provider === p.provider));
@@ -23,16 +24,17 @@ export function CredentialAccess({ principalId, authorized, onChanged }: { princ
     <p className="meta">{t('이 사용자가 쓸 수 있는 Provider 키를 고릅니다. 이 사용자는 고른 키로만 그 Provider를 쓸 수 있고, 가상 키를 발급할 때 이 중에서 하나를 고릅니다. 아무 키도 고르지 않은 Provider는 이 사용자가 쓸 수 없습니다.')}</p>
     {/* 상세 화면의 조회 상태·다시 조회 버튼과 겹치지 않게, 여기서는 읽기 실패만 짧게 적는다. 상세를 다시 조회하면 함께 다시 읽는다. */}
     {list.error && <p className="meta">{t('Provider 키 목록을 읽지 못했습니다. {{reason}}', { reason: list.error })}</p>}
-    {providers.map(p => <ProviderAccess key={`${p.provider}:${JSON.stringify(authorized)}`} principalId={principalId} provider={p.provider} credentials={p.credentials} current={authorized.find(a => a.provider === p.provider)?.credentials ?? []} onChanged={onChanged} />)}
+    {providers.map(p => <ProviderAccess key={`${p.provider}:${JSON.stringify(authorized)}`} principalId={principalId} provider={p.provider} credentials={p.credentials} current={authorized.find(a => a.provider === p.provider)?.credentials ?? []} onChanged={onChanged} onNotice={onNotice} />)}
   </section>;
 }
 
-function ProviderAccess({ principalId, provider, credentials, current, onChanged }: { principalId: string; provider: string; credentials: CredentialMeta[]; current: { id: string; label: string; hint: string }[]; onChanged: () => Promise<void> }) {
+function ProviderAccess({ principalId, provider, credentials, current, onChanged, onNotice }: { principalId: string; provider: string; credentials: CredentialMeta[]; current: { id: string; label: string; hint: string }[]; onChanged: () => Promise<void>; onNotice?: (text: string | null) => void }) {
   const { t } = useTranslation();
   const name = providerNames[provider] ?? provider;
   const currentIds = current.map(c => c.id);
   const [checked, setChecked] = useState(() => new Set(currentIds));
-  const [busy, setBusy] = useState(false), [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false), [status, setLocalStatus] = useState<string | null>(null);
+  const setStatus = (text: string | null) => { setLocalStatus(text); onNotice?.(text); };
   // 인가에서 빠지는 키에 연결된 가상 키가 있을 때 고르는 처리. 서버가 알려 준 개수와 보낼 본문을 들고 있는다.
   const [inUse, setInUse] = useState<{ count: string; body: Body } | null>(null), [moveTo, setMoveTo] = useState('');
   const mounted = useRef(true);
@@ -81,7 +83,7 @@ function ProviderAccess({ principalId, provider, credentials, current, onChanged
       actions={<>
         {targets.length > 0 && <button type="button" className="btn-primary" disabled={busy || !moveTo} onClick={() => void send({ ...inUse.body, bound_keys: { move_to: moveTo } })}>{t('이 키로 옮기기')}</button>}
         <button type="button" className="btn-danger" disabled={busy} onClick={() => void send({ ...inUse.body, bound_keys: 'block' })}>{t('옮기지 않고 막기')}</button>
-        <button type="button" className="btn-quiet" disabled={busy} onClick={() => setInUse(null)}>{t('취소')}</button>
+        <button type="button" className="btn-quiet" data-modal-cancel="" disabled={busy} onClick={() => setInUse(null)}>{t('취소')}</button>
       </>}>
       <p>{t('인가에서 빠지는 Provider 키에 이 사용자의 가상 키 {{count}}개가 연결돼 있습니다. 어떻게 할지 고르세요.', { count: inUse.count })}</p>
       {targets.length > 0
@@ -89,6 +91,7 @@ function ProviderAccess({ principalId, provider, credentials, current, onChanged
         : <p className="meta">{t('남는 인가 키가 없어 옮길 수 없습니다.')}</p>}
       <p className="meta">{t('막으면 그 가상 키로 보내는 {{provider}} 요청이 거절되고, 키 목록에 「인가 해제됨」으로 표시됩니다. 나중에 Provider 키를 바꿔 연결하거나 다시 인가하면 쓸 수 있습니다.', { provider: name })}</p>
     </Modal>}
-    {status && <p role="status">{status}</p>}
+    {/* 부모가 문구를 받아 보여 주면 여기서는 다시 보여 주지 않는다. */}
+    {status && !onNotice && <p role="status">{status}</p>}
   </form>;
 }

@@ -185,7 +185,8 @@ test('admin_key_list_reads_the_key_owner_before_showing_the_edit_form', async ()
   expect(selectedValue(select)).toBe('cred1');
   expect(optionNames(select)).toEqual(['연동 안 함', 'team-b (…0002)', 'team-a (…0001)']);
   expect(within(form).queryByLabelText('OpenAI Provider 키')).toBeNull();
-  expect(within(form).getAllByRole('checkbox')).toHaveLength(1);
+  // 허용할 API 표: 머리 칸의 전체 선택 하나와 API 한 줄.
+  expect(within(form).getAllByRole('checkbox')).toHaveLength(2);
   pickOption(select, 'team-b (…0002)');
   fireEvent.click(saveButton(form));
   expect((await screen.findByRole('status')).textContent).toBe('현재 키 키를 수정했습니다.');

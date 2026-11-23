@@ -105,10 +105,10 @@ export function ModelsScreen() {
 
 function EntriesTable({ entries }: { entries: CatalogEntry[] }) {
   const { t } = useTranslation();
-  return <div className="table-wrap"><table>
+  return <><div className="table-wrap"><table>
     <thead><tr><th>{t('모델')}</th>{rateNames.map(([k, label]) => <th key={k} className="num">{t(label)}</th>)}<th className="num">{t('최대 입력 / 출력 token')}</th><th>{t('출처')}</th></tr></thead>
     <tbody>{entries.map(e => <tr key={`${e.provider}/${e.model}`}><th scope="row">{e.provider} / <span className="mono">{e.model}</span></th>{rateNames.map(([k]) => <td key={k} className="num mono">{price(e.rates[k])}</td>)}<td className="num mono">{tokens(e.max_input_tokens)} / {tokens(e.max_output_tokens)}</td><td>{sourceNames[e.source] ?? e.source}</td></tr>)}</tbody>
-  </table><p className="meta">{t('가격 단위: 100만 token당 USD')}</p></div>;
+  </table></div><p className="meta">{t('가격 단위: 100만 token당 USD')}</p></>;
 }
 
 /** 변경안 항목 하나. 값이 바뀌는 칸만 강조한다. */

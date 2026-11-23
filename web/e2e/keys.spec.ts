@@ -24,14 +24,14 @@ async function open(page: Page, context: BrowserContext) {
     if (route !== 'other') test.info().annotations.push({ type: 'key-http', description: `${route}:${response.status()}` });
   });
   await authenticate(context); phase('cookie'); await page.goto(`${origin}/dashboard/keys`); phase('shell');
-  await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible(); phase('heading');
+  await expect(page.getByRole('region', { name: '내 가상 키', exact: true })).toBeVisible(); phase('heading');
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled(); phase('list');
   const grantState = await page.evaluate(async () => { const me = await (await fetch('/api/me')).json(); return { count: me.grants.length, allowed: me.grants.some((g: { provider: string; model: string; capabilities: string[] }) => g.provider === 'anthropic' && g.model === 'synthetic-text' && g.capabilities.includes('messages')) }; });
   const boxes = page.getByRole('checkbox'); const named = page.getByLabel('anthropic / synthetic-text / messages', { exact: true });
   test.info().annotations.push({ type: 'key-grants', description: `${grantState.count}:${grantState.allowed}:${await boxes.count()}:${await named.count()}` });
 }
-const issueHeading = (page: Page) => page.getByRole('heading', { level: 2, name: '가상 키 발급', exact: true });
-const listHeading = (page: Page) => page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true });
+const issueHeading = (page: Page) => page.getByRole('region', { name: '가상 키 발급', exact: true });
+const listHeading = (page: Page) => page.getByRole('region', { name: '내 가상 키', exact: true });
 const issueForm = (page: Page) => page.getByRole('form', { name: '가상 키 발급', exact: true });
 /** 발급 폼은 하위 페이지(/dashboard/keys/new)에 있다. 목록 페이지에 있으면 발급 링크로 간다. */
 async function openIssue(page: Page) {
@@ -41,7 +41,7 @@ async function openIssue(page: Page) {
 }
 /** 발급 페이지에서 목록 페이지로 돌아가 목록 조회가 끝나기를 기다린다. */
 async function backToList(page: Page) {
-  await page.getByRole('link', { name: '← 내 가상 키', exact: true }).click();
+  await page.getByRole('link', { name: '내 가상 키로 돌아가기', exact: true }).click();
   await expect(page).toHaveURL(`${origin}/dashboard/keys`);
   await expect(listHeading(page)).toBeVisible();
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
@@ -146,7 +146,7 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
   expect(patches).toBe(1); expect(writes).toBe(5);
   await revoke(page, 'duration-renamed'); expect(deletes).toBe(1);
-  await page.reload(); await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
+  await page.reload(); await expect(page.getByRole('region', { name: '내 가상 키', exact: true })).toBeVisible();
   expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
 });
 
@@ -192,7 +192,7 @@ test('key_read_refresh_once_then_cookie_write401_never_refreshes_or_replays', as
   await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
   await expect(page.getByLabel('키 상태', { exact: true })).toHaveAttribute('data-value', 'revoked');
   expect(reads).toEqual([401, 200]);
-  await expect(page.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible(); expect(refresh).toBe(1);
+  await expect(page.getByRole('region', { name: '내 가상 키', exact: true })).toBeVisible(); expect(refresh).toBe(1);
   await page.route(`${origin}/api/keys`, async route => {
     if (route.request().method() !== 'POST') return route.fallback();
     writes++;
@@ -244,7 +244,7 @@ test('key_secret_and_forms_disappear_on_bfcache_broadcast_identity_and_cross_tab
   }
   const secret = await issue(page, 'clear-logout');
   const other = await context.newPage(); await other.goto(`${origin}/dashboard/keys`);
-  await expect(other.getByRole('heading', { level: 2, name: '내 가상 키', exact: true })).toBeVisible();
+  await expect(other.getByRole('region', { name: '내 가상 키', exact: true })).toBeVisible();
   await other.getByRole('button', { name: '로그아웃', exact: true }).click({ noWaitAfter: true });
   await expect(page.getByRole('alert')).toHaveText('로그아웃되었습니다.');
   expect(await page.locator('main').textContent()).not.toContain(secret);

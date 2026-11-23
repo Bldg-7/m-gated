@@ -1928,6 +1928,20 @@ async fn admin_reads_request_models_and_key_owner() {
         json!([{"provider":"anthropic","model":"synthetic-text"}])
     );
 
+    // 내 사용량의 모델 후보는 내 요청 기록만 본다. 요청을 보낸 사용자에게만 나오고, 조회 조건은 받지 않는다.
+    let mine = "/api/usage/models";
+    let (status, v) = h.call("GET", mine, &h.bob, None).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(
+        v["items"],
+        json!([{"provider":"anthropic","model":"synthetic-text"}])
+    );
+    let (status, v) = h.call("GET", mine, &h.alice, None).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["items"], json!([]));
+    let with_query = format!("{mine}?limit=1");
+    assert_eq!(h.call("GET", &with_query, &h.bob, None).await.0, 400);
+
     // 가상 키 목록의 키 주인은 ID와 함께 이름·이메일로도 온다.
     let (status, v) = h.call("GET", "/api/admin/keys", &h.alice, None).await;
     assert_eq!(status, 200, "{v}");

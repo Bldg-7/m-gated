@@ -58,11 +58,12 @@ test('service_is_created_from_a_window_opened_by_a_button', async () => {
 
 test('principal_list_is_a_table_and_all_keys_live_on_their_own_page', async () => {
   const person = { id: 'human1', kind: 'human', display_name: '가람', email: 'garam@example.test', management_owner_id: null, version: '2', policy_version: '4', disabled: false, inference_safety: { paused: false, version: '1', reason: null, paused_at: null, trigger_request_id: null }, block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } };
+  const stopped = { ...person, id: 'human2', display_name: '나래', email: 'narae@example.test', disabled: true, inference_safety: { ...person.inference_safety, paused: true }, block_state: { ...person.block_state, blocked: true, reasons: ['disabled', 'inference_paused', 'unsettled'] } };
   const key = { provider_credentials: [], id: 'k1', principal_id: 'human1', owner: { kind: 'human', display_name: '가람', email: 'garam@example.test' }, name: '가람 키', key_hint: 'mgw_v1_k1', created_at: '2026-11-01T00:00:00Z', created_by: 'human1', created_command_id: 'c1', validity: '1_year', expires_at: '2027-11-01T00:00:00Z', revoked_at: null, version: '1', grants: [], limits: { budget: null, rpm: null, tpm: null, count_rpm: null } };
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
     if (url === '/api/me') return Promise.resolve(response(admin));
-    if (url.startsWith('/api/admin/principals')) return Promise.resolve(response({ items: [person], next_cursor: null, as_of: '2026-11-02T00:00:00Z' }));
+    if (url.startsWith('/api/admin/principals')) return Promise.resolve(response({ items: [person, stopped], next_cursor: null, as_of: '2026-11-02T00:00:00Z' }));
     if (url.startsWith('/api/admin/keys')) return Promise.resolve(response({ items: [key], next_cursor: null, as_of: '2026-11-02T00:00:00Z' }));
     return Promise.resolve(response({ providers: [] }));
   }));
@@ -71,6 +72,9 @@ test('principal_list_is_a_table_and_all_keys_live_on_their_own_page', async () =
   expect(within(row).getByText('garam@example.test')).toBeTruthy();
   expect(within(row).getByText('2 / 4 / 1')).toBeTruthy();
   expect(screen.getAllByRole('columnheader').map(h => h.textContent)).toEqual(['이름', '종류', '이메일', '상태', '버전 (사용자 / 정책 / 안전)', 'owner', '동작']);
+  // 정지·자동 안전차단은 차단 사유에도 들어 있지만 배지는 한 번만 보인다.
+  const stoppedRow = screen.getByRole('link', { name: '나래 상세' }).closest('tr')!;
+  expect([...stoppedRow.querySelectorAll('.badge')].map(b => b.textContent)).toEqual(['계정 정지', '자동 안전차단', '미정산 차단']);
   // 사용자 목록 페이지에는 가상 키 목록이 없다. 메뉴의 가상 키 관리 페이지에 있다.
   expect(screen.queryByRole('button', { name: '키 조회' })).toBeNull();
   fireEvent.click(screen.getByRole('link', { name: '가상 키 관리' }));
@@ -79,4 +83,37 @@ test('principal_list_is_a_table_and_all_keys_live_on_their_own_page', async () =
   expect(within(keyRow).getByRole('link', { name: 'garam@example.test' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
   expect(within(keyRow).getByText('활성')).toBeTruthy();
   expect(screen.getAllByRole('columnheader').map(h => h.textContent)).toEqual(['이름', '키 주인', '상태', '유효기간', '생성', '만료', 'Provider 키', '동작']);
+});
+
+test('account_is_suspended_from_a_button_with_the_reason_asked_in_a_danger_window', async () => {
+  const limits = { budget: null, rpm: 5, tpm: null, count_rpm: null }, grants = [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }];
+  const block = { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' }, safety = { paused: false, version: '1', reason: null, paused_at: null, trigger_request_id: null };
+  const detail = (id: string, kind: string) => ({ principal: { id, kind, display_name: id === 'admin1' ? '관리자' : '배치 서비스', email: id === 'admin1' ? 'admin@example.test' : null, management_owner_id: id === 'admin1' ? null : 'admin1', version: '3', policy: { id: 'p', version: '9', disabled: false, grants, limits }, inference_safety: safety, block_state: block, provider_credentials: [] }, execution_ceiling: { grants, limits } });
+  const puts: { url: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === '/api/me') return Promise.resolve(response(admin));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (init?.method === 'PUT') { puts.push({ url, body: JSON.parse(String(init.body)) }); return Promise.resolve(response({ command_id: 'cmd', operation: 'replace_policy', target: { kind: 'principal', id: 'svc1' }, result_version: '10', effect: 'changed' })); }
+    if (url === '/api/admin/principals/svc1') return Promise.resolve(response(detail('svc1', 'service')));
+    if (url === '/api/admin/principals/admin1') return Promise.resolve(response(detail('admin1', 'human')));
+    return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-11-01T00:00:00Z' }));
+  }));
+  // 자기 계정의 정지 버튼은 눌리지 않는다.
+  history.replaceState(null, '', '/dashboard/admin/principals/detail?principal_id=admin1'); const own = render(<App />);
+  expect(((await screen.findByRole('button', { name: '이 계정 정지' })) as HTMLButtonElement).disabled).toBe(true);
+  own.unmount(); session.clear();
+
+  history.replaceState(null, '', '/dashboard/admin/principals/detail?principal_id=svc1'); render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: '이 계정 정지' }));
+  const dialog = screen.getByRole('dialog', { name: '배치 서비스 계정 정지' });
+  // 위험 창이라 처음 초점은 취소에 있다. 정책 폼에는 정지 칸이 없다.
+  expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: '취소' }));
+  expect(screen.queryByLabelText('관리용 계정 정지')).toBeNull();
+  fireEvent.change(within(dialog).getByLabelText('정지 사유'), { target: { value: '퇴사' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '이 계정 정지' }));
+  // 확인 창에서 이미 확인했으므로 다시 묻지 않고 보낸다. 정책의 나머지는 지금 값 그대로다.
+  await screen.findByText(/서버 재조회 완료/);
+  expect(screen.queryByRole('button', { name: '명령 실행' })).toBeNull();
+  expect(puts).toEqual([{ url: '/api/admin/principals/svc1/policy', body: { expected_version: '9', disabled: true, grants, limits, reason: '퇴사' } }]);
 });

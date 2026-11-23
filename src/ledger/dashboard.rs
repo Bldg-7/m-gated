@@ -341,6 +341,30 @@ impl PgIdentityStore {
         .await
         .map_err(|_| QueryError::Database)?
     }
+    /// 이 사용자의 요청 기록에 있는 요청 모델 이름. 내 사용량을 모델로 걸러 볼 때 고를 후보다.
+    /// 지금 정책에서 빠진 모델도 기록이 남아 있으면 나온다.
+    pub async fn dashboard_usage_models(&self, id: Uuid) -> Result<Value, QueryError> {
+        let _gate = self
+            .gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| QueryError::Database)?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut tx = self.begin_transaction().await?;
+            let rows = sqlx::query("SELECT DISTINCT provider,requested_model FROM gw_requests WHERE principal_id=$1 ORDER BY requested_model,provider LIMIT 1000")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            let items: Vec<Value> = rows
+                .iter()
+                .map(|r| json!({"provider":r.get::<String,_>("provider"),"model":r.get::<String,_>("requested_model")}))
+                .collect();
+            Ok(json!({ "items": items }))
+        })
+        .await
+        .map_err(|_| QueryError::Database)?
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn usage_snapshot(
         &self,

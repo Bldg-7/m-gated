@@ -1,11 +1,18 @@
-import { test, expect, type BrowserContext } from '@playwright/test';
+import { test, expect, type BrowserContext, type Page } from '@playwright/test';
+import { pickOption } from './select';
 // 화면의 시각은 브라우저 시간대로 보인다. 시험마다 같은 값이 보이도록 UTC로 고정한다.
 test.use({ timezoneId: 'UTC' });
 const base = process.env.E2E_BASE_URL!; const token = process.env.E2E_TOKEN!; const cookie = process.env.E2E_COOKIE!;
 async function authenticate(context: BrowserContext) { await context.addCookies([{ name: cookie, value: token, url: base, httpOnly: true, sameSite: 'Lax' }]); }
+// 내 사용량의 모델 칸은 내 요청 기록의 모델에서 고른다. 이 시험들은 조회 조건을 구별하는 표식으로 모델 이름을 쓰므로,
+// 후보 목록(/api/usage/models)만 아래 이름으로 바꿔 준다. 실제 목록 API는 서버 시험(credentials_postgres)이 확인한다.
+const models = ['historical-missing-model', 'missing-after-refresh', 'held-before-logout', 'old-model', 'refresh-denied', 'old-private-filter', 'server-stopped', 's9-keyboard-empty'];
+const modelBox = (page: Page) => page.getByLabel('모델', { exact: true });
+const pickModel = (page: Page, model: string) => pickOption(modelBox(page), `${model} (anthropic)`);
 test.beforeEach(async ({ context }) => {
   await context.route('**/*', async route => {
     const url = new URL(route.request().url());
+    if (url.origin === base && url.pathname === '/api/usage/models') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: models.map(model => ({ provider: 'anthropic', model })) }) });
     if (url.origin === base) return route.continue();
     if (url.origin === 'https://auth.example.test' && url.pathname === '/sso/logout') return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<!doctype html><title>합성 SSO 로그아웃</title>' });
     await route.abort('blockedbyclient');
@@ -16,7 +23,7 @@ test('Rust bundle serves precise usage, global block, keyboard and text-only ide
   const response = await page.goto('/dashboard/'); expect(response?.status()).toBe(200); expect(response?.headers()['content-security-policy']).toContain("default-src 'none'");
   await expect(page.getByText('0.000000000001 USD', { exact: true }).first()).toBeVisible(); await expect(page.getByText('확인 불가 (미정산)')).toBeVisible(); await expect(page.getByText(/전체 기간 미정산: 1/)).toBeVisible();
   await expect(page.getByText(/<img src=x onerror=window.__xss=1>/)).toBeVisible(); expect(await page.evaluate(() => Reflect.get(window, '__xss'))).toBeUndefined(); expect(await page.locator('main img').count()).toBe(0);
-  await page.getByLabel('모델', { exact: true }).fill('historical-missing-model'); await page.getByRole('button', { name: '조회', exact: true }).focus(); await page.keyboard.press('Enter'); await expect(page.getByText(/그룹별 사용량이 없습니다/)).toBeVisible(); await expect(page.getByText(/전체 기간 미정산: 1/)).toBeVisible();
+  await pickModel(page, 'historical-missing-model'); await page.getByRole('button', { name: '조회', exact: true }).focus(); await page.keyboard.press('Enter'); await expect(page.getByText(/그룹별 사용량이 없습니다/)).toBeVisible(); await expect(page.getByText(/전체 기간 미정산: 1/)).toBeVisible();
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]); expect(errors).toEqual([]);
   for (const path of ['/dashboard/keys', '/dashboard/keys/new', '/dashboard/admin/principals', '/dashboard/admin/principals/key', '/dashboard/admin/keys', '/dashboard/admin/usage', '/dashboard/admin/requests']) { const r = await page.request.get(path); expect(r.status()).toBe(200); expect(r.headers()['content-type']).toContain('text/html'); }
   for (const path of ['/dashboard/assets/missing.js', '/dashboard/assets/%2e%2e%2findex.html', '/api/missing']) { const r = await page.request.get(path); expect(r.status()).toBe(404); }
@@ -41,12 +48,12 @@ test('401 refresh is bounded and stale usage never re-enters after logout', asyn
   });
   await context.addCookies([{name:cookie,value:process.env.E2E_EXPIRED_TOKEN!,url:base,httpOnly:true,sameSite:'Lax'}]);
   const recovered = page.waitForResponse(r => r.url().startsWith(`${base}/api/usage?`) && new URL(r.url()).searchParams.get('model') === 'missing-after-refresh' && r.status() === 200);
-  await page.getByLabel('모델', { exact: true }).fill('missing-after-refresh');
+  await pickModel(page, 'missing-after-refresh');
   await page.getByRole('button', { name: '조회', exact: true }).click();
   await recovered;
   await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   expect(refresh).toBe(1);
-  await expect(page.getByLabel('모델', { exact: true })).toHaveValue('missing-after-refresh');
+  await expect(modelBox(page)).toHaveAttribute('data-value', 'missing-after-refresh');
   expect(usageReads).toBe(2);
   expect(usageStatuses).toEqual([401, 200]);
   // 자동 재시도 이후 같은 필터의 명시적인 조회는 별도의 새 읽기다.
@@ -61,7 +68,7 @@ test('401 refresh is bounded and stale usage never re-enters after logout', asyn
   const held = new Promise<void>(r => { arrived = r; }); const release = new Promise<void>(r => { released = r; });
   await page.unroute(`${base}/api/usage?**`);
   await page.route(`${base}/api/usage?**`, async route => { arrived(); await release; try { await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ settled_usd: '999.999999999999' }) }); } catch {/* 이탈로 취소한 요청 */ } });
-  await page.getByLabel('모델', { exact: true }).fill('held-before-logout');
+  await pickModel(page, 'held-before-logout');
   await page.getByRole('button', { name: '조회', exact: true }).click();
   await held;
   const logoutRequest = page.waitForRequest(r => r.url() === 'https://auth.example.test/sso/logout');
@@ -77,7 +84,7 @@ test('401 refresh is bounded and stale usage never re-enters after logout', asyn
 test('retention 409 removes previous figures without silently dropping filters', async ({ page, context }) => {
   await authenticate(context); await page.goto('/dashboard/'); await expect(page.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
   await page.route(`${base}/api/usage?**`, route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'usage_detail_unavailable', details: { detail_available_from: '2026-01-01T00:00:00Z' } } }) }));
-  await page.getByLabel('모델', { exact: true }).fill('old-model'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작: 2026-01-01 00:00'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0); expect(await page.getByText('0.000000000001 USD', { exact: true }).count()).toBe(0); await expect(page.getByLabel('모델', { exact: true })).toHaveValue('old-model');
+  await pickModel(page, 'old-model'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('상세 가용 시작: 2026-01-01 00:00'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0); expect(await page.getByText('0.000000000001 USD', { exact: true }).count()).toBe(0); await expect(modelBox(page)).toHaveAttribute('data-value', 'old-model');
 });
 test('cross_tab_logout_latch_blocks_visibility_pageshow_and_old_cookie_until_explicit_login', async ({ page, context }) => {
   await authenticate(context); await page.goto('/dashboard/');
@@ -114,8 +121,8 @@ test('cross_tab_logout_latch_blocks_visibility_pageshow_and_old_cookie_until_exp
     // 구 cookie가 여전히 정상 서명이므로 명시적인 사용자 재확인만 다시 로그인한다.
     await other.getByRole('button', { name: '다시 확인' }).click();
     await expect(other.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
-    // 다시 로그인하면 사용자 확인, 사용량, 조회 조건의 가상 키 후보를 한 번씩 읽는다.
-    expect(await other.evaluate(() => Reflect.get(window, '__authReads'))).toBe(3);
+    // 다시 로그인하면 사용자 확인, 사용량, 조회 조건의 가상 키 후보와 모델 후보를 한 번씩 읽는다.
+    expect(await other.evaluate(() => Reflect.get(window, '__authReads'))).toBe(4);
   } finally { released(); }
   await expect(page).toHaveTitle('합성 SSO 로그아웃'); await other.close();
 });
@@ -138,7 +145,7 @@ test('refresh_success_then_current_me403_stays_permission_error_without_login', 
   });
   try {
     await context.addCookies([{ name: cookie, value: process.env.E2E_EXPIRED_TOKEN!, url: base, httpOnly: true, sameSite: 'Lax' }]);
-    await page.getByLabel('모델', { exact: true }).fill('refresh-denied'); await page.getByRole('button', { name: '조회', exact: true }).click();
+    await pickModel(page, 'refresh-denied'); await page.getByRole('button', { name: '조회', exact: true }).click();
     await expect(page.getByRole('alert')).toHaveText('접근 권한이 없습니다.');
     expect(page.url()).toBe(`${base}/dashboard/`); expect(login).toBe(0); expect(refresh).toBe(1); expect(meReads).toBe(1); expect(usageReads).toBe(1);
     expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
@@ -168,7 +175,7 @@ test('verified_signed_identity_change_broadcasts_and_discards_other_window_old_p
   });
   await other.route(`${base}/api/me`, async route => { meArrived(); await meGate; await route.continue(); });
   try {
-    await other.getByLabel('모델', { exact: true }).fill('old-private-filter'); await other.getByRole('button', { name: '조회', exact: true }).click(); await oldHeld;
+    await pickModel(other, 'old-private-filter'); await other.getByRole('button', { name: '조회', exact: true }).click(); await oldHeld;
     await context.addCookies([{ name: cookie, value: process.env.E2E_SECOND_TOKEN!, url: base, httpOnly: true, sameSite: 'Lax' }]);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
     await expect(page.getByText(/Synthetic Second/)).toBeVisible(); await meHeld;
@@ -177,7 +184,7 @@ test('verified_signed_identity_change_broadcasts_and_discards_other_window_old_p
     releaseOld(); releaseMe();
     await expect(other.getByText(/Synthetic Second/)).toBeVisible();
     await expect(other.getByRole('heading', { name: '조회 기간 사용량' })).toBeVisible();
-    await expect(other.getByLabel('모델', { exact: true })).toHaveValue('');
+    await expect(modelBox(other)).toHaveAttribute('data-value', '');
     expect(await other.getByText('0.000000000001 USD', { exact: true }).count()).toBe(0);
     expect(await other.evaluate(() => Reflect.get(window, '__authMessages'))).toEqual([{ type: 'auth-change' }]);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
@@ -204,7 +211,7 @@ test('broadcast and bfcache revalidation conceal cached data; server stop return
   await page.unroute(`${base}/api/me`);
   const control = process.env.E2E_CONTROL_URL!; expect(new URL(control).hostname).toBe('127.0.0.1'); await page.request.post(`${control}/disable`);
   try {
-    await page.getByLabel('모델', { exact: true }).fill('server-stopped'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('접근 권한이 없습니다.'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
+    await pickModel(page, 'server-stopped'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('접근 권한이 없습니다.'); expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
   } finally { expect((await page.request.post(`${control}/enable`)).status()).toBe(204); }
 });
 
@@ -239,7 +246,7 @@ test('s9_csp_blocks_inline_external_scripts_and_forms_have_keyboard_names', asyn
     return !(input.labels?.length || input.getAttribute('aria-label') || input.getAttribute('aria-labelledby'));
   }).length);
   expect(unnamed).toBe(0);
-  await page.getByLabel('모델', { exact: true }).focus(); await page.keyboard.type('s9-keyboard-empty');
+  await modelBox(page).focus(); await page.keyboard.type('s9-keyboard-empty'); await page.keyboard.press('Enter'); await expect(modelBox(page)).toHaveAttribute('data-value', 's9-keyboard-empty');
   await page.getByRole('button', { name: '조회', exact: true }).focus(); await page.keyboard.press('Enter');
   await expect(page.getByText(/그룹별 사용량이 없습니다/)).toBeVisible();
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);

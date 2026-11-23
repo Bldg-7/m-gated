@@ -5,7 +5,7 @@ import { msgid } from '../../lib/i18n';
 import { Link } from '../../lib/router';
 import type { KeyMetadata, Page } from '../../lib/types';
 import { Money, SearchSelect, Select, StatusBadge, TextArea, Time } from '../../ui/ui';
-import { directId, fields, PrincipalSelect, ReadState, useAll, useCommand, useResource } from './shared';
+import { directId, fields, PrincipalSelect, ReadState, RequestModelSelect, useAll, useCommand, useResource } from './shared';
 import type { RequestDetail, RequestSummary } from './types';
 const providers = [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['deepseek', 'DeepSeek']];
 const phases = [['admitted', msgid('입장')], ['dispatching', msgid('전송 중')], ['finished', msgid('종료')]];
@@ -20,12 +20,6 @@ export function RequestsScreen() {
   // 조회 조건의 사용자. 고르면 가상 키 후보를 그 사용자의 키로 좁힌다.
   const [principal, setPrincipal] = useState(initial ?? '');
   const keys = useAll<KeyMetadata>(`/api/admin/keys${principal ? `?principal_id=${encodeURIComponent(principal)}` : ''}`);
-  // 요청 모델 후보는 요청 기록에 있는 모델 이름이다. 승인된 모델 목록에서 빠진 모델도 기록이 있으면 나온다.
-  const models = useResource<{ items: { provider: string; model: string }[] }>('/api/admin/requests/models');
-  // 조회 조건은 모델 이름만 본다. 같은 이름이 여러 Provider에 있으면 후보 하나로 묶는다.
-  const byModel = new Map<string, string[]>();
-  for (const m of models.data?.items ?? []) byModel.set(m.model, [...(byModel.get(m.model) ?? []), m.provider]);
-  const modelOptions = [...byModel].map(([model, list]) => ({ value: model, label: `${model} (${list.join(', ')})` }));
   const page = useResource<Page<RequestSummary>>(`/api/admin/requests${query ? `?${query}` : ''}`);
   return <div className="stack-lg">
     <form aria-label={t('요청 조회')} className="filters" onSubmit={e => { const f = fields(e), q = new URLSearchParams(); for (const key of ['principal_id', 'key_id', 'provider', 'model', 'phase', 'outcome', 'accounting_state']) if (f.get(key)) q.set(key, String(f.get(key))); for (const key of ['from', 'to']) { const at = new Date(String(f.get(key) ?? '')); if (!Number.isNaN(at.getTime())) q.set(key, at.toISOString()); } if (q.toString() === query) void page.reload().catch(() => {}); else setQuery(q.toString()); }}>
@@ -35,7 +29,7 @@ export function RequestsScreen() {
       <div className="field"><label htmlFor="request-outcome">{t('결과')}</label><Select id="request-outcome" name="outcome" defaultValue="" options={[all, ...options(outcomes)]} /></div>
       <div className="field"><label htmlFor="request-principal">{t('사용자')}</label><PrincipalSelect id="request-principal" name="principal_id" optional value={principal} onChange={setPrincipal} /></div>
       <div className="field"><label htmlFor="request-key">{t('가상 키')}</label><SearchSelect key={principal} id="request-key" name="key_id" defaultValue="" placeholder={keys.items ? t('선택하세요') : t('키 목록 조회 중…')} options={[all, ...(keys.items ?? []).map(k => ({ value: k.id, label: `${k.name} (${k.key_hint})` }))]} /></div>
-      <div className="field"><label htmlFor="request-model">{t('요청 모델')}</label><SearchSelect id="request-model" name="model" defaultValue="" placeholder={models.data ? t('선택하세요') : t('모델 목록 조회 중…')} options={[all, ...modelOptions]} /></div>
+      <div className="field"><label htmlFor="request-model">{t('요청 모델')}</label><RequestModelSelect id="request-model" name="model" defaultValue="" /></div>
       <label>{t('시작 (현지 시각)')}<input type="datetime-local" name="from" /></label>
       <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" /></label>
       <div className="actions"><button className="btn-primary">{t('요청 조회')}</button></div>
@@ -55,13 +49,14 @@ export function RequestsScreen() {
         {page.data.next_cursor && <div className="actions"><button onClick={() => setQuery(`cursor=${encodeURIComponent(page.data!.next_cursor!)}`)}>{t('다음 요청 페이지')}</button></div>}
       </>}
     </section>
-    {id && <RequestEditor id={id} key={id} />}
+    {id && <RequestEditor id={id} key={id} onChanged={() => page.reload().catch(() => { /* ReadState가 조회 실패를 표시한다 */ })} />}
   </div>;
 }
-function RequestEditor({ id }: { id: string }) {
+/** onChanged: 수동 정산처럼 요청의 상태를 바꾼 뒤 위 목록도 다시 읽게 한다. */
+function RequestEditor({ id, onChanged }: { id: string; onChanged: () => Promise<unknown> }) {
   const { t } = useTranslation();
   const detail = useResource<RequestDetail>(`/api/admin/requests/${encodeURIComponent(id)}`);
-  const command = useCommand(async () => { await detail.reload(); });
+  const command = useCommand(async () => { await Promise.all([detail.reload(), onChanged()]); });
   const [error, setError] = useState<string | null>(null), r = detail.data;
   return <section aria-label={t('요청 상세')} className="stack">
     <h2>{t('요청 상세')}</h2>
@@ -90,7 +85,7 @@ function RequestEditor({ id }: { id: string }) {
       <div className="stack">
         {r.settlement && <section aria-label={t('수동 처리 기록')} className="card"><h3>{t('관리자 수동 입력 (Provider 검증값 아님)')}</h3><dl className="kv"><dt>{t('출처')}</dt><dd className="mono">{r.settlement.source}</dd><dt>{t('처리자')}</dt><dd className="mono">{r.settlement.actor_principal_id}</dd><dt>{t('처리 시각')}</dt><dd><Time value={r.settlement.settled_at} /></dd><dt>{t('결정')}</dt><dd>{r.settlement.decision}</dd><dt>{t('입력 금액')}</dt><dd><Money value={r.settlement.cost_usd} /></dd><dt>{t('사유')}</dt><dd>{r.settlement.reason}</dd><dt>{t('종료 확인 출처')}</dt><dd>{r.settlement.execution_stop_source === 'runtime' ? t('runtime 종료 기록') : t('관리자 종료 확인 진술 (원격 실행 검증 아님)')}</dd><dt>{t('대상 executor')}</dt><dd className="mono">{r.settlement.executor_id}</dd></dl></section>}
         {r.accounting_state === 'unknown' && <form key={r.version} aria-label={t('수동 정산')} onSubmit={e => { const f = fields(e), amount = String(f.get('cost_usd')), decision = String(f.get('decision')); setError(null); if (decision !== 'charged' && decision !== 'no_charge') { setError(t('처리 결정을 고르세요.')); return; } if (!/^(0|[1-9][0-9]{0,15})\.[0-9]{12}$/.test(amount) || (decision === 'no_charge' && amount !== '0.000000000000')) { setError(t('소수점 12자리 USD를 입력하세요. 무과금은 0.000000000000입니다.')); return; } const body: Record<string, unknown> = { expected_version: r.version, decision, cost_usd: amount, reason: String(f.get('reason')) }; if (f.has('confirmed')) body.execution_stopped_confirmed = true; command.prepare({ label: msgid('관리자 수동 금액 반영 확인'), url: `/api/admin/requests/${r.id}/settlement`, method: 'PUT', body, danger: true }); }}><fieldset disabled={command.busy} className="group"><legend>{t('관리자 수동 정산')}</legend><p className="meta">{t('금액·결정·사유만 기록합니다. Provider 청구 검증·증빙 수집이 아닙니다. 미확인 token은 null을 유지합니다. 다른 unknown·정지·자동 안전차단은 해제하지 않습니다.')}</p>
-          <div className="form-grid"><div className="field"><label htmlFor="settlement-decision">{t('처리 결정')}</label><Select id="settlement-decision" name="decision" required defaultValue="" placeholder={t('선택하세요')} options={[{ value: 'charged', label: t('과금') }, { value: 'no_charge', label: t('무과금') }]} /></div><label>{t('처리 금액 USD')}<input name="cost_usd" className="amount" inputMode="decimal" spellCheck={false} required placeholder="0.000000000000" /></label></div>
+          <div className="form-grid"><fieldset className="field"><legend className="field-label">{t('처리 결정')}</legend><div className="segment"><label><input type="radio" name="decision" value="charged" required />{t('과금')}</label><label><input type="radio" name="decision" value="no_charge" required />{t('무과금')}</label></div></fieldset><label>{t('처리 금액 USD')}<input name="cost_usd" className="amount" inputMode="decimal" spellCheck={false} required placeholder="0.000000000000" /></label></div>
           <div className="field"><label htmlFor="settlement-reason">{t('수동 처리 사유')}</label><TextArea id="settlement-reason" name="reason" rows={4} required maxLength={1000} /></div>
           {!r.execution_stopped_at && <label className="attest"><input type="checkbox" name="confirmed" required />{t('대상 executor 실행 종료를 확인했습니다 (관리자 진술)')}</label>}
           <div className="actions"><button className="btn-primary">{t('수동 정산 확인')}</button></div></fieldset></form>}

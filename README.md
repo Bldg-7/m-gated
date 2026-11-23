@@ -152,6 +152,17 @@ pass `--config <path>`.
    keys, and point their SDKs at the gateway with that virtual key. Inference requests are accepted
    only with virtual keys.
 
+A virtual key can be issued only when all three of these conditions hold. The dashboard checks
+them in this order and shows the first one that fails:
+
+1. **The policy form has models to choose from.** The choices are the profiles in the config plus
+   the approved [model catalog](#model--price-catalog). On a new installation that uses `catalog`,
+   the list is empty until an admin syncs and approves the catalog under *Admin → Models & prices*.
+2. **The owner's policy has at least one grant.** A new user and a new service principal both start
+   with no grants.
+3. **The owner is authorized for a provider key of each provider in the grants.** An admin gives
+   this authorization on the owner's page (**Provider key access**).
+
 ## Command line
 
 ```
@@ -566,7 +577,18 @@ routes). It is same-origin only, with no CORS. The UI is in Korean by default; a
 - **Changing access:** changes to policies and keys in the database take effect on the next
   request. Removing someone from `allowed_emails`/`admin_emails` takes effect only when every
   instance has restarted with the new config. If you need the change to apply at once, also
-  disable the principal's policy.
+  suspend the account.
+- **Suspending an account:** an admin suspends a principal with the **Suspend account** button on
+  its page under *Admin → Principals*. The API call is `PUT /api/admin/principals/{id}/policy` with
+  the current grants and limits, `disabled: true` and a `reason`. No restart is necessary.
+  - From the next request, the gateway rejects inference with that principal's virtual keys
+    (`403 access_denied`).
+  - A suspended person cannot use the dashboard or the `/api/*` routes.
+  - The service principals that the person owns are also blocked (`403 owner_inactive`).
+  - Nothing is deleted. The policy and the virtual keys stay as they are, and the virtual keys work
+    again when an admin lifts the suspension.
+  - An admin cannot suspend their own account. The gateway also refuses to suspend the last active
+    admin.
 
 ### Model & price catalog
 
@@ -786,6 +808,42 @@ the real binary through `tests/process`, and browser end-to-end tests with Playw
 need Docker, `TEST_FNM_DIR` (a directory of the fnm Node version manager with Node 22.22.2 installed) and, for browser tests,
 `TEST_PLAYWRIGHT_BROWSERS_PATH`. All of these use synthetic SSO, providers and credentials. They
 never contact real services.
+
+### Dashboard preview without a server
+
+You can look at the dashboard in a browser without running m-gated and without a database:
+
+```sh
+cd web && npm ci && npm run dev
+```
+
+Open `http://localhost:5173/dashboard/`. This command starts the Vite development server. The
+development server answers `/api/*` and `/auth/*` with fake data from `web/mock/`. When you edit the
+code under `web/src`, the page updates immediately.
+
+- You are signed in as an admin, and every screen has data: users, provider keys, virtual keys,
+  requests, models and usage.
+- Writes change the fake data in memory, so a flow such as "issue a key, edit it, revoke it" runs to
+  the end. Restart the development server to get the initial fake data back.
+- To see an error screen, use these inputs:
+  - When you add or replace a provider key, type an API key that contains `reject`. The fake API
+    answers as if the provider rejected the key.
+  - When you add or replace a provider key, type an API key that contains `unverified`. The fake API
+    answers as if the check with the provider failed.
+  - When you issue a virtual key, type a name that starts with `quota`. The fake API answers that
+    the user has too many keys.
+- The preview does not show everything. You are always an admin, so you cannot see the screens of a
+  normal user or the permission errors (401, 403). The fake API returns only a few of the server's
+  errors, such as a version conflict (409) and a provider key label that is already in use. The
+  browser tests (`web/e2e`, run by `cargo test --test dashboard_e2e` and `--test admin_e2e`) run
+  against the real server.
+- The fake API is part of the development server only. `npm run build` and the dashboard unit tests
+  (`npm test`) do not include it.
+
+## Design decisions
+
+[`docs/decisions/`](docs/decisions/README.md) records why a design was chosen and which
+alternatives were rejected, one file for each decision.
 
 ## Releases
 

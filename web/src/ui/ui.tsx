@@ -1,4 +1,4 @@
-import { useState, type ReactNode, type TextareaHTMLAttributes } from 'react';
+import { useId, useState, type ReactNode, type TextareaHTMLAttributes } from 'react';
 import { useTranslation } from 'react-i18next';
 import { msgid } from '../lib/i18n';
 import { useTimeFormat } from '../lib/time';
@@ -26,6 +26,27 @@ export function RefreshIcon() {
 
 export function Badge({ tone, children, title }: { tone: Tone; children: ReactNode; title?: string }) {
   return <span className={`badge tone-${tone}`} title={title}><ToneIcon tone={tone} />{children}</span>;
+}
+/**
+ * 설명이 붙는 배지. 마우스를 올리거나 키보드(Tab)로 옮겨 오면 설명 말풍선을 보여 주고, Esc로 닫는다.
+ * 설명 글은 늘 문서에 두고(보이지 않을 때는 sr-only) aria-describedby로 이어, 읽기 도구는 말풍선과 상관없이 읽는다.
+ * 말풍선은 화면 기준 위치에 그린다. 표의 가로 스크롤 영역에 잘리지 않게 하기 위해서다.
+ */
+export function TipBadge({ tone, children, tip }: { tone: Tone; children: ReactNode; tip: string }) {
+  const tipId = useId();
+  const [at, setAt] = useState<{ left: number; top: number; below: boolean } | null>(null);
+  const show = (el: HTMLElement) => {
+    const r = el.getBoundingClientRect(), below = r.top < 120;
+    setAt({ left: Math.max(8, Math.min(r.left, window.innerWidth - 288)), top: below ? r.bottom : r.top, below });
+  };
+  return <>
+    <span tabIndex={0} className={`badge tone-${tone} badge-tip`} aria-describedby={tipId}
+      onMouseEnter={e => show(e.currentTarget)} onMouseLeave={() => setAt(null)} onFocus={e => show(e.currentTarget)} onBlur={() => setAt(null)}
+      onKeyDown={e => { if (e.key === 'Escape' && at) { e.stopPropagation(); setAt(null); } }}>
+      <ToneIcon tone={tone} />{children}
+    </span>
+    <span id={tipId} role="tooltip" className={at ? `tooltip tooltip-wide${at.below ? ' tooltip-below' : ''}` : 'sr-only'} style={at ? { left: at.left, top: at.top } : undefined}>{tip}</span>
+  </>;
 }
 export function Pill({ children, accent = false }: { children: ReactNode; accent?: boolean }) {
   return <span className={accent ? 'pill pill-accent' : 'pill'}>{children}</span>;

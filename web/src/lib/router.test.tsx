@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { pickOption } from '../test-select';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../app';
 import { session } from './api';
@@ -23,25 +24,29 @@ test('spa_link_moves_between_screens_without_document_navigation_and_remounts_ea
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input); paths.push(url);
     if (url === '/api/me') return Promise.resolve(response(me));
+    if (url === '/api/usage/models') return Promise.resolve(response({ items: [{ provider: 'anthropic', model: 'kept-only-on-this-screen' }] }));
     if (url.startsWith('/api/usage') || url.startsWith('/api/admin/usage')) return Promise.resolve(response(usage));
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-02-01T00:00:00Z' }));
   }));
   render(<App />);
   await screen.findByRole('heading', { name: '조회 기간 사용량' });
   expect(screen.getByRole('link', { name: '내 사용량' }).getAttribute('aria-current')).toBe('page');
-  fireEvent.change(screen.getByLabelText('모델'), { target: { value: 'kept-only-on-this-screen' } });
+  await waitFor(() => pickOption(screen.getByLabelText('모델'), /^kept-only-on-this-screen/));
 
   expect(clickRecord(screen.getByRole('link', { name: '전체 사용량' }))).toBe(true);
   expect(location.pathname).toBe('/dashboard/admin/usage');
   await screen.findByLabelText('사용자');
-  expect((screen.getByLabelText('모델') as HTMLInputElement).value).toBe('');
+  // 전체 사용량의 모델은 전체 요청 기록의 모델에서 고른다. 내 사용량에서 고른 값은 따라오지 않는다.
+  expect(screen.getByLabelText('모델').getAttribute('role')).toBe('combobox');
+  expect(screen.getByLabelText('모델').getAttribute('data-value')).toBe('');
+  expect(paths).toContain('/api/admin/requests/models');
   expect(paths).toContain('/api/admin/usage?group_by=provider');
   expect(screen.getByRole('link', { name: '전체 사용량' }).getAttribute('aria-current')).toBe('page');
   expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: '전체 사용량' }));
   expect(document.title).toBe('전체 사용량 · m-gated');
 
   expect(clickRecord(screen.getByRole('link', { name: '내 가상 키' }))).toBe(true);
-  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
+  await screen.findByRole('region', { name: '내 가상 키' });
   expect(paths).toContain('/api/keys');
 
   await act(async () => { history.pushState(null, '', '/dashboard/'); window.dispatchEvent(new PopStateEvent('popstate')); });

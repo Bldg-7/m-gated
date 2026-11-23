@@ -13,22 +13,33 @@ export function timezones(): string[] {
   return ['UTC', ...listed.filter(z => z !== 'UTC')];
 }
 
+// 저장 결과 문구를 화면이 다시 만들어지는 사이에 잠깐 맡아 둔다.
+// 시간대를 저장하면 로그인 정보(/api/me)를 다시 확인하고, 그동안 화면 전체가 사라졌다 다시 만들어진다.
+// 그래서 문구를 컴포넌트 안에만 두면 사용자가 보기 전에 사라진다. 화면이 여러 번 다시 만들어질 수 있어 읽을 때 지우지 않고,
+// 10초가 지난 문구만 버린다.
+let carried: { text: string; at: number } | null = null;
+function carriedText() { return carried && Date.now() - carried.at < 10000 ? carried.text : null; }
+
 /** 게이트웨이 전체 설정. 지금은 월 예산의 기준 시간대 하나다. */
 export function SettingsScreen() {
   const { t } = useTranslation();
   const view = useResource<{ budget_timezone: BudgetTimezone }>('/api/admin/settings');
   const tz = view.data?.budget_timezone;
+  // 저장 결과 문구. 저장한 뒤 설정을 다시 읽는 동안 폼이 사라졌다 다시 나오므로, 문구는 폼 밖에 둔다.
+  const [status, setLocal] = useState<string | null>(carriedText);
+  const setStatus = (text: string | null) => { carried = text ? { text, at: Date.now() } : null; setLocal(text); };
   return <div className="stack-lg">
     <ReadState {...view} />
-    {tz && <BudgetTimezoneForm key={tz.version} current={tz} onSaved={async () => { await view.reload(); await session.validate('automatic'); }} />}
+    {status && <p role="status">{status}</p>}
+    {tz && <BudgetTimezoneForm key={tz.version} current={tz} setStatus={setStatus} onSaved={async () => { await view.reload(); await session.validate('automatic'); }} />}
     {!tz && !view.error && <p role="status">{t('설정을 불러오는 중…')}</p>}
   </div>;
 }
 
-function BudgetTimezoneForm({ current, onSaved }: { current: BudgetTimezone; onSaved: () => Promise<void> }) {
+function BudgetTimezoneForm({ current, onSaved, setStatus }: { current: BudgetTimezone; onSaved: () => Promise<void>; setStatus: (text: string | null) => void }) {
   const { t } = useTranslation();
   const target = current.pending?.timezone ?? current.timezone;
-  const [value, setValue] = useState(target), [busy, setBusy] = useState(false), [status, setStatus] = useState<string | null>(null);
+  const [value, setValue] = useState(target), [busy, setBusy] = useState(false);
   const mounted = useRef(true), format = useTimeFormat();
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const save = async () => {
@@ -59,6 +70,5 @@ function BudgetTimezoneForm({ current, onSaved }: { current: BudgetTimezone; onS
       <p className="meta">{t('바꾸면 이번 기간은 지금 시간대로 끝까지 세고, 다음 기간부터 새 시간대를 씁니다. 바뀐 직후의 기간 하나만 이전 기간이 끝난 시각부터 새 시간대의 다음 달 1일 0시까지로 셉니다. 지금 시간대를 다시 고르면 예약된 변경이 취소됩니다.')}</p>
       <div className="actions"><button className="btn-primary" disabled={value === target}>{t('시간대 저장')}</button></div>
     </fieldset>
-    {status && <p role="status">{status}</p>}
   </form>;
 }

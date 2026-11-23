@@ -100,6 +100,7 @@ impl DashboardApi {
         Router::new()
             .route("/api/me", any(read))
             .route("/api/usage", any(read))
+            .route("/api/usage/models", any(read))
             .route("/auth/login", any(read))
             .route("/api/csrf", any(management::handle))
             .route("/api/keys", any(management::handle))
@@ -192,6 +193,9 @@ async fn read(State(state): State<ApiState>, request: Request) -> Response {
                     success(json!({"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}))
                 },Err(error)=>query_error(error),
             }
+        } else if request.uri.path()=="/api/usage/models" {
+            if request.uri.query().is_some() { return query_error(QueryError::InvalidFilter); }
+            match state.api.store.dashboard_usage_models(human.current.id).await { Ok(value)=>success(value),Err(error)=>query_error(error) }
         } else {
             let query=match UsageQuery::parse(request.uri.query()) { Ok(q)=>q,Err(e)=>return query_error(e) };
             let grants=state.api.grants();

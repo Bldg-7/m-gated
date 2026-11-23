@@ -15,7 +15,7 @@ function Harness({ busy = false, onConfirm = () => {}, variant }: { busy?: boole
   </main>;
 }
 
-test('modal_moves_focus_inside_keeps_tab_inside_and_returns_focus_to_the_opener', () => {
+test('danger_modal_focuses_cancel_first_keeps_tab_inside_and_returns_focus_to_the_opener', () => {
   render(<Harness variant="danger" />);
   const opener = screen.getByRole('button', { name: '열기' });
   opener.focus();
@@ -25,12 +25,11 @@ test('modal_moves_focus_inside_keeps_tab_inside_and_returns_focus_to_the_opener'
   expect(dialog.hasAttribute('open')).toBe(true);
   expect(dialog.getAttribute('aria-modal')).toBe('true');
   expect(dialog.className).toContain('modal-danger');
-  // 첫 버튼(본문의 목록 선택)으로 초점이 간다.
+  // 위험 창은 '취소'에 처음 초점을 둔다. 바로 Enter를 눌러도 실행되지 않는다.
   const first = within(dialog).getByRole('combobox', { name: '방식' });
-  expect(document.activeElement).toBe(first);
   const confirm = within(dialog).getByRole('button', { name: '삭제' }), cancel = within(dialog).getByRole('button', { name: '취소' });
+  expect(document.activeElement).toBe(cancel);
   expect(confirm.className).toBe('btn-danger');
-  cancel.focus();
   fireEvent.keyDown(cancel, { key: 'Tab' });
   expect(document.activeElement).toBe(first);
   fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
@@ -45,6 +44,8 @@ test('modal_closes_on_escape_and_backdrop_click_but_escape_in_an_open_select_clo
   fireEvent.click(screen.getByRole('button', { name: '열기' }));
   let dialog = screen.getByRole('dialog', { name: '삭제 확인' });
   const select = within(dialog).getByRole('combobox', { name: '방식' });
+  // 보통 창은 첫 버튼(본문의 목록 선택)에 처음 초점을 둔다.
+  expect(document.activeElement).toBe(select);
   fireEvent.click(select);
   fireEvent.keyDown(select, { key: 'Escape' });
   expect(select.getAttribute('aria-expanded')).toBe('false');

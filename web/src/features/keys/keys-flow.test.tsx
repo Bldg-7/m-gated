@@ -20,7 +20,7 @@ async function mount(write: (input: RequestInfo | URL, init: RequestInit) => Pro
   });
   vi.stubGlobal('fetch', fetcher); render(<App />);
   if (view === 'issue') { await screen.findByRole('form', { name: '가상 키 발급' }); await waitFor(() => expect(lists(fetcher)).toBeGreaterThan(0)); return fetcher; }
-  await screen.findByRole('heading', { level: 2, name: '내 가상 키' });
+  await screen.findByRole('region', { name: '내 가상 키' });
   await waitFor(() => expect((screen.getByRole('button', { name: '키 조회' }) as HTMLButtonElement).disabled).toBe(false));
   return fetcher;
 }
@@ -83,7 +83,7 @@ test('pagehide_synchronously_removes_secret_and_form_before_page_can_freeze', as
   await act(async () => { window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })); });
   expect(screen.queryByText('temporary-secret')).toBeNull(); expect(screen.queryByLabelText('키 이름')).toBeNull();
   await act(async () => { window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
-  await screen.findByRole('heading', { level: 2, name: '가상 키 발급' });
+  await screen.findByRole('region', { name: '가상 키 발급' });
   expect(location.pathname).toBe('/dashboard/keys/new');
   expect(screen.queryByText('temporary-secret')).toBeNull(); expect((screen.getByLabelText('키 이름') as HTMLInputElement).value).toBe('');
   // 고른 Provider 키와 허용한 API도 남지 않는다.
