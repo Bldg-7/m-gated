@@ -242,7 +242,20 @@ impl PgLedger {
                 if count >= 32 {
                     return Err(ManagementError::Quota);
                 }
+                // 키의 한도는 키 주인의 정책 한도와 서버 실행 상한을 넘을 수 없다. 조용히 줄이지 않고 거절한다.
+                let owner_limits = sqlx::query("SELECT *,budget_limit_usd::text AS budget FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL")
+                    .bind(target_principal)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let owner_limits: super::policy::PolicyLimits =
+                    serde_json::from_value(super::management_query::limits(&owner_limits))
+                        .map_err(|_| ManagementError::Invariant)?;
+                let maximum = super::policy::PolicyLimits::key_maximum(&owner_limits, ctx.ceiling)?;
+                // 형식이 틀리거나 서버 실행 상한과 예산 방식이 다른 입력은 먼저 그 이유로 거절한다.
                 let limits = v.limits.effective(ctx.ceiling)?;
+                if v.limits.exceeds(&maximum)? {
+                    return Err(ManagementError::LimitExceeded);
+                }
                 let key = VirtualSecret::generate().map_err(|_| ManagementError::Invariant)?;
                 result_target = key.id;
                 let expires = v.validity.expires_at(&mut tx, &now).await?;

@@ -62,6 +62,42 @@ impl PolicyLimits {
             count_rpm: smaller(self.count_rpm, ceiling.count_rpm),
         })
     }
+    /// 가상 키에 넣을 수 있는 한도의 최대값. 키 주인의 정책 한도와 서버 실행 상한 가운데 더 작은 값이다.
+    /// 둘 다 없는 항목은 최대값이 없다.
+    pub fn key_maximum(policy: &Self, ceiling: &Self) -> Result<Self, LedgerError> {
+        policy.effective(ceiling)
+    }
+    /// 이 한도 가운데 최대값을 넘는 항목이 있는지. 비워 둔 항목과 최대값이 없는 항목은 넘지 않는다.
+    pub fn exceeds(&self, maximum: &Self) -> Result<bool, LedgerError> {
+        fn over(a: Option<i64>, b: Option<i64>) -> bool {
+            matches!((a, b), (Some(a), Some(b)) if a > b)
+        }
+        let budget = match (&self.budget, &maximum.budget) {
+            (Some(a), Some(b)) => {
+                let amount = |s: &str| {
+                    s.parse::<Amount>()
+                        .map_err(|_| LedgerError::InvalidSnapshot)
+                };
+                amount(&a.limit_usd)? > amount(&b.limit_usd)?
+            }
+            _ => false,
+        };
+        Ok(budget
+            || over(self.rpm, maximum.rpm)
+            || over(self.tpm, maximum.tpm)
+            || over(self.count_rpm, maximum.count_rpm))
+    }
+    /// 응답에 싣는 최대값. 정책 한도(JSON)를 읽지 못하면 null이다.
+    pub fn key_maximum_view(
+        policy_limits: &serde_json::Value,
+        ceiling: &Self,
+    ) -> serde_json::Value {
+        serde_json::from_value::<Self>(policy_limits.clone())
+            .ok()
+            .and_then(|policy| Self::key_maximum(&policy, ceiling).ok())
+            .and_then(|maximum| serde_json::to_value(maximum).ok())
+            .unwrap_or(serde_json::Value::Null)
+    }
     /// API로 받은 한도에는 시간대를 둘 수 없다. 예산 기간의 시간대는 관리자 설정에서 정한다.
     pub fn without_timezone(&self) -> bool {
         self.budget

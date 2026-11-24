@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18n, { msgid } from '../../lib/i18n';
 import { ApiError, session, StaleResponse } from '../../lib/api';
-import { failure, fields, ReadState, useResource } from './shared';
+import { CommandBusy, failure, fields, ReadState, useResource } from './shared';
 import type { CredentialList, CredentialMeta } from './types';
 import { useTimeFormat } from '../../lib/time';
 import { Badge, IconButton, Modal, SearchSelect, Select, StatusBadge } from '../../ui/ui';
@@ -10,7 +10,7 @@ import { GrantModal } from './grant';
 
 export const providerNames: Record<string, string> = { anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek' };
 /** 상태 라벨은 StatusBadge(정상·미등록·복호화 불가)가 그리고, 여기에는 그 결과만 적는다. */
-const statusNote: Record<string, string> = { missing: msgid('활성 Provider 키가 없어 이 Provider 요청은 503으로 거절됩니다.'), undecryptable: msgid('CREDENTIAL_ENCRYPTION_KEY가 바뀌었습니다. 복호화할 수 없는 키마다 「키 교체」로 같은 키를 다시 넣으세요. 이름·연결·인가는 그대로 유지됩니다.') };
+const statusNote: Record<string, string> = { missing: msgid('활성 Provider 키가 없는 요청은 503으로 거절됩니다.'), undecryptable: msgid('CREDENTIAL_ENCRYPTION_KEY가 바뀌었습니다. 복호화할 수 없는 키마다 「키 교체」로 같은 키를 다시 넣으세요. 이름·연결·인가는 그대로 유지됩니다.') };
 /** 키 교체와 해제는 확인 창을 거친다. 키 추가는 입력 창에서 바로 보낸다. */
 type Pending =
   | { kind: 'replace'; provider: string; target: CredentialMeta; hint: string }
@@ -93,7 +93,7 @@ export function CredentialsScreen() {
   const target = editing ? providers.flatMap(p => p.credentials.map(c => ({ provider: p.provider, c, others: p.credentials.filter(o => o.id !== c.id) }))).find(r => r.c.id === editing.id) ?? null : null;
   const bound = target ? target.c.bound_keys !== '0' : false;
   return <div className="stack-lg">
-    <ReadState {...list} />{status && <p role="status">{status}</p>}{busy && <p role="status">{t('처리 중…')}</p>}
+    <ReadState {...list} />{status && <p role="status">{status}</p>}{busy && <CommandBusy />}
     {pending && <Modal variant={pending.kind === 'retire' ? 'danger' : 'normal'} busy={busy} onClose={cancel} confirm={{ label: t('명령 실행'), onConfirm: () => void execute() }}
       title={pending.kind === 'replace' ? t('{{label}} 키 교체 확인', { label: pending.target.label }) : t('{{label}} 해제 확인', { label: pending.target.label })}>
       <p>{pending.kind === 'replace' ? t('끝자리 …{{hint}} 키를 Provider에 확인한 뒤 {{label}}의 키를 바꿉니다. 이전 키는 해제되고 암호문이 지워집니다. 이름·인가·가상 키 연결은 그대로 이어집니다.', { hint: pending.hint, label: credentialLabel(pending.target) })

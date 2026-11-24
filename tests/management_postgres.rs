@@ -1403,6 +1403,23 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
         .await;
     assert_eq!(s, 200);
     assert_eq!(detail["principal"]["policy"]["grants"], json!([]));
+    let (s, owner, _) = h
+        .request(
+            "GET",
+            &format!("/api/admin/principals/{}", h.actor),
+            Some(token),
+            false,
+            None,
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert!(owner["principal"]["management_owner_name"].is_null());
+    assert_eq!(
+        detail["principal"]["management_owner_name"],
+        owner["principal"]["display_name"]
+    );
     let (s, ack, _) = h
         .request(
             "PATCH",

@@ -83,11 +83,11 @@ test('admin_edits_a_virtual_key_only_to_keys_authorized_for_its_owner', async ()
   expect(screen.queryByRole('button', { name: 'Provider 키 변경' })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '연결 키 수정' }));
   const dialog = await screen.findByRole('dialog', { name: '연결 키 수정' });
-  const to = within(dialog).getByLabelText('Anthropic Provider 키');
+  const to = within(dialog).getByLabelText('연동할 Provider 키 (1개 이상 필수)');
   expect(selectedValue(to)).toBe('b');
   // 키 주인에게 인가되지 않은 team-c는 후보가 아니다.
-  expect(optionNames(to)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
-  pickOption(to, 'team-a (…0001)');
+  expect(optionNames(to)).toEqual(['Anthropic · team-a (…0001)', 'Anthropic · team-b (…0002)']);
+  pickOption(to, 'Anthropic · team-a (…0001)');
   fireEvent.click(within(dialog).getByRole('button', { name: '수정 저장' }));
   expect((await screen.findByRole('status')).textContent).toBe('연결 키 키를 수정했습니다.');
   expect(screen.queryByRole('dialog')).toBeNull();
@@ -116,12 +116,12 @@ test('admin_fixes_a_blocked_binding_by_choosing_a_key_authorized_for_the_owner',
   expect(within(binding).queryByRole('button')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '막힌 키 수정' }));
   const dialog = await screen.findByRole('dialog', { name: '막힌 키 수정' });
-  const to = within(dialog).getByLabelText('Anthropic Provider 키'), save = within(dialog).getByRole('button', { name: '수정 저장' }) as HTMLButtonElement;
+  const to = within(dialog).getByLabelText('연동할 Provider 키 (1개 이상 필수)'), save = within(dialog).getByRole('button', { name: '수정 저장' }) as HTMLButtonElement;
   // 인가가 풀린 연결은 처음 값이 아니다. 인가된 키를 다시 골라야 저장할 수 있다.
   expect(selectedValue(to)).toBe('');
-  expect(optionNames(to)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
+  expect(optionNames(to)).toEqual(['Anthropic · team-a (…0001)', 'Anthropic · team-b (…0002)']);
   expect(save.disabled).toBe(true);
-  pickOption(to, 'team-b (…0002)');
+  pickOption(to, 'Anthropic · team-b (…0002)');
   expect((within(dialog).getByLabelText('anthropic / synthetic-text / messages') as HTMLInputElement).checked).toBe(true);
   expect(save.disabled).toBe(false);
   fireEvent.click(save);
@@ -171,17 +171,17 @@ test('key_form_offers_only_authorized_provider_keys_and_only_the_apis_of_a_linke
   const form = await screen.findByRole('form', { name: '가상 키 발급' });
   const submit = within(form).getByRole('button', { name: '발급 내용 확인' }) as HTMLButtonElement;
   // 인가된 키가 하나뿐이어도 미리 고르지 않는다. Provider 키를 고르기 전에는 고를 API가 없다.
-  const provider = within(form).getByLabelText('Anthropic Provider 키') as HTMLInputElement;
+  const provider = within(form).getByLabelText('연동할 Provider 키 (1개 이상 필수)') as HTMLInputElement;
   expect(selectedValue(provider)).toBe('');
-  expect(optionNames(provider)).toEqual(['연동 안 함', 'team-b (…0002)']);
+  expect(optionNames(provider)).toEqual(['Anthropic · team-b (…0002)']);
   expect(within(form).queryAllByRole('checkbox')).toHaveLength(0);
   expect(submit.disabled).toBe(true);
   // 인가된 키가 없는 Provider는 이유만 보여 주고 선택칸을 두지 않는다.
   expect(within(form).queryByLabelText('OpenAI Provider 키')).toBeNull();
   expect(within(form).getByText('나에게 인가된 OpenAI Provider 키가 없습니다.')).toBeTruthy();
-  pickOption(provider, 'team-b (…0002)');
+  pickOption(provider, 'Anthropic · team-b (…0002)');
   expect(selectedValue(provider)).toBe('b');
-  expect(provider.value).toBe('team-b (…0002)');
+  expect(within(form).getByRole('button', { name: 'Anthropic · team-b (…0002) 제거' })).toBeTruthy();
   // 연동한 Provider의 API만 고를 수 있다. 인가된 키가 없는 Provider의 API는 고를 수 없다.
   expect(within(form).queryByLabelText('openai / synthetic-gpt / responses')).toBeNull();
   expect(submit.disabled).toBe(true);
@@ -219,11 +219,11 @@ test('service_account_key_is_issued_on_its_own_page_from_the_keys_authorized_for
   expect(within(form).getByRole('link', { name: '취소' }).getAttribute('href')).toBe('/dashboard/admin/principals/detail?principal_id=human1');
   expect(screen.queryByRole('form', { name: '키 조회' })).toBeNull();
   // 관리자가 아니라 서비스 계정에 인가된 Provider 키 안에서만 고른다.
-  const provider = within(form).getByLabelText('Anthropic Provider 키');
-  expect(optionNames(provider)).toEqual(['연동 안 함', 'team-b (…0002)']);
+  const provider = within(form).getByLabelText('연동할 Provider 키 (1개 이상 필수)');
+  expect(optionNames(provider)).toEqual(['Anthropic · team-b (…0002)']);
   fireEvent.change(within(form).getByLabelText('키 이름'), { target: { value: '배치 키' } });
   pickOption(within(form).getByLabelText('유효기간'), '1년');
-  pickOption(provider, 'team-b (…0002)');
+  pickOption(provider, 'Anthropic · team-b (…0002)');
   fireEvent.click(within(form).getByLabelText('anthropic / synthetic-text / messages'));
   fireEvent.submit(form);
   fireEvent.click(within(await screen.findByRole('dialog', { name: '발급 확인' })).getByRole('button', { name: '발급 확인' }));

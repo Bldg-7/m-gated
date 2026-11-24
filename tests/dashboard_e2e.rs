@@ -295,6 +295,8 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
     } else {
         (1..=15).chain([26, 27, 28]).collect()
     };
+    // 실패한 사례의 줄 번호를 볼 수 있게, 걸러 낸 결과 줄을 먼저 내보낸다.
+    browser_result::forward_sanitized(&stdout);
     browser_result::assert_cases(&stdout, &expected);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -303,7 +305,6 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
             .iter()
             .all(|t| !stdout.contains(t.as_str()) && !stderr.contains(t.as_str()))
     );
-    browser_result::forward_sanitized(&stdout);
     assert!(
         output.status.success(),
         "Playwright exit={:?}",

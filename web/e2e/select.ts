@@ -21,18 +21,19 @@ export async function optionNames(combobox: Locator) {
   return names;
 }
 /**
- * Provider 키를 아직 고르지 않았으면 키 주인에게 인가된 첫 키를 고른다.
- * 발급 폼은 인가된 키가 하나뿐이어도 미리 골라 두지 않는다. 목록의 첫 항목 「연동 안 함」(빈 값)은 건너뛴다.
- * 허용할 API 체크박스는 Provider 키를 고른 뒤에야 나타나므로, API를 고르기 전에 먼저 부른다.
+ * Provider 키를 아직 고르지 않았으면 키 주인에게 인가된 그 Provider의 첫 키를 고른다.
+ * 발급·수정 폼의 Provider 키는 선택 칸 하나(여러 개 선택)에서 고르고, 고른 키는 배지로 보인다.
+ * 발급 폼은 인가된 키가 하나뿐이어도 미리 골라 두지 않는다. 허용할 API 체크박스는 Provider 키를 고른 뒤에야 나타나므로, API를 고르기 전에 먼저 부른다.
  */
 export async function ensureProviderKey(scope: Locator, provider = 'Anthropic') {
-  const combobox = scope.getByLabel(`${provider} Provider 키`, { exact: true });
+  const combobox = scope.getByLabel('연동할 Provider 키 (1개 이상 필수)', { exact: true });
   await expect(combobox).toBeVisible();
-  if (await combobox.getAttribute('data-value')) return;
+  const chip = scope.getByRole('button', { name: new RegExp(`^${provider} · .+ 제거$`) });
+  if (await chip.count()) return;
   const list = await listbox(combobox);
-  await list.getByRole('option').filter({ hasNotText: '연동 안 함' }).first().click();
-  await expect(combobox).toHaveAttribute('aria-expanded', 'false');
-  await expect(combobox).not.toHaveAttribute('data-value', '');
+  await list.getByRole('option').filter({ hasText: new RegExp(`^${provider} · `) }).first().click();
+  await expect(chip).toHaveCount(1);
+  await combobox.press('Escape');
 }
 
 /** 값(예: 사용자 ID)으로 항목을 고른다. 화면에 보이는 이름을 시험이 모를 때 쓴다. 목록이 서버에서 올 때까지 기다린다. */

@@ -117,6 +117,8 @@ pub(crate) async fn principal(
     p.as_object_mut()
         .ok_or(ManagementError::Invariant)?
         .remove("effective_grants");
+    // 목록과 상세에서 owner를 이름으로 보여 주도록 owner 이름을 함께 싣는다.
+    p["management_owner_name"] = Value::Null;
     let inactive = if p["kind"] == "human" {
         p["email"].as_str().is_none_or(|e| !settings.allows(e))
     } else {
@@ -128,6 +130,7 @@ pub(crate) async fn principal(
             )
             .fetch_one(&mut *c)
             .await?;
+        p["management_owner_name"] = json!(owner.get::<String, _>("display_name"));
         !management::active_human(&owner, settings)
     };
     if inactive {
@@ -567,7 +570,7 @@ impl PgIdentityStore {
                 // 이 사용자가 쓸 수 있는 회사 키(인가). 인가가 없는 Provider는 그 Provider의 기본 키를 쓴다.
                 p["provider_credentials"] =
                     super::credentials::principal_authorization(&mut tx, id).await?;
-                json!({"principal":p,"execution_ceiling":{"grants":ctx.grants,"limits":ceiling}})
+                json!({"key_limit_maximum":super::policy::PolicyLimits::key_maximum_view(&p["policy"]["limits"],ceiling),"principal":p,"execution_ceiling":{"grants":ctx.grants,"limits":ceiling}})
             } else {
                 request_detail(&mut tx, id, true).await?
             };

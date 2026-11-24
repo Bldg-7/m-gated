@@ -7,8 +7,9 @@ import type { PrincipalDetail } from '../admin/types';
 import { credentialLabel, providerNames } from '../admin/credentials';
 import { failure, useResource } from '../admin/shared';
 import { useTimeFormat } from '../../lib/time';
-import { Modal, SearchSelect } from '../../ui/ui';
+import { Modal, MultiSelect } from '../../ui/ui';
 import { GrantTable } from '../../ui/grant-table';
+import { ProviderLogo } from '../../ui/provider-logo';
 
 /** 키 주인의 지금 정책(고를 수 있는 API)과 인가된 Provider 키. */
 export type KeyOwner = { grants: Grant[]; authorized: AuthorizedCredentials };
@@ -45,9 +46,14 @@ function EditKeyForm({ target, owner, validity, onClose, onDone }: Props & { own
   const grantedProviders = new Set(owner.grants.flatMap((grant, gi) => grant.capabilities.some((_, ci) => granted.has(`${gi}:${ci}`)) ? [grant.provider] : []));
   const withoutApi = chosenProviders.filter(provider => !grantedProviders.has(provider));
   const dropped = target.grants.flatMap(g => g.capabilities.filter(cap => !owner.grants.some(o => o.provider === g.provider && o.model === g.model && o.capabilities.includes(cap))).map(cap => `${g.provider} / ${g.model} / ${cap}`));
-  const choose = (provider: string, id: string) => {
-    setChosen(prev => ({ ...prev, [provider]: id }));
-    if (!id) setGranted(prev => new Set([...prev].filter(value => owner.grants[Number(value.split(':')[0])]?.provider !== provider)));
+  // 고를 수 있는 Provider 키 전부. Provider마다 하나만 연결하므로 같은 Provider의 키는 서로 바꿔 낀다.
+  const keyOptions = providers.flatMap(provider => authorizedFor(provider).map(c => ({ value: c.id, label: `${providerNames[provider] ?? provider} · ${credentialLabel(c)}`, chip: <><ProviderLogo provider={provider} name={providerNames[provider] ?? provider} />{credentialLabel(c)}</>, group: provider })));
+  const chosenIds = chosenProviders.map(provider => chosen[provider]);
+  const chooseKeys = (ids: string[]) => {
+    const next = Object.fromEntries(ids.flatMap(id => { const option = keyOptions.find(o => o.value === id); return option ? [[option.group, id]] : []; }));
+    setChosen(next);
+    // 연동을 푼 Provider의 API는 허용 목록에서도 뺀다.
+    setGranted(prev => new Set([...prev].filter(value => { const provider = owner.grants[Number(value.split(':')[0])]?.provider; return provider !== undefined && provider in next; })));
   };
   // 허용할 API 표의 줄. Provider 키를 고른 Provider의 API만 보인다. key는 `정책 grant 순번:기능 순번`이다.
   const grantRows = owner.grants.flatMap((g, gi) => chosenProviders.includes(g.provider) ? g.capabilities.map((capability, ci) => ({ key: `${gi}:${ci}`, provider: g.provider, providerLabel: providerNames[g.provider] ?? g.provider, model: g.model, capability })) : []);
@@ -78,15 +84,12 @@ function EditKeyForm({ target, owner, validity, onClose, onDone }: Props & { own
   return <Modal title={t('{{name}} 수정', { name: target.name })} busy={busy} onClose={onClose} confirm={{ label: t('수정 저장'), onConfirm: () => void submit(), disabled: !ready }}>
     {error && <p role="alert">{error}</p>}
     <label>{t('키 이름')}<input value={name} maxLength={100} required disabled={busy} onChange={e => setName(e.currentTarget.value)} /></label>
-    <fieldset className="stack-sm"><legend>{t('연동할 Provider 키 (1개 이상 필수)')}</legend>
-      <div className="form-grid">{providers.map(provider => {
-        const options = authorizedFor(provider), label = providerNames[provider] ?? provider;
-        return <div key={provider} className="field">{options.length > 0
-          ? <><label htmlFor={`${prefix}-credential-${provider}`}>{t('{{provider}} Provider 키', { provider: label })}</label><SearchSelect id={`${prefix}-credential-${provider}`} value={chosen[provider] ?? ''} disabled={busy} onChange={id => choose(provider, id)} options={[{ value: '', label: t('연동 안 함') }, ...options.map(c => ({ value: c.id, label: credentialLabel(c) }))]} /></>
-          : <><span className="field-label">{t('{{provider}} Provider 키', { provider: label })}</span><p className="meta">{t('키 주인에게 인가된 {{provider}} Provider 키가 없습니다.', { provider: label })}</p></>}</div>;
-      })}</div>
+    <div className="field"><label htmlFor={`${prefix}-credentials`}>{t('연동할 Provider 키 (1개 이상 필수)')}</label>
+      {keyOptions.length > 0 && <MultiSelect id={`${prefix}-credentials`} value={chosenIds} onChange={chooseKeys} disabled={busy} options={keyOptions} placeholder={t('Provider 키를 고르세요')} />}
+      {keyOptions.length > 0 && <p className="meta">{t('Provider마다 하나를 고릅니다. 같은 Provider의 다른 키를 고르면 바뀝니다.')}</p>}
+      {providers.filter(provider => authorizedFor(provider).length === 0).map(provider => <p key={provider} className="meta">{t('키 주인에게 인가된 {{provider}} Provider 키가 없습니다.', { provider: providerNames[provider] ?? provider })}</p>)}
       {providers.length === 0 && <p className="callout callout-critical">{t('키 주인의 정책에 허용된 API가 없어 이 키를 수정할 수 없습니다.')}</p>}
-    </fieldset>
+    </div>
     <fieldset className="stack-sm"><legend>{t('허용할 API (연동한 Provider마다 1개 이상 필수)')}</legend>
       {chosenProviders.length === 0 ? <p className="meta">{t('Provider 키를 먼저 고르면 그 Provider의 API를 고를 수 있습니다.')}</p>
         : <GrantTable rows={grantRows} selected={granted} disabled={busy}

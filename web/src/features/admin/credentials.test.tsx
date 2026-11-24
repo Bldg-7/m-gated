@@ -33,7 +33,7 @@ test('first_key_is_added_with_a_label_and_the_secret_is_never_rendered', async (
   render(<App />);
   await screen.findByText(/미등록/);
   expect(screen.getByRole('heading', { level: 1, name: 'Provider 키' })).toBeTruthy();
-  expect(within(screen.getByRole('region', { name: 'Anthropic Provider 키 상태' })).getByText('활성 Provider 키가 없어 이 Provider 요청은 503으로 거절됩니다.')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'Anthropic Provider 키 상태' })).getByText('활성 Provider 키가 없는 요청은 503으로 거절됩니다.')).toBeTruthy();
   expect(document.body.textContent).not.toContain('기본 키');
   // 키 추가는 창에서 Provider를 고르고 이름과 키를 넣는다. 확인 창 없이 바로 보낸다.
   fireEvent.click(screen.getByRole('button', { name: 'Provider 키 추가' }));
@@ -180,13 +180,13 @@ test('admin_chooses_only_from_own_authorized_provider_keys_when_issuing', async 
   }));
   render(<App />);
   fireEvent.change(await screen.findByLabelText('키 이름'), { target: { value: '새 키' } });
-  pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
+  pickOption(screen.getByLabelText('유효기간'), '무제한');
   // Provider 키를 고르기 전에는 고를 API가 없다.
   expect(screen.queryByLabelText('anthropic / synthetic-text / messages')).toBeNull();
   // Provider 키는 미리 고르지 않고, 고르지 않으면 확인 창을 열지 않는다.
-  const select = screen.getByLabelText('Anthropic Provider 키') as HTMLInputElement;
+  const select = screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)') as HTMLInputElement;
   expect(selectedValue(select)).toBe('');
-  expect(optionNames(select)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
+  expect(optionNames(select)).toEqual(['Anthropic · team-a (…0001)', 'Anthropic · team-b (…0002)']);
   expect((screen.getByRole('button', { name: '발급 내용 확인' }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   expect(screen.getByRole('alert').textContent).toBe('연동할 Provider 키를 하나 이상 고르세요.');
@@ -194,8 +194,8 @@ test('admin_chooses_only_from_own_authorized_provider_keys_when_issuing', async 
   // 글자를 쳐서 좁힌 뒤 고른다.
   fireEvent.click(select);
   fireEvent.change(select, { target: { value: 'TEAM-B' } });
-  pickOption(select, 'team-b (…0002)');
-  expect(select.value).toBe('team-b (…0002)');
+  pickOption(select, 'Anthropic · team-b (…0002)');
+  expect(screen.getByRole('button', { name: 'Anthropic · team-b (…0002) 제거' })).toBeTruthy();
   fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   const confirm = await screen.findByRole('dialog', { name: '발급 확인' });
@@ -217,8 +217,8 @@ test('admin_chooses_only_from_own_authorized_provider_keys_when_issuing', async 
   // 내 가상 키는 주인이 수정 창에서 Provider 키 연결을 바꾼다. 후보는 나에게 인가된 키뿐이고, 전체 Provider 키 목록은 읽지 않는다.
   expect(within(binding).queryByRole('button')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '새 키 수정' }));
-  const edit = within(await screen.findByRole('dialog', { name: '새 키 수정' })).getByLabelText('Anthropic Provider 키');
+  const edit = within(await screen.findByRole('dialog', { name: '새 키 수정' })).getByLabelText('연동할 Provider 키 (1개 이상 필수)');
   expect(selectedValue(edit)).toBe('credB');
-  expect(optionNames(edit)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
+  expect(optionNames(edit)).toEqual(['Anthropic · team-a (…0001)', 'Anthropic · team-b (…0002)']);
   expect(calls.some(c => c.url.startsWith('/api/admin/'))).toBe(false);
 });

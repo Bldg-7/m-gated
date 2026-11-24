@@ -27,10 +27,10 @@ test('admin_principal_separate_three_cas_ack_get_policy_conflict_and_safety', as
   await execute(page); expect(writes[0].version).toBe('7'); await expect(detail).toContainText(`owner: ${bob}`);
   await detail.getByLabel('분당 요청 수 한도 (RPM)', { exact: true }).fill('11');
   await detail.getByLabel('정책 변경 사유', { exact: true }).fill('안전차단 비승계 정책 확인');
-  await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click(); await execute(page);
+  await detail.getByRole('button', { name: '정책 저장', exact: true }).click(); await execute(page);
   expect(writes[1].version).toBe('13'); await expect(detail.getByRole('region', { name: '자동과금 차단됨', exact: true })).toContainText('유료 요청을 막고 있습니다');
   await detail.getByLabel('정책 변경 사유', { exact: true }).fill('stale 편집');
-  await detail.getByRole('button', { name: '정책 교체 확인', exact: true }).click();
+  await detail.getByRole('button', { name: '정책 저장', exact: true }).click();
   await page.request.post(`${process.env.E2E_CONTROL_URL}/stale-policy`);
   await execute(page); await expect(detail).toContainText('버전이 변경되었습니다.'); expect(writes).toHaveLength(3);
   const latest = await json(page, `/api/admin/principals/${service}`); expect(latest.body.principal.policy.version).toBe('15');
@@ -60,7 +60,7 @@ test('admin_service_create_deny_all_owner_authority_service_key_and_global_keys'
   // 서비스 계정의 가상 키 발급 폼은 하위 페이지에 있다. 사용자 상세에는 폼이 없고 그 페이지로 가는 링크만 있다.
   const issueForm = page.getByRole('form', { name: '서비스 계정의 가상 키 발급', exact: true }); await expect(keys.getByRole('link', { name: '서비스 계정의 가상 키 발급', exact: true })).toBeVisible(); await expect(issueForm).toHaveCount(0);
   await keys.getByRole('link', { name: '서비스 계정의 가상 키 발급', exact: true }).click(); await expect(page).toHaveURL(`${origin}/dashboard/admin/principals/key?principal_id=${service}`); await expect(issueForm).toBeVisible();
-  await issueForm.getByLabel('키 이름', { exact: true }).fill('서비스 키'); await expect(issueForm.getByLabel('유효기간', { exact: true })).toHaveAttribute('data-value', ''); await pickOption(issueForm.getByLabel('유효기간', { exact: true }), '무제한 (만료 없음, 회수·정지는 적용)');
+  await issueForm.getByLabel('키 이름', { exact: true }).fill('서비스 키'); await expect(issueForm.getByLabel('유효기간', { exact: true })).toHaveAttribute('data-value', ''); await pickOption(issueForm.getByLabel('유효기간', { exact: true }), '무제한');
   // 발급에는 서비스 계정에 인가된 Provider 키가 꼭 필요하다(관리자도 전체 키에서 고르지 않는다). Provider 키를 먼저 골라야 그 Provider의 API를 고를 수 있다.
   await expect(issueForm.getByRole('button', { name: '발급 내용 확인', exact: true })).toBeDisabled();
   await ensureProviderKey(issueForm); await issueForm.getByLabel('anthropic / synthetic-text / messages', { exact: true }).check();
@@ -71,7 +71,7 @@ test('admin_service_create_deny_all_owner_authority_service_key_and_global_keys'
   await keys.getByRole('button', { name: '서비스 키 회수', exact: true }).click(); await page.getByRole('dialog', { name: '회수 확인', exact: true }).getByRole('button', { name: '회수 확인', exact: true }).click(); await expect(keys.getByRole('button', { name: '서비스 키 회수', exact: true })).toHaveCount(0);
   // 전체 키 목록은 가상 키 관리 페이지에 있다.
   await page.goto(`${origin}/dashboard/admin/keys`);
-  const allKeys = page.locator('main'), lookup = allKeys.getByRole('button', { name: '키 조회', exact: true });
+  const allKeys = page.locator('main'), lookup = allKeys.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true });
   // 목록을 처음 읽는 동안과 다시 읽는 동안에는 조회 버튼이 잠긴다. 읽기가 끝난 뒤에 누르고, 끝날 때까지 기다린다.
   await expect(lookup).toBeEnabled(); const listed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/admin/keys'); await lookup.click(); await listed; await expect(allKeys).toContainText('서비스 키'); await expect(lookup).toBeEnabled();
   expect(await page.locator('main').textContent()).not.toContain(secret); expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
@@ -103,11 +103,11 @@ test('admin_cursor_pages_and_selected_key_balance_remain_server_scoped', async (
   // 화면을 열 때 읽는 첫 목록이 끝난 뒤에 조회를 눌러, 그 조회의 응답을 기다린다.
   await expect(page.getByRole('button', { name: '다음 사용자 페이지', exact: true })).toBeVisible();
   const firstResponse = page.waitForResponse(r => new URL(r.url()).pathname === '/api/admin/principals' && !r.url().includes('cursor=') && r.status() === 200);
-  await page.getByRole('button', { name: '사용자 조회', exact: true }).click(); const first = await (await firstResponse).json(); expect(first.items).toHaveLength(1);
+  await page.getByRole('button', { name: '조회', exact: true }).click(); const first = await (await firstResponse).json(); expect(first.items).toHaveLength(1);
   const nextResponse = page.waitForResponse(r => r.url().includes('/api/admin/principals?cursor=') && r.status() === 200);
   await page.getByRole('button', { name: '다음 사용자 페이지', exact: true }).click(); const next = await (await nextResponse).json(); expect(next.as_of).toBe(first.as_of); expect(next.items[0].id).not.toBe(first.items[0].id);
   const cross = await json(page, `/api/admin/requests?cursor=${encodeURIComponent(first.next_cursor)}`); expect(cross.status).toBe(400); expect(cross.body.error.code).toBe('invalid_cursor');
-  await page.goto(`${origin}/dashboard/admin/requests`); await page.getByRole('button', { name: '요청 조회', exact: true }).click(); await expect(page.getByRole('button', { name: '다음 요청 페이지', exact: true })).toBeVisible(); await page.getByRole('button', { name: '다음 요청 페이지', exact: true }).click(); await expect(page.getByRole('button', { name: '서버 다시 조회', exact: true })).toBeEnabled();
+  await page.goto(`${origin}/dashboard/admin/requests`); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('button', { name: '다음 요청 페이지', exact: true })).toBeVisible(); await page.getByRole('button', { name: '다음 요청 페이지', exact: true }).click(); await expect(page.getByRole('button', { name: '서버 다시 조회', exact: true })).toBeEnabled();
   const keys = await json(page, `/api/admin/keys?principal_id=${service}`); expect(keys.body.items.length).toBeGreaterThan(0); const key = keys.body.items[0];
   await page.goto(`${origin}/dashboard/admin/usage?principal_id=${service}`); await pickValue(page.getByLabel('가상 키', { exact: true }), key.id); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByRole('heading', { name: `선택 키 ${key.id}`, exact: true })).toBeVisible();
   const usage = await json(page, `/api/admin/usage?principal_id=${service}&key_id=${key.id}`); expect(usage.body.balance_context).toBe('current_principal_and_key'); expect(usage.body.budget_balances).toHaveLength(2); expect(usage.body.budget_balances.map((b: {scope_kind: string}) => b.scope_kind)).toEqual(['principal', 'key']); expect(usage.body.budget_balances.every((b: {remaining_usd: string | null}) => b.remaining_usd === null)).toBe(true);
@@ -141,7 +141,7 @@ test('admin_direct_ids_role_demotion403_purges_forms_cache_and_late_payload', as
 });
 
 test('admin_failed_empty_loading_and_lost_ack_never_replays_writes', async ({ page, context }) => {
-  await open(page, context, '/dashboard/admin/requests'); await pickOption(page.getByLabel('실행 단계', { exact: true }), '입장 (admitted)'); await pickOption(page.getByLabel('결과', { exact: true }), '취소됨 (cancelled)'); await page.getByRole('button', { name: '요청 조회', exact: true }).click(); await expect(page.getByText('일치하는 요청이 없습니다.', { exact: true })).toBeVisible();
+  await open(page, context, '/dashboard/admin/requests'); await pickOption(page.getByLabel('실행 단계', { exact: true }), '입장 (admitted)'); await pickOption(page.getByLabel('결과', { exact: true }), '취소됨 (cancelled)'); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByText('일치하는 요청이 없습니다.', { exact: true })).toBeVisible();
   await page.goto(`${origin}/dashboard/admin/requests?request_id=00000000-0000-4000-8000-000000000001`); await expect(page.getByRole('region', { name: '요청 상세', exact: true }).getByRole('alert')).toContainText('대상이 없거나');
   await page.goto(`${origin}/dashboard/admin/principals?principal_id=${service}`); const detail = page.getByRole('region', { name: '사용자 상세', exact: true }); await expect(detail.getByLabel('서비스 이름', { exact: true })).toBeVisible();
   let writes = 0; await page.route(`${origin}/api/admin/principals/${service}`, async route => { if (route.request().method() !== 'PATCH') return route.fallback(); writes++; const response = await forward(route); expect(response.status()).toBe(200); await response.dispose(); return route.abort('failed'); });

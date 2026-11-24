@@ -1,9 +1,9 @@
 import type { AuthorizedCredentials, BlockState, Grant, Limits } from '../../lib/types';
 export type Safety = { paused: boolean; version: string; reason: string | null; paused_at: string | null; trigger_request_id: string | null };
 export type Policy = { id: string; version: string; disabled: boolean; grants: Grant[]; limits: Limits };
-export type PrincipalSummary = { id: string; kind: 'human' | 'service'; display_name: string; email: string | null; management_owner_id: string | null; version: string; policy_version: string; disabled: boolean; inference_safety: Safety; block_state: BlockState };
+export type PrincipalSummary = { id: string; kind: 'human' | 'service'; display_name: string; email: string | null; management_owner_id: string | null; management_owner_name: string | null; version: string; policy_version: string; disabled: boolean; inference_safety: Safety; block_state: BlockState };
 export type Principal = Omit<PrincipalSummary, 'policy_version' | 'disabled'> & { policy: Policy; provider_credentials: AuthorizedCredentials };
-export type PrincipalDetail = { principal: Principal; execution_ceiling: { grants: Grant[]; limits: Limits } };
+export type PrincipalDetail = { principal: Principal; key_limit_maximum?: Limits | null; execution_ceiling: { grants: Grant[]; limits: Limits } };
 export type CommandAck = { command_id: string; operation: string; target: { kind: string; id: string }; result_version: string | null; effect: 'changed' | 'noop'; replayed: boolean };
 export type RequestSummary = { id: string; parent_request_id: string | null; purpose: string; principal_id: string; key_id: string | null; provider: string; model: string; api: string; admitted_at: string; finished_at: string | null; phase: string; outcome: string | null; accounting_state: string; cost_usd: string | null; version: string; reason_code: string | null; provider_credential: { id: string; label: string | null; hint: string | null } | null };
 export type SelectedUsage = { source: string; actual_model: string | null; input_tokens: string | null; output_tokens: string | null; cache_read_tokens: string | null; cache_write_tokens: string | null; reasoning_tokens: string | null; counted_input_tokens: string | null };

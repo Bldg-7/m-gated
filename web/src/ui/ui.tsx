@@ -85,24 +85,33 @@ export function Time({ value }: { value: string }) {
   return <time className="mono" dateTime={value}>{format(value)}</time>;
 }
 
-export { Select, SearchSelect, type SelectOption, type SelectProps } from './select';
+export { Select, SearchSelect, MultiSelect, type SelectOption, type SelectProps, type MultiSelectOption } from './select';
 export { Modal, type ModalProps } from './modal';
 export { IconButton, type IconName } from './icon-button';
 
 /**
  * 크기 조절 손잡이 없이 rows로 처음 높이를 정한다.
  * 내용이 길어질 수 있는 입력은 expandLabel(입력칸 이름)을 주면 우측 하단에 크게 보기 토글이 붙는다.
+ * maxLength가 있으면 입력칸 아래 오른쪽에 글자 수(지금 / 최대)를 보인다.
  */
 export function TextArea({ expandLabel, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement> & { id: string; rows: number; expandLabel?: string }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  if (!expandLabel) return <textarea {...props} />;
-  return <div className={expanded ? 'textarea-box expanded' : 'textarea-box'}>
-    <textarea {...props} />
+  const [length, setLength] = useState(() => String(props.value ?? props.defaultValue ?? '').length);
+  const countId = `${props.id}-count`, max = props.maxLength;
+  const field: TextareaHTMLAttributes<HTMLTextAreaElement> & { id: string } = max === undefined ? props : {
+    ...props,
+    'aria-describedby': [props['aria-describedby'], countId].filter(Boolean).join(' '),
+    onInput: event => { setLength(event.currentTarget.value.length); props.onInput?.(event); },
+  };
+  const count = max === undefined ? null : <span id={countId} className="char-count">{length} / {max}</span>;
+  if (!expandLabel) return <><textarea {...field} />{count}</>;
+  return <><div className={expanded ? 'textarea-box expanded' : 'textarea-box'}>
+    <textarea {...field} />
     <button type="button" className="textarea-toggle" aria-controls={props.id} aria-expanded={expanded} aria-label={t('{{name}} 입력칸 크게 보기', { name: expandLabel })} title={expanded ? t('원래 크기로') : t('크게 보기')} onClick={() => setExpanded(value => !value)}>
       <svg className="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         {expanded ? <><path d="M9.5 2.5v4h4" /><path d="M9.5 6.5l4-4" /><path d="M6.5 13.5v-4h-4" /><path d="M6.5 9.5l-4 4" /></> : <><path d="M9.5 2.5h4v4" /><path d="M13.5 2.5l-4 4" /><path d="M6.5 13.5h-4v-4" /><path d="M2.5 13.5l4-4" /></>}
       </svg>
     </button>
-  </div>;
+  </div>{count}</>;
 }

@@ -55,11 +55,11 @@ function api(state: MockState) {
     const at = Date.now(), tz = state.timezone, end = monthStart(tz.timezone, at, 1);
     return { timezone: tz.timezone, period_start: iso(monthStart(tz.timezone, at)), period_end: iso(end), pending: tz.pending ? { timezone: tz.pending, effective_from: iso(end), first_period_end: iso(monthStart(tz.pending, end + 1000, 1)) } : null, version: String(tz.version) };
   };
-  const summary = (p: MockPrincipal): PrincipalSummary => ({ id: p.id, kind: p.kind, display_name: p.display_name, email: p.email, management_owner_id: p.management_owner_id, version: String(p.version), policy_version: String(p.policy.version), disabled: p.policy.disabled, inference_safety: p.safety, block_state: block(p) });
+  const summary = (p: MockPrincipal): PrincipalSummary => ({ id: p.id, kind: p.kind, display_name: p.display_name, email: p.email, management_owner_id: p.management_owner_id, management_owner_name: p.management_owner_id ? principal(p.management_owner_id).display_name : null, version: String(p.version), policy_version: String(p.policy.version), disabled: p.policy.disabled, inference_safety: p.safety, block_state: block(p) });
   const ceiling = (): { grants: Grant[]; limits: Limits } => ({ grants: state.catalog.entries.map(e => ({ provider: e.provider, model: e.model, capabilities: capabilities[e.provider] ?? [] })), limits: { budget: null, rpm: 1000, tpm: 4000000, count_rpm: 1000 } });
   const detail = (p: MockPrincipal): PrincipalDetail => {
     const { policy_version: _policy, disabled: _disabled, ...rest } = summary(p);
-    return { principal: { ...rest, policy: { ...p.policy, version: String(p.policy.version) }, provider_credentials: authorizedView(p.id) }, execution_ceiling: ceiling() };
+    return { principal: { ...rest, policy: { ...p.policy, version: String(p.policy.version) }, provider_credentials: authorizedView(p.id) }, key_limit_maximum: keyMaximum(p), execution_ceiling: ceiling() };
   };
   const keyView = (k: MockKey): KeyMetadata => {
     const owner = principal(k.principal_id);
@@ -79,11 +79,16 @@ function api(state: MockState) {
     const mine = state.credentials.filter(c => c.provider === provider), active = mine.filter(c => c.state === 'active');
     return { provider, status: active.length === 0 ? 'missing' : active.some(c => !c.decryptable) ? 'undecryptable' : 'active', credentials: active.map(credentialView), history: mine.filter(c => c.state === 'retired').sort((a, b) => (b.retired_at ?? '').localeCompare(a.retired_at ?? '')).map(credentialView) };
   }) });
+  /** 가상 키 한도의 최대값: 정책 한도와 실행 상한 가운데 작은 값. */
+  const keyMaximum = (p: MockPrincipal): Limits => {
+    const top = ceiling().limits, own = p.policy.limits, less = (a: number | null, b: number | null) => a === null ? b : b === null ? a : Math.min(a, b);
+    return { budget: own.budget ?? top.budget, rpm: less(own.rpm, top.rpm), tpm: less(own.tpm, top.tpm), count_rpm: less(own.count_rpm, top.count_rpm) };
+  };
   const me = (): Me => {
     const p = principal(ADMIN_ID);
     // refresh_url 은 https 여야 화면이 받아들인다. 가짜 API 는 401 을 내지 않으므로 실제로 불리지는 않는다.
     // logout_url 은 일부러 https 가 아닌 주소로 둔다. 그러면 로그아웃할 때 화면이 이 주소 대신 /auth/login(아래 안내 페이지)으로 간다.
-    return { principal: { id: p.id, display_name: p.display_name, email: p.email ?? '', block_state: block(p) }, role: 'admin', grants: p.policy.grants, budget_timezone: timezoneView(), provider_credentials: authorizedView(p.id), auth_expires_at: iso(Date.now() + 8 * 3600000), sso: { refresh_url: 'https://sso.example.test/refresh', logout_url: 'http://localhost/auth/logout' } };
+    return { principal: { id: p.id, display_name: p.display_name, email: p.email ?? '', block_state: block(p) }, role: 'admin', grants: p.policy.grants, key_limit_maximum: keyMaximum(p), budget_timezone: timezoneView(), provider_credentials: authorizedView(p.id), auth_expires_at: iso(Date.now() + 8 * 3600000), sso: { refresh_url: 'https://sso.example.test/refresh', logout_url: 'http://localhost/auth/logout' } };
   };
 
   // ── 가상 키 ──
@@ -105,6 +110,8 @@ function api(state: MockState) {
     const name = text(body.name).trim(), validity = text(body.validity) as Validity, months: Record<string, number | null> = { '3_months': 3, '6_months': 6, '1_year': 12, '3_years': 36, unlimited: null };
     if (!name || !(validity in months)) fail(400, 'invalid_request');
     if (name.toLowerCase().startsWith('quota')) fail(409, 'key_quota_exceeded');
+    const asked = (body.limits ?? {}) as Limits, most = keyMaximum(owner);
+    if ((['rpm', 'tpm', 'count_rpm'] as const).some(f => asked[f] != null && most[f] !== null && asked[f]! > most[f]!) || (asked.budget && most.budget && Number(asked.budget.limit_usd) > Number(most.budget.limit_usd))) fail(422, 'limit_exceeds_maximum');
     const grants = (body.grants ?? []) as Grant[], bindings = (body.provider_credentials ?? {}) as Record<string, string>;
     checkBindings(owner.id, grants, bindings);
     const created = new Date(), span = months[validity], expires = span === null ? null : new Date(created);

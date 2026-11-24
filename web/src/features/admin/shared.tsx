@@ -29,6 +29,11 @@ export function useResource<T>(url: string) {
   useEffect(() => { void reload().catch(() => {}); return () => { generation.current++; }; }, [reload]);
   return { data, error, loading, reload };
 }
+/** 명령을 보내고 서버 결과를 기다리는 동안의 알림. 자동으로 다시 보내지 않는다는 것과, 화면을 닫아도 서버 처리는 이어질 수 있다는 것을 함께 알린다. */
+export function CommandBusy() {
+  const { t } = useTranslation();
+  return <div role="status" className="callout callout-info"><div className="callout-body"><strong>{t('명령 처리·서버 확인 중…')}</strong><span>{t('자동으로 다시 보내지 않습니다. 이 창을 닫아도 서버 처리는 계속될 수 있습니다.')}</span></div></div>;
+}
 export function ReadState({ loading, error, reload, asOf }: { loading: boolean; error: string | null; reload: () => void; asOf?: string }) {
   const { t } = useTranslation();
   return <div className="stack-sm">
@@ -68,7 +73,7 @@ export function useCommand(onRead: (ack?: CommandAck) => Promise<void>) {
     finally { if (current()) { lock.current = false; setBusy(false); } }
   };
   // run: 호출한 쪽이 이미 확인 창에서 확인을 받은 명령을 바로 보낸다.
-  return { prepare, run: (action: Action) => void execute(action), busy, view: <>{message && <p role="status">{message}</p>}{busy && <p role="status">{t('명령 처리·서버 확인 중…')}</p>}{pending && <Modal title={t(pending.label)} variant={pending.danger ? 'danger' : 'normal'} busy={busy} onClose={() => setPending(null)} confirm={{ label: t('명령 실행'), onConfirm: () => void execute() }}><pre>{JSON.stringify(pending.body, null, 2)}</pre><p className="meta">{t('서버 상태와 CAS 버전을 확인했습니다. 성공 후 서버를 다시 조회하며 자동 재전송하지 않습니다.')}</p></Modal>}</> };
+  return { prepare, run: (action: Action) => void execute(action), busy, view: <>{message && <p role="status">{message}</p>}{busy && <CommandBusy />}{pending && <Modal title={t(pending.label)} variant={pending.danger ? 'danger' : 'normal'} busy={busy} onClose={() => setPending(null)} confirm={{ label: t('명령 실행'), onConfirm: () => void execute() }}><pre>{JSON.stringify(pending.body, null, 2)}</pre><p className="meta">{t('서버 상태와 CAS 버전을 확인했습니다. 성공 후 서버를 다시 조회하며 자동 재전송하지 않습니다.')}</p></Modal>}</> };
 }
 export function fields(event: FormEvent<HTMLFormElement>) { event.preventDefault(); return new FormData(event.currentTarget); }
 export function directId(name: string) { return new URLSearchParams(location.search).get(name) ?? ''; }

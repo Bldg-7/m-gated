@@ -40,7 +40,7 @@ test('admin_direct_route_uses_separate_principal_policy_safety_cas_and_ack_get',
   await screen.findByText(/서버 재조회 완료/);
   expect(calls.find(c => c.method === 'PATCH')?.body?.expected_version).toBe('7');
   fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: '정책 확인' } });
-  fireEvent.submit(screen.getByRole('form', { name: '정책 교체' }));
+  fireEvent.submit(screen.getByRole('form', { name: '정책 편집' }));
   fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
   await screen.findByText(/서버 재조회 완료/);
   expect(calls.find(c => c.method === 'PUT')?.body?.expected_version).toBe('13');
@@ -89,6 +89,8 @@ test('admin_ack_waits_for_target_get_and_409_clears_old_form_before_reconfirmati
   render(<App />); await screen.findByLabelText('서비스 이름');
   fireEvent.submit(screen.getByRole('form', { name: '서비스 변경' })); fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
   await screen.findByText('명령 처리·서버 확인 중…');
+  // 처리 중 알림은 다시 보내지 않는다는 것과 서버 처리가 이어질 수 있다는 것을 함께 말한다.
+  expect(screen.getByText('자동으로 다시 보내지 않습니다. 이 창을 닫아도 서버 처리는 계속될 수 있습니다.')).toBeTruthy();
   await vi.waitFor(() => expect(reads).toBe(2));
   expect(screen.queryByLabelText('서비스 이름')).toBeNull();
   expect(screen.queryByText(/서버 재조회 완료/)).toBeNull();
@@ -145,7 +147,7 @@ test('policy_form_turns_checkboxes_and_limit_fields_into_the_server_policy', asy
   fireEvent.change(screen.getByLabelText('분당 요청 수 한도 (RPM)'), { target: { value: '' } });
   fireEvent.change(screen.getByLabelText('분당 토큰 수 한도 (TPM)'), { target: { value: '50000' } });
   fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: '모델 추가' } });
-  fireEvent.submit(screen.getByRole('form', { name: '정책 교체' }));
+  fireEvent.submit(screen.getByRole('form', { name: '정책 편집' }));
   fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
   await screen.findByText(/서버 재조회 완료/);
   expect(writes[0]).toEqual({ expected_version: '13', disabled: false, reason: '모델 추가', grants: [{ provider: 'anthropic', model: 'claude-opus-5-5', capabilities: ['messages', 'count_tokens'] }], limits: { budget: { mode: 'actual', limit_usd: '20.000000000000', period: { kind: 'calendar_month' } }, rpm: null, tpm: 50000, count_rpm: null } });
@@ -166,8 +168,37 @@ test('policy_form_rejects_a_malformed_budget_without_sending', async () => {
   pickOption(screen.getByLabelText('월 예산 방식'), '예약 기반');
   fireEvent.change(screen.getByLabelText('월 예산 (USD)'), { target: { value: '1.5.0' } });
   fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: 'x' } });
-  fireEvent.submit(screen.getByRole('form', { name: '정책 교체' }));
+  fireEvent.submit(screen.getByRole('form', { name: '정책 편집' }));
   await screen.findByText(/월 예산은 USD 금액으로 입력하세요/);
   expect(screen.queryByRole('button', { name: '명령 실행' })).toBeNull();
   expect(writes).toBe(0);
+});
+
+test('losing_admin_role_or_session_says_the_screen_was_cleared_and_offers_sso_sign_in_again', async () => {
+  history.replaceState(null, '', '/dashboard/admin/principals');
+  let current: unknown = me, meStatus = 200;
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === '/api/me') return Promise.resolve(response(current, meStatus));
+    return Promise.resolve(response({ items: [], next_cursor: null, as_of: 'now' }));
+  }));
+  render(<App />);
+  await screen.findByRole('form', { name: '사용자 조회' });
+  // 관리자 권한을 잃으면 화면을 지웠다고 알리고 다시 로그인하게 한다.
+  current = { ...me, role: 'user' };
+  await session.validate();
+  expect((await screen.findByRole('alert')).textContent).toBe('현재 관리자 권한이 없습니다. 입력 중이던 내용과 원문은 지웠습니다.');
+  expect(screen.getByRole('link', { name: 'SSO 다시 로그인' }).getAttribute('href')).toBe('/auth/login');
+  // 세션을 확인할 수 없게 돼도 같은 안내를 붙인다.
+  meStatus = 403; current = { error: { code: 'access_denied' } };
+  await session.validate();
+  expect((await screen.findByRole('alert')).textContent).toBe('접근 권한이 없습니다. 입력 중이던 내용과 원문은 지웠습니다.');
+  expect(screen.getByRole('link', { name: 'SSO 다시 로그인' })).toBeTruthy();
+});
+
+test('first_sign_in_failure_does_not_claim_anything_was_cleared', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(response({ error: { code: 'access_denied' } }, 403))));
+  render(<App />);
+  expect((await screen.findByRole('alert')).textContent).toBe('접근 권한이 없습니다.');
+  expect(screen.getByRole('link', { name: 'SSO 로그인' })).toBeTruthy();
 });

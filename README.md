@@ -347,6 +347,11 @@ ceiling's budget mode differs from a policy's, that policy's requests are reject
 `configuration_conflict`. The ceiling has no time zone. If you add `timezone` to it, startup fails.
 See [Budget time zone](#budget-time-zone).
 
+A virtual key's own limits cannot be higher than this effective limit of its owner. `GET /api/me`
+and `GET /api/admin/principals/{id}` return it as `key_limit_maximum` (the same shape as limits; a
+`null` field has no maximum). Issuing a key with a budget, `rpm`, `tpm` or `count_rpm` above it is
+rejected with `422 limit_exceeds_maximum`.
+
 ### Budget time zone
 
 Every monthly budget uses one time zone: the budgets of user policies, of virtual keys and of the
@@ -742,8 +747,9 @@ API (admin only; cookie writes need the usual `Origin` and `X-CSRF-Token`):
 | `PATCH /api/keys/{key id}` | `{"expected_version": "<n>", "name": "...", "grants": [...], "provider_credentials": {"<provider>": "<credential id>"}}` | `200`. The name, the grants and the provider keys of the virtual key are replaced. The owner and admins can call it |
 | `PUT /api/admin/principals/{id}/provider-credentials` | `{"provider": "...", "credential_ids": ["<id>", ...], "expected": {"credential_ids": [...]}, "bound_keys"?: "block" \| {"move_to": "<id>"}}` | `200`, the user's access for that provider is replaced. An empty list removes access to that provider. `expected` is the access you last read (from `GET /api/admin/principals/{id}`) |
 
-`GET /api/me` returns the caller's own authorized provider keys (`provider_credentials`) and the
-budget time zone (`budget_timezone`), so users can choose a key when issuing a virtual key.
+`GET /api/me` returns the caller's own authorized provider keys (`provider_credentials`), the
+budget time zone (`budget_timezone`) and the highest limits a new key may have
+(`key_limit_maximum`), so users can choose a key and its limits when issuing a virtual key.
 
 Writes require an `X-Gateway-Command-Id` header. As with other admin commands, resending the same
 command id returns the recorded result without running the command or calling the provider again.

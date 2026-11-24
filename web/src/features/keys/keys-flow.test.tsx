@@ -21,7 +21,7 @@ async function mount(write: (input: RequestInfo | URL, init: RequestInit) => Pro
   vi.stubGlobal('fetch', fetcher); render(<App />);
   if (view === 'issue') { await screen.findByRole('form', { name: '가상 키 발급' }); await waitFor(() => expect(lists(fetcher)).toBeGreaterThan(0)); return fetcher; }
   await screen.findByRole('region', { name: '내 가상 키' });
-  await waitFor(() => expect((screen.getByRole('button', { name: '키 조회' }) as HTMLButtonElement).disabled).toBe(false));
+  await waitFor(() => expect((screen.getByRole('button', { name: '조회' }) as HTMLButtonElement).disabled).toBe(false));
   return fetcher;
 }
 const mountIssue = (write: Parameters<typeof mount>[0], items: () => unknown[] = () => [key]) => mount(write, items, undefined, 'issue');
@@ -32,8 +32,8 @@ const issueLink = () => screen.queryByRole('link', { name: '가상 키 발급' }
 const issueFieldset = () => screen.getByRole('button', { name: '발급 내용 확인' }).closest('fieldset') as HTMLFieldSetElement;
 function prepare(name = '새 키') {
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: name } });
-  pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
-  pickOption(screen.getByLabelText('Anthropic Provider 키'), 'team-a (…0001)');
+  pickOption(screen.getByLabelText('유효기간'), '무제한');
+  pickOption(screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)'), 'Anthropic · team-a (…0001)');
   fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   fireEvent.click(screen.getByRole('button', { name: '발급 확인' }));
@@ -87,7 +87,7 @@ test('pagehide_synchronously_removes_secret_and_form_before_page_can_freeze', as
   expect(location.pathname).toBe('/dashboard/keys/new');
   expect(screen.queryByText('temporary-secret')).toBeNull(); expect((screen.getByLabelText('키 이름') as HTMLInputElement).value).toBe('');
   // 고른 Provider 키와 허용한 API도 남지 않는다.
-  expect(selectedValue(screen.getByLabelText('Anthropic Provider 키'))).toBe('');
+  expect(selectedValue(screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)'))).toBe('');
   expect(screen.queryByLabelText('anthropic / synthetic-text / messages')).toBeNull();
   expect((screen.getByRole('button', { name: '발급 내용 확인' }) as HTMLButtonElement).disabled).toBe(true);
 });
@@ -164,8 +164,8 @@ test('lost_delete_get_confirms_exact_revocation_and_unlocks_only_user_confirmed_
   expect(issueFieldset().disabled).toBe(false);
   expect(posts).toBe(0);
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '명시한 새 키' } });
-  pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
-  pickOption(screen.getByLabelText('Anthropic Provider 키'), 'team-a (…0001)');
+  pickOption(screen.getByLabelText('유효기간'), '무제한');
+  pickOption(screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)'), 'Anthropic · team-a (…0001)');
   fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   expect(posts).toBe(0);

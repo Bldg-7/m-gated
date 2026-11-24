@@ -37,8 +37,8 @@ export function PrincipalsScreen() {
       <form aria-label={t('사용자 조회')} className="filters" onSubmit={e => { const f = fields(e), q = new URLSearchParams(); for (const key of ['kind', 'disabled', 'email']) { const value = String(f.get(key) ?? '').trim(); if (value) q.set(key, value); } setQuery(q.toString()); if (q.toString() === query) void page.reload().catch(() => {}); }}>
         <div className="field"><label htmlFor="principal-kind">{t('사용자 종류')}</label><Select id="principal-kind" name="kind" defaultValue="" options={[{ value: '', label: t('전체') }, { value: 'human', label: t('사람') }, { value: 'service', label: t('서비스') }]} /></div>
         <div className="field"><label htmlFor="principal-disabled">{t('계정 정지')}</label><Select id="principal-disabled" name="disabled" defaultValue="" options={[{ value: '', label: t('전체') }, { value: 'true', label: t('정지') }, { value: 'false', label: t('활성') }]} /></div>
-        <label>{t('이메일 (일부만 입력해도 됨)')}<input name="email" type="search" maxLength={200} autoComplete="off" spellCheck={false} /></label>
-        <div className="actions"><button className="btn-primary">{t('사용자 조회')}</button></div>
+        <label>{t('이메일')}<input name="email" type="search" maxLength={200} autoComplete="off" spellCheck={false} /></label>
+        <div className="actions"><button className="btn-primary">{t('조회')}</button></div>
       </form>
       <ReadState {...page} asOf={page.data?.as_of} />
       {page.data && <>
@@ -51,7 +51,7 @@ export function PrincipalsScreen() {
             <td>{p.email ?? <span className="meta">{t('이메일 없음')}</span>}</td>
             <td><div className="row">{p.disabled ? <Badge tone="critical">{t('계정 정지')}</Badge> : <Badge tone="success">{t('계정 활성')}</Badge>}{p.inference_safety.paused && <Badge tone="critical">{t('자동 안전차단')}</Badge>}{p.block_state.reasons.filter(reason => !(reason === 'disabled' && p.disabled) && !(reason === 'inference_paused' && p.inference_safety.paused)).map(reason => <StatusBadge key={reason} kind="block" value={reason} />)}</div></td>
             <td className="mono">{p.version} / {p.policy_version} / {p.inference_safety.version}</td>
-            <td className="mono">{p.management_owner_id ?? <span className="meta">{t('없음')}</span>}</td>
+            <td>{p.management_owner_id ? <Link href={principalHref(p.management_owner_id)}>{p.management_owner_name}</Link> : <span className="meta">{t('없음')}</span>}</td>
             <td><Link className="btn btn-sm" aria-label={t('{{name}} 상세', { name: p.display_name })} href={principalHref(p.id)}>{t('상세')}</Link></td>
           </tr>)}</tbody>
         </table></div>}
@@ -80,7 +80,7 @@ function PrincipalKeyIssue({ id }: { id: string }) {
   return <div className="stack">
     <ReadState {...detail} />
     {p && (p.kind === 'service'
-      ? <KeysScreen key={`${p.id}:${session.snapshot().epoch}`} view="issue" adminPrincipal={{ id: p.id, service: true, grants: p.policy.grants, authorized: p.provider_credentials ?? [] }} />
+      ? <KeysScreen key={`${p.id}:${session.snapshot().epoch}`} view="issue" adminPrincipal={{ id: p.id, service: true, grants: p.policy.grants, authorized: p.provider_credentials ?? [], maximum: detail.data!.key_limit_maximum }} />
       : <p role="alert">{t('사람 사용자의 가상 키는 본인이 내 가상 키에서 발급합니다.')}</p>)}
   </div>;
 }
@@ -124,7 +124,7 @@ function PrincipalEditor({ id }: { id: string }) {
       {p.kind === 'service' && <form key={`principal-${p.version}`} aria-label={t('서비스 변경')} onSubmit={e => { const f = fields(e); command.prepare({ label: msgid('서비스 변경 확인'), url: `/api/admin/principals/${p.id}`, method: 'PATCH', body: { expected_version: p.version, display_name: String(f.get('display_name')), management_owner_id: String(f.get('owner')) } }); }}><fieldset disabled={command.busy} className="group"><legend>{t('서비스 변경')}</legend><label>{t('서비스 이름')}<input name="display_name" defaultValue={p.display_name} required maxLength={100} /></label><div className="field"><label htmlFor="service-owner">{t('서비스 owner')}</label><PrincipalSelect id="service-owner" name="owner" kind="human" defaultValue={p.management_owner_id ?? ''} required /></div><div className="actions"><button className="btn-primary">{t('서비스 변경 확인')}</button></div></fieldset></form>}
       {p.inference_safety.paused && <section aria-labelledby="principal-safety-heading" className="card card-alert"><h3 id="principal-safety-heading">{t('자동과금 차단됨')}</h3><p>{p.inference_safety.paused_at ? t('{{at}}부터 이 사용자의 유료 요청을 막고 있습니다.', { at: format(p.inference_safety.paused_at) }) : t('이 사용자의 유료 요청을 막고 있습니다.')} {p.inference_safety.reason ? pauseReasons[p.inference_safety.reason] ?? p.inference_safety.reason : ''}</p>{p.inference_safety.trigger_request_id && <p><Link href={`/dashboard/admin/requests?principal_id=${encodeURIComponent(p.id)}&request_id=${encodeURIComponent(p.inference_safety.trigger_request_id)}`}>{t('원인이 된 요청 보기')}</Link></p>}<p className="meta">{t('여기서 해제해도 미정산 차단, 계정 정지, 예산 소진, 회수된 키는 그대로입니다.')}</p><form key={`safety-${p.inference_safety.version}`} aria-label={t('명시 안전차단 해제')} onSubmit={e => { const f = fields(e); if (!f.has('confirmed')) return; command.prepare({ label: msgid('별도 안전차단 해제 확인'), url: `/api/admin/principals/${p.id}/inference-pause/release`, method: 'POST', body: { expected_version: p.inference_safety.version, reason: String(f.get('reason')) } }); }}><fieldset disabled={command.busy} className="stack"><label>{t('안전차단 해제 사유')}<input name="reason" required maxLength={1000} /></label><label className="attest"><input name="confirmed" type="checkbox" required />{t('과금 원인과 남은 차단을 확인했습니다')}</label><div className="actions"><button className="btn-primary">{t('명시 해제 확인')}</button></div></fieldset></form></section>}
     </div>}
-    <PolicyForm key={`policy-${p.policy.version}`} principalId={p.id} policy={p.policy} ceiling={detail.data!.execution_ceiling.grants} busy={command.busy} onSubmit={body => command.prepare({ label: msgid('정책 전체 교체 확인'), url: `/api/admin/principals/${p.id}/policy`, method: 'PUT', body })} onError={setFormError} />
+    <PolicyForm key={`policy-${p.policy.version}`} principalId={p.id} policy={p.policy} ceiling={detail.data!.execution_ceiling.grants} busy={command.busy} onSubmit={body => command.prepare({ label: msgid('정책 저장 확인'), url: `/api/admin/principals/${p.id}/policy`, method: 'PUT', body })} onError={setFormError} />
     <CredentialAccess principalId={p.id} authorized={p.provider_credentials ?? []} onChanged={async () => { await detail.reload(); }} onNotice={setAccessNote} />
     <div className="card"><KeysScreen key={`${p.id}:${session.snapshot().epoch}:${JSON.stringify(p.provider_credentials ?? [])}`} adminPrincipal={{ id: p.id, service: p.kind === 'service', grants: p.policy.grants, authorized: p.provider_credentials ?? [] }} /></div>
   </>}</section>;
@@ -175,8 +175,8 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
     onSubmit({ expected_version: policy.version, disabled: policy.disabled, grants, limits, reason: String(f.get('reason')) });
   };
   const budget = policy.limits.budget;
-  return <form aria-label={t('정책 교체')} onSubmit={submit}><fieldset disabled={busy} className="group"><legend>{t('정책 전체 교체')}</legend>
-    <p className="meta">{t('저장하면 정책 전체가 이 내용으로 바뀝니다. 빈 한도는 정책에서 제한하지 않는다는 뜻이고, 서버 실행 상한(설정 파일)은 그래도 적용됩니다. 계정 정지와 자동 안전차단은 이 폼으로 바뀌지 않습니다.')}</p>
+  return <form aria-label={t('정책 편집')} onSubmit={submit}><fieldset disabled={busy} className="group"><legend>{t('정책')}</legend>
+    <p className="meta">{t('서버 설정 파일의 limit가 우선 적용됩니다.')}</p>
     <fieldset className="stack-sm"><legend>{t('사용할 수 있는 모델·API')}</legend>
       {choices.length === 0 ? <p className="meta">{t('고를 수 있는 모델이 없습니다. 모델을 먼저 승인하세요.')} <Link href="/dashboard/admin/models">{t('모델·가격 화면 열기')}</Link></p> : <>
         <GrantTable rows={choices.map(c => ({ key: choiceKey(c), provider: c.provider, providerLabel: providerNames[c.provider] ?? c.provider, model: c.model, capability: c.capability, note: c.known ? undefined : <Badge tone="warning">{t('지금은 쓸 수 없는 모델')}</Badge> }))}
@@ -194,6 +194,6 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
       {budgetMode !== 'none' && <BudgetTimezoneNote />}
     </fieldset>
     <label>{t('정책 변경 사유')}<input name="reason" required maxLength={1000} /></label>
-    <div className="actions"><button className="btn-primary">{t('정책 교체 확인')}</button></div>
+    <div className="actions"><button className="btn-primary">{t('정책 저장')}</button></div>
   </fieldset></form>;
 }

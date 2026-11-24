@@ -99,7 +99,8 @@ pre { margin: 0; padding: 12px 16px; background: var(--gray-50); border-radius: 
 .divider { border-top: 1px solid var(--gray-200); padding-top: 20px; }
 
 /* ── 버튼 ─────────────────────────────── */
-button, a.btn { font: inherit; font-size: 14px; line-height: 20px; font-weight: 600; min-height: 40px; padding: 9px 16px; border: 1px solid var(--gray-300); border-radius: var(--radius-md); background: var(--gray-0); color: var(--gray-900); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-align: center; }
+/* 링크 버튼(a.btn)은 :where로 요소 하나의 우선순위만 갖게 해 .btn-primary·.btn-sm 같은 변형이 이기게 한다. */
+button, a:where(.btn) { font: inherit; font-size: 14px; line-height: 20px; font-weight: 600; min-height: 40px; padding: 9px 16px; border: 1px solid var(--gray-300); border-radius: var(--radius-md); background: var(--gray-0); color: var(--gray-900); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-align: center; }
 a.btn { text-decoration: none; }
 button:hover, .btn:hover { background: var(--gray-50); color: var(--gray-900); }
 button:disabled, button:disabled:hover { cursor: not-allowed; background: var(--gray-25); border-color: var(--gray-100); color: var(--gray-500); }
@@ -140,6 +141,8 @@ input[type="password"], input.mono, textarea.mono { font-family: var(--font-mono
 input.amount { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; }
 /* 손잡이로 크기를 바꾸지 않는다. 높이는 rows로 정하고, 길어질 입력만 .textarea-box의 토글로 키운다. */
 textarea { display: block; resize: none; overflow-y: auto; }
+/* 최대 길이가 있는 입력칸 아래 오른쪽의 글자 수. */
+.char-count { align-self: flex-end; font-family: var(--font-mono); font-size: 12px; line-height: 18px; color: var(--gray-500); }
 textarea.mono { line-height: 20px; }
 .textarea-box { position: relative; min-width: 0; }
 .textarea-box > textarea { padding-right: 48px; }
@@ -161,7 +164,7 @@ button.select-trigger:disabled, button.select-trigger:disabled:hover { backgroun
 .select-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .select-placeholder { color: var(--gray-500); }
 input.select-validity { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 1px; min-height: 0; padding: 0; border: 0; opacity: 0; pointer-events: none; }
-.select-popup { z-index: 20; padding: 4px; border: 1px solid var(--gray-200); border-radius: var(--radius-md); background: var(--gray-0); box-shadow: var(--shadow-2); }
+.select-popup { position: fixed; z-index: 20; padding: 4px; border: 1px solid var(--gray-200); border-radius: var(--radius-md); background: var(--gray-0); box-shadow: var(--shadow-2); }
 .select-list { margin: 0; padding: 0; list-style: none; overflow-y: auto; overscroll-behavior: contain; }
 .select-option { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 7px 8px 7px 12px; border-radius: var(--radius-sm); color: var(--gray-900); cursor: pointer; overflow-wrap: anywhere; }
 .select-option-label { flex: 1 1 auto; min-width: 0; }
@@ -171,6 +174,20 @@ input.select-validity { position: absolute; left: 0; right: 0; bottom: 0; width:
 .select-option[aria-disabled="true"] { color: var(--gray-500); cursor: not-allowed; }
 .select-check { color: var(--blue-600); }
 .select-empty { padding: 7px 12px; color: var(--gray-500); }
+/* 여러 개를 고르는 선택. 고른 항목은 배지(chip)로 입력칸 안에 보인다. */
+.multi-select { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 40px; padding: 5px 36px 5px 8px; border: 1px solid var(--gray-300); border-radius: var(--radius-md); background: var(--gray-0); cursor: text; }
+.multi-select:focus-within { border-color: var(--blue-600); }
+.multi-select.disabled { background: var(--gray-50); border-color: var(--gray-200); cursor: not-allowed; }
+input.multi-select-input { flex: 1 1 40px; min-width: 40px; width: auto; min-height: 28px; padding: 0 4px; border: 0; background: transparent; box-shadow: none; outline: none; }
+.chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-height: 28px; padding: 0 4px 0 10px; border: 1px solid var(--blue-200); border-radius: var(--radius-sm); background: var(--blue-50); color: var(--blue-700); font-size: 13px; font-weight: 600; }
+.chip .provider-logo { display: inline-flex; flex: none; width: 16px; height: 16px; margin-right: 2px; }
+.chip .provider-logo svg { width: 100%; height: 100%; }
+/* OpenAI 공식 파일은 그림 둘레에 여백이 커서, 상자를 키우고 여백만큼 겹쳐 보이는 크기를 다른 로고와 맞춘다. 그림은 바꾸지 않는다. */
+.chip .provider-logo-openai { width: 28px; height: 28px; margin: -6px -4px -6px -6px; }
+.chip .provider-name { margin-right: 4px; }
+button.chip-remove { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; min-height: 0; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: inherit; }
+button.chip-remove:hover { background: var(--blue-200); color: var(--blue-700); }
+
 .attest { padding: 12px; border: 1px solid var(--warning-bd); border-radius: var(--radius-md); background: var(--warning-bg); }
 .attest input { accent-color: var(--warning-fg); }
 fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
@@ -207,6 +224,9 @@ p[role="status"]:not(.plain), .callout-info { color: var(--info-fg); background:
 ul.history { list-style: none; padding: 0; }
 .callout-warning { color: var(--warning-fg); background: var(--warning-bg); border-color: var(--warning-bd); }
 .callout-neutral { color: var(--gray-700); background: var(--gray-0); border-color: var(--gray-200); }
+/* 제목과 설명이 있는 알림. 제목은 알림 색, 설명은 본문 색. */
+.callout-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.callout-body > span { color: var(--gray-700); }
 .panel-warning { display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 1px solid var(--warning-bd); border-radius: var(--radius-lg); background: var(--warning-bg); }
 /* 확인 창(Modal). 기본 dialog를 showModal()로 띄워 뒤 화면을 막는다. 긴 내용은 카드 안에서 스크롤한다. */
 dialog.modal { width: min(560px, calc(100vw - 32px)); max-width: none; max-height: calc(100vh - 48px); margin: auto; padding: 0; border: 1px solid var(--gray-200); border-radius: var(--radius-xl); background: var(--gray-0); color: var(--gray-900); box-shadow: var(--shadow-2); overflow: hidden; }

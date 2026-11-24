@@ -29,13 +29,13 @@ test('personal_keys_issue_route_requires_explicit_duration_and_clears_one_time_s
   expect(duration.labels?.[0].textContent).toBe('유효기간');
   expect(selectedValue(duration)).toBe('');
   expect(duration.textContent).toBe('선택하세요');
-  expect(optionNames(duration)).toEqual(['3개월', '6개월', '1년', '3년', '무제한 (만료 없음, 회수·정지는 적용)']);
+  expect(optionNames(duration)).toEqual(['3개월', '6개월', '1년', '3년', '무제한']);
   // 인가된 Provider 키가 하나뿐이어도 미리 골라 두지 않는다.
-  const providerKey = screen.getByLabelText('Anthropic Provider 키');
+  const providerKey = screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)');
   expect(selectedValue(providerKey)).toBe('');
-  expect(optionNames(providerKey)).toEqual(['연동 안 함', 'team-a (…0001)']);
+  expect(optionNames(providerKey)).toEqual(['Anthropic · team-a (…0001)']);
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '명시 키' } });
-  pickOption(providerKey, 'team-a (…0001)');
+  pickOption(providerKey, 'Anthropic · team-a (…0001)');
   expect(selectedValue(providerKey)).toBe('cred1');
   fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
   // 유효기간을 명시하지 않으면 확인 창도 POST도 없다.
@@ -43,7 +43,7 @@ test('personal_keys_issue_route_requires_explicit_duration_and_clears_one_time_s
   expect(screen.getByRole('alert').textContent).toBe('이름과 유효기간을 명시하세요.');
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(posts(fetcher)).toHaveLength(0);
-  pickOption(duration, '무제한 (만료 없음, 회수·정지는 적용)');
+  pickOption(duration, '무제한');
   expect(selectedValue(duration)).toBe('unlimited');
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   expect(posts(fetcher)).toHaveLength(0);
@@ -102,7 +102,7 @@ test('issue_submit_stays_disabled_until_a_provider_key_and_an_api_are_chosen', a
   history.replaceState(null, '', '/dashboard/keys/new');
   const fetcher = stub(secondKey); render(<App />);
   const form = await screen.findByRole('form', { name: '가상 키 발급' });
-  const anthropic = screen.getByLabelText('Anthropic Provider 키'), openai = screen.getByLabelText('OpenAI Provider 키');
+  const anthropic = screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)'), openai = anthropic;
   // Provider 키를 고르기 전에는 고를 API가 없다.
   expect(submitButton().disabled).toBe(true);
   expect(within(form).queryAllByRole('checkbox')).toHaveLength(0);
@@ -114,7 +114,7 @@ test('issue_submit_stays_disabled_until_a_provider_key_and_an_api_are_chosen', a
   expect(screen.getByRole('alert').textContent).toBe('연동할 Provider 키를 하나 이상 고르세요.');
   expect(screen.queryByRole('dialog')).toBeNull();
   // Provider 키를 고르면 그 Provider의 API만 나타나고, API를 고를 때까지 버튼은 꺼져 있다.
-  pickOption(anthropic, 'team-a (…0001)');
+  pickOption(anthropic, 'Anthropic · team-a (…0001)');
   // 허용할 API는 표로 고른다. 머리 칸의 전체 선택과 고른 Provider의 API 줄만 있다.
   expect(within(form).getAllByRole('checkbox').map(box => box.getAttribute('aria-label'))).toEqual(['전체 선택', 'anthropic / synthetic-text / messages']);
   const all = within(form).getByLabelText('전체 선택') as HTMLInputElement;
@@ -130,18 +130,18 @@ test('issue_submit_stays_disabled_until_a_provider_key_and_an_api_are_chosen', a
   fireEvent.click(within(form).getByLabelText('anthropic / synthetic-text / messages'));
   expect(submitButton().disabled).toBe(false);
   // Provider 키를 하나 더 고르면 그 Provider의 API도 하나 이상 골라야 한다.
-  pickOption(openai, 'team-o (…0002)');
+  pickOption(openai, 'OpenAI · team-o (…0002)');
   expect(submitButton().disabled).toBe(true);
   fireEvent.click(within(form).getByLabelText('openai / synthetic-gpt / responses'));
   expect(submitButton().disabled).toBe(false);
   // 연동을 풀면 그 Provider의 API는 사라지고, 다시 골라도 허용이 되살아나지 않는다.
-  pickOption(openai, '연동 안 함');
+  fireEvent.click(within(form).getByRole('button', { name: 'OpenAI · team-o (…0002) 제거' }));
   expect(within(form).queryByLabelText('openai / synthetic-gpt / responses')).toBeNull();
   expect(submitButton().disabled).toBe(false);
-  pickOption(openai, 'team-o (…0002)');
+  pickOption(openai, 'OpenAI · team-o (…0002)');
   expect((within(form).getByLabelText('openai / synthetic-gpt / responses') as HTMLInputElement).checked).toBe(false);
   expect(submitButton().disabled).toBe(true);
-  pickOption(openai, '연동 안 함');
+  fireEvent.click(within(form).getByRole('button', { name: 'OpenAI · team-o (…0002) 제거' }));
   // 연동한 Provider의 API와 Provider 키만 보낸다.
   fireEvent.submit(form);
   fireEvent.click(within(await screen.findByRole('dialog', { name: '발급 확인' })).getByRole('button', { name: '발급 확인' }));
@@ -160,5 +160,40 @@ test('user_without_an_authorized_provider_key_sees_the_reason_and_no_issue_form'
   expect(screen.queryByLabelText('키 이름')).toBeNull();
   expect(screen.queryByRole('button', { name: '발급 내용 확인' })).toBeNull();
   expect(screen.getByRole('link', { name: '내 가상 키로 돌아가기' }).getAttribute('href')).toBe('/dashboard/keys');
+  expect(posts(fetcher)).toHaveLength(0);
+});
+
+test('key_limits_show_the_admin_maximum_and_cannot_go_over_it', async () => {
+  history.replaceState(null, '', '/dashboard/keys/new');
+  const limited = { ...me, key_limit_maximum: { budget: { mode: 'actual', limit_usd: '20.000000000000', period: { kind: 'calendar_month' } }, rpm: 60, tpm: null, count_rpm: 30 } };
+  const fetcher = stub(limited); render(<App />);
+  const form = await screen.findByRole('form', { name: '가상 키 발급' });
+  // 분당 한도 세 칸은 「고급 옵션」 안에 접혀 있고, 빈 칸에는 관리자가 정한 최대값이 보인다.
+  const advanced = within(form).getByText('고급 옵션').closest('details')!;
+  expect(advanced.open).toBe(false);
+  expect(within(advanced).getByLabelText('생성 RPM').getAttribute('placeholder')).toBe('60');
+  expect(within(advanced).getByLabelText('생성 TPM').getAttribute('placeholder')).toBe('제한 없음');
+  expect(within(advanced).getByLabelText('Count RPM').getAttribute('placeholder')).toBe('30');
+  expect(screen.getByLabelText('예산 USD (소수점 12자리)').getAttribute('placeholder')).toBe('20.000000000000');
+  expect(screen.queryByText(/정규화/)).toBeNull();
+  fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '새 키' } });
+  pickOption(screen.getByLabelText('유효기간'), '1년');
+  pickOption(screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)'), 'Anthropic · team-a (…0001)');
+  fireEvent.click(within(form).getByRole('checkbox', { name: 'anthropic / synthetic-text / messages' }));
+  // 최대값을 넘으면 확인 창을 열지 않고 이유를 보인다. 접힌 칸의 오류면 고급 옵션을 펼친다.
+  fireEvent.change(within(advanced).getByLabelText('생성 RPM'), { target: { value: '61' } });
+  fireEvent.submit(form);
+  expect(screen.getByRole('alert').textContent).toBe('생성 RPM에 넣을 수 있는 최대값은 60입니다.');
+  expect(advanced.open).toBe(true);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.change(within(advanced).getByLabelText('생성 RPM'), { target: { value: '60' } });
+  fireEvent.change(screen.getByLabelText('예산 USD (소수점 12자리)'), { target: { value: '20.000000000001' } });
+  fireEvent.submit(form);
+  expect(screen.getByRole('alert').textContent).toBe('예산에 넣을 수 있는 최대값은 20.000000000000 USD입니다.');
+  // 최대값과 같으면 보낼 수 있다. 최대값이 없는 칸은 막지 않는다.
+  fireEvent.change(screen.getByLabelText('예산 USD (소수점 12자리)'), { target: { value: '20.000000000000' } });
+  fireEvent.change(within(advanced).getByLabelText('생성 TPM'), { target: { value: '999999' } });
+  fireEvent.submit(form);
+  expect(screen.getByRole('dialog', { name: '발급 확인' })).toBeTruthy();
   expect(posts(fetcher)).toHaveLength(0);
 });

@@ -32,7 +32,7 @@ export function RequestsScreen() {
       <div className="field"><label htmlFor="request-model">{t('요청 모델')}</label><RequestModelSelect id="request-model" name="model" defaultValue="" /></div>
       <label>{t('시작 (현지 시각)')}<input type="datetime-local" name="from" /></label>
       <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" /></label>
-      <div className="actions"><button className="btn-primary">{t('요청 조회')}</button></div>
+      <div className="actions"><button className="btn-primary">{t('조회')}</button></div>
     </form>
     <section aria-labelledby="request-list-heading" className="stack">
       <h2 id="request-list-heading">{t('요청 목록')}</h2>

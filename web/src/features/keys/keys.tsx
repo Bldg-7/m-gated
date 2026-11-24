@@ -6,8 +6,9 @@ import type { AuthorizedCredentials, Grant, IssuedKey, KeyMetadata, Limits, Page
 import { credentialLabel, providerNames } from '../admin/credentials';
 import { useTimeFormat } from '../../lib/time';
 import { Link, navigate } from '../../lib/router';
-import { Badge, IconButton, Modal, Pill, SearchSelect, Select, Time, TipBadge } from '../../ui/ui';
+import { Badge, IconButton, Modal, MultiSelect, Pill, Select, Time, TipBadge } from '../../ui/ui';
 import { GrantTable } from '../../ui/grant-table';
+import { ProviderLogo } from '../../ui/provider-logo';
 import { EditKeyModal } from './keys-edit';
 
 /** 발급된 키와 복사 버튼. 사용자가 누를 때만 클립보드에 쓰고, 키 창이 닫히면 상태도 함께 사라진다. */
@@ -24,10 +25,12 @@ function SecretValue({ value }: { value: string }) {
     {copy !== 'idle' && <p role="status" className="plain meta">{copy === 'done' ? t('클립보드에 복사했습니다.') : t('복사하지 못했습니다. 키를 직접 선택해 복사하세요.')}</p>}
   </>;
 }
-export const durations: [Validity, string][] = [['3_months', msgid('3개월')], ['6_months', msgid('6개월')], ['1_year', msgid('1년')], ['3_years', msgid('3년')], ['unlimited', msgid('무제한 (만료 없음, 회수·정지는 적용)')]];
+export const durations: [Validity, string][] = [['3_months', msgid('3개월')], ['6_months', msgid('6개월')], ['1_year', msgid('1년')], ['3_years', msgid('3년')], ['unlimited', msgid('무제한')]];
 type IssueInput = { name: string; validity: Validity; grants: Grant[]; limits: Limits; provider_credentials: Record<string, string> };
 type Confirmation = { kind: 'issue'; input: IssueInput } | { kind: 'revoke'; key: KeyMetadata };
 type Recovery = { commandId: string; kind: 'issue' | 'revoke'; keyId?: string };
+/** 분당 한도 칸의 이름. */
+const limitNames = { rpm: msgid('생성 RPM'), tpm: msgid('생성 TPM'), count_rpm: msgid('Count RPM') } as const;
 const durationName = (value: Validity) => durations.find(([key]) => key === value)?.[1] ?? value;
 /** 고를 수 있는 Provider 키 하나. */
 type ProviderKey = { id: string; label: string; hint: string };
@@ -46,7 +49,7 @@ const keyListHref = (principalId?: string) => principalId ? `/dashboard/admin/pr
  * view='list'는 가상 키 목록(조회·회수·연결 변경), view='issue'는 발급 하위 페이지다.
  * 발급 페이지도 목록을 읽어 둔다. 발급 결과를 단정할 수 없을 때 명령 ID로 목록에서 확인하기 위해서다.
  */
-export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: { adminPrincipal?: { id: string; service: boolean; grants: Grant[]; authorized?: AuthorizedCredentials }; adminAll?: boolean; view?: 'list' | 'issue' } = {}) {
+export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: { adminPrincipal?: { id: string; service: boolean; grants: Grant[]; authorized?: AuthorizedCredentials; maximum?: Limits | null }; adminAll?: boolean; view?: 'list' | 'issue' } = {}) {
   const { t } = useTranslation();
   const issuing = view === 'issue', canIssue = !adminAll && (!adminPrincipal || adminPrincipal.service);
   const issueHref = keyIssueHref(adminPrincipal?.id), listHref = keyListHref(adminPrincipal?.id);
@@ -66,6 +69,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   const [granted, setGranted] = useState<Set<string>>(() => new Set());
   // 수정 창을 연 가상 키.
   const [editing, setEditing] = useState<KeyMetadata | null>(null), [detail, setDetail] = useState<KeyMetadata | null>(null);
+  // 발급 폼의 고급 옵션(분당 한도)을 펼쳤는지.
+  const [advanced, setAdvanced] = useState(false);
   const mounted = useRef(true), lock = useRef(false);
   const format = useTimeFormat();
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -93,6 +98,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   const authorized: AuthorizedCredentials = adminPrincipal ? adminPrincipal.authorized ?? [] : auth.me?.provider_credentials ?? [];
   const authorizedFor = (provider: string): ProviderKey[] => authorized.find(a => a.provider === provider)?.credentials ?? [];
   const grantList = availableGrants ?? auth.me?.grants ?? [];
+  // 관리자가 정한 최대값. 가상 키의 한도는 이 값을 넘을 수 없다. 없는 항목은 최대값이 없다.
+  const maximum = (adminPrincipal ? adminPrincipal.maximum : auth.me?.key_limit_maximum) ?? null;
   // 정책이 허용한 API의 Provider. 이 가운데 인가된 Provider 키가 있는 Provider만 가상 키에 연동할 수 있다.
   const policyProviders = [...new Set(grantList.map(grant => grant.provider))];
   const linkable = policyProviders.filter(provider => authorizedFor(provider).length > 0);
@@ -102,10 +109,13 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
   const grantedProviders = new Set(grantList.flatMap((grant, gi) => grant.capabilities.some((_, ci) => granted.has(`${gi}:${ci}`)) ? [grant.provider] : []));
   // Provider 키를 골랐는데 그 Provider의 API를 하나도 허용하지 않은 Provider.
   const withoutApi = chosenProviders.filter(provider => !grantedProviders.has(provider));
-  const choose = (provider: string, id: string) => {
-    setChosen(prev => ({ ...prev, [provider]: id }));
+  // 고를 수 있는 Provider 키 전부. Provider마다 하나만 연결하므로 같은 Provider의 키는 서로 바꿔 낀다.
+  const keyOptions = linkable.flatMap(provider => authorizedFor(provider).map(c => ({ value: c.id, label: `${providerNames[provider] ?? provider} · ${credentialLabel(c)}`, chip: <><ProviderLogo provider={provider} name={providerNames[provider] ?? provider} />{credentialLabel(c)}</>, group: provider })));
+  const chooseKeys = (ids: string[]) => {
+    const next = Object.fromEntries(ids.flatMap(id => { const option = keyOptions.find(o => o.value === id); return option ? [[option.group, id]] : []; }));
+    setChosen(next);
     // 연동을 푼 Provider의 API는 허용 목록에서도 뺀다.
-    if (!id) setGranted(prev => new Set([...prev].filter(value => grantList[Number(value.split(':')[0])]?.provider !== provider)));
+    setGranted(prev => new Set([...prev].filter(value => { const provider = grantList[Number(value.split(':')[0])]?.provider; return provider !== undefined && provider in next; })));
   };
   const reload = () => { setQuery(''); setStatus(''); setRevision(v => v + 1); };
   const prepare = (event: FormEvent<HTMLFormElement>) => {
@@ -120,12 +130,16 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
     const limits: Limits = { budget: null, rpm: null, tpm: null, count_rpm: null };
     for (const field of ['rpm', 'tpm', 'count_rpm'] as const) {
       const raw = String(data.get(field) ?? '');
-      if (raw && (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > 1000000000)) { setError(i18n.t('요청·토큰 한도는 1~1000000000의 정수입니다.')); return; }
+      if (raw && (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > 1000000000)) { setAdvanced(true); setError(i18n.t('요청·토큰 한도는 1~1000000000의 정수입니다.')); return; }
+      const most = maximum?.[field] ?? null;
+      if (raw && most !== null && Number(raw) > most) { setAdvanced(true); setError(i18n.t('{{field}}에 넣을 수 있는 최대값은 {{max}}입니다.', { field: i18n.t(limitNames[field]), max: String(most) })); return; }
       limits[field] = raw ? Number(raw) : null;
     }
     const amount = String(data.get('budget') ?? '');
     if (amount) {
       if (!/^(0|[1-9][0-9]{0,15})\.[0-9]{12}$/.test(amount)) { setError(i18n.t('예산은 소수점 12자리 USD 문자열로 입력하세요.')); return; }
+      const most = maximum?.budget?.limit_usd ?? null;
+      if (most !== null && BigInt(amount.replace('.', '')) > BigInt(most.replace('.', ''))) { setError(i18n.t('{{field}}에 넣을 수 있는 최대값은 {{max}}입니다.', { field: i18n.t('예산'), max: `${most} USD` })); return; }
       limits.budget = { mode: data.get('mode') === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month' } };
     }
     // 가상 키는 키 주인에게 인가된 Provider 키 하나 이상에 연동해야 하고, 연동한 Provider마다 허용할 API가 있어야 한다.
@@ -161,6 +175,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
         setRecovery(null); setError(i18n.t('고른 Provider 키를 쓸 수 있는 인가가 없습니다. 쓰기는 재전송하지 않았습니다.')); reload();
       } else if (e instanceof ApiError && e.code === 'provider_credential_required') {
         setRecovery(null); setError(i18n.t('가상 키는 Provider 키를 하나 이상 연동해야 하고, 허용한 API의 Provider마다 Provider 키를 골라야 합니다. 쓰기는 재전송하지 않았습니다.')); reload();
+      } else if (e instanceof ApiError && e.code === 'limit_exceeds_maximum') {
+        setRecovery(null); setError(i18n.t('한도가 관리자가 정한 최대값을 넘어 발급하지 않았습니다. 쓰기는 재전송하지 않았습니다.')); reload();
       } else if (e instanceof ApiError && ['invalid_request', 'csrf_invalid', 'origin_denied', 'unsupported_media_type', 'access_denied', 'key_quota_exceeded', 'resource_not_found'].includes(e.code)) {
         setRecovery(null); setError(i18n.t('요청이 거부되었습니다. 현재 권한·입력·키 개수를 확인하고 다시 내용을 확인하세요. 쓰기는 재전송하지 않았습니다.')); reload();
       } else {
@@ -202,28 +218,27 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
           <label>{t('키 이름')}<input name="name" maxLength={100} required /></label>
           <div className="field"><label htmlFor={`${prefix}-key-validity`}>{t('유효기간')}</label><Select id={`${prefix}-key-validity`} name="validity" defaultValue="" required placeholder={t('선택하세요')} options={durations.map(([value, label]) => ({ value, label: t(label) }))} /></div>
         </div>
-        <fieldset className="stack-sm"><legend>{t('연동할 Provider 키 (1개 이상 필수)')}</legend>
+        <div className="field"><label htmlFor={`${prefix}-credentials`}>{t('연동할 Provider 키 (1개 이상 필수)')}</label>
+          <MultiSelect id={`${prefix}-credentials`} value={chosenProviders.map(provider => chosen[provider])} onChange={chooseKeys} options={keyOptions} placeholder={t('Provider 키를 고르세요')} />
           <p className="meta">{t('이 가상 키의 요청은 여기서 고른 Provider 키로 보냅니다. Provider마다 하나를 고를 수 있고, 고르지 않은 Provider의 API는 이 키로 쓸 수 없습니다.')}</p>
-          <div className="form-grid">{policyProviders.map(provider => {
-            const options = authorizedFor(provider), name = providerNames[provider] ?? provider;
-            return <div key={provider} className="field">{options.length > 0
-              ? <><label htmlFor={`${prefix}-credential-${provider}`}>{t('{{provider}} Provider 키', { provider: name })}</label><SearchSelect id={`${prefix}-credential-${provider}`} value={chosen[provider] ?? ''} onChange={id => choose(provider, id)} options={[{ value: '', label: t('연동 안 함') }, ...options.map(c => ({ value: c.id, label: credentialLabel(c) }))]} /></>
-              : <><span className="field-label">{t('{{provider}} Provider 키', { provider: name })}</span><p className="meta">{adminPrincipal ? t('이 서비스 계정에 인가된 {{provider}} Provider 키가 없습니다.', { provider: name }) : t('나에게 인가된 {{provider}} Provider 키가 없습니다.', { provider: name })}</p></>}</div>;
-          })}</div>
-        </fieldset>
+          {policyProviders.filter(provider => authorizedFor(provider).length === 0).map(provider => { const name = providerNames[provider] ?? provider; return <p key={provider} className="meta">{adminPrincipal ? t('이 서비스 계정에 인가된 {{provider}} Provider 키가 없습니다.', { provider: name }) : t('나에게 인가된 {{provider}} Provider 키가 없습니다.', { provider: name })}</p>; })}
+        </div>
         <fieldset className="stack-sm"><legend>{t('허용할 API (연동한 Provider마다 1개 이상 필수)')}</legend>
           {chosenProviders.length === 0 ? <p className="meta">{t('Provider 키를 먼저 고르면 그 Provider의 API를 고를 수 있습니다.')}</p>
             : <GrantTable rows={grantRows} selected={granted}
               onToggle={(value, on) => setGranted(prev => { const next = new Set(prev); if (on) next.add(value); else next.delete(value); return next; })}
               onAll={on => setGranted(prev => { const next = new Set(prev); for (const r of grantRows) { if (on) next.add(r.key); else next.delete(r.key); } return next; })} />}
         </fieldset>
-        <p className="meta">{t('빈 한도는 서버의 실행 상한으로 정규화됩니다. 현재 정책을 우회하지 않습니다.')}</p>
+        <p className="meta">{t('사용자 정책과 서버 설정 파일의 limit가 우선 적용됩니다.')}</p>
         <div className="form-grid">
-          <label>{t('예산 USD (소수점 12자리)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} placeholder="0.000000000000" /></label>
+          <label>{t('예산 USD (소수점 12자리)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} placeholder={maximum?.budget?.limit_usd ?? '0.000000000000'} /></label>
           <div className="field"><label htmlFor={`${prefix}-key-budget-mode`}>{t('예산 모드')}</label><Select id={`${prefix}-key-budget-mode`} name="mode" defaultValue="actual" options={[{ value: 'actual', label: t('실사용량 (하드캡 아님)') }, { value: 'reserved', label: t('예약 기반') }]} /></div>
-          <label>{t('생성 RPM')}<input name="rpm" className="mono" inputMode="numeric" /></label><label>{t('생성 TPM')}<input name="tpm" className="mono" inputMode="numeric" /></label><label>Count RPM<input name="count_rpm" className="mono" inputMode="numeric" /></label>
         </div>
         <BudgetTimezoneNote />
+        {/* 분당 한도는 잘 쓰지 않아 접어 둔다. 빈 칸에는 관리자가 정한 최대값이 보인다. */}
+        <details open={advanced} onToggle={e => setAdvanced(e.currentTarget.open)}><summary>{t('고급 옵션')}</summary>
+          <div className="form-grid">{(['rpm', 'tpm', 'count_rpm'] as const).map(field => <label key={field}>{t(limitNames[field])}<input name={field} className="mono" inputMode="numeric" placeholder={maximum?.[field] != null ? String(maximum[field]) : t('제한 없음')} /></label>)}</div>
+        </details>
         <div className="actions"><button type="submit" className="btn-primary" disabled={chosenProviders.length === 0 || withoutApi.length > 0}>{t('발급 내용 확인')}</button><Link className="btn btn-quiet" href={listHref}>{t('취소')}</Link></div>
       </fieldset>
     </form>)}
@@ -249,8 +264,8 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
       <p className="meta">{t('발급 권한·고정 상한')}</p><pre>{JSON.stringify({ grants: shown.grants, limits: shown.limits }, null, 2)}</pre>
     </Modal>}
     {!issuing && <div className="stack">
-      <form aria-label={t('키 조회')} className="filters" onSubmit={e => { e.preventDefault(); setQuery(status ? `status=${status}` : ''); setRevision(v => v + 1); }}><div className="field"><label htmlFor={`${prefix}-key-status`}>{t('키 상태')}</label><Select id={`${prefix}-key-status`} value={status} onChange={setStatus} options={[{ value: '', label: t('전체') }, { value: 'active', label: t('활성') }, { value: 'revoked', label: t('회수') }, { value: 'expired', label: t('만료') }]} /></div><div className="actions"><button disabled={loading || busy}>{t('키 조회')}</button></div></form>
-      {loading && <p role="status">{t('키 목록 조회 중…')}</p>}{page && <><p className="meta">{t('목록 조회 시각')}: <Time value={page.as_of} /></p>{!page.items.length && <p className="empty">{t('키가 없습니다.')}</p>}{page.items.length > 0 && <div className="table-wrap"><table>
+      <form aria-label={t('키 조회')} className="filters" onSubmit={e => { e.preventDefault(); setQuery(status ? `status=${status}` : ''); setRevision(v => v + 1); }}><div className="field"><label htmlFor={`${prefix}-key-status`}>{t('키 상태')}</label><Select id={`${prefix}-key-status`} value={status} onChange={setStatus} options={[{ value: '', label: t('전체') }, { value: 'active', label: t('활성') }, { value: 'revoked', label: t('회수') }, { value: 'expired', label: t('만료') }]} /></div><div className="actions"><button disabled={loading || busy}>{t('조회')}</button></div></form>
+      {loading && <p role="status">{t('키 목록 조회 중…')}</p>}{page && <><p className="meta">{t('조회 시각')}: <Time value={page.as_of} /></p>{!page.items.length && <p className="empty">{t('키가 없습니다.')}</p>}{page.items.length > 0 && <div className="table-wrap"><table>
         <thead><tr><th>{t('이름')}</th>{adminAll && <th>{t('키 주인')}</th>}<th>{t('상태')}</th><th>{t('유효기간')}</th><th>{t('생성')}</th><th>{t('만료')}</th><th>{t('Provider 키')}</th><th>{t('동작')}</th></tr></thead>
         <tbody>{page.items.map(key => { const expired = !key.revoked_at && !!key.expires_at && new Date(key.expires_at).getTime() <= new Date(page.as_of).getTime(); return <tr key={key.id}>
           <td><div className="stack-sm"><strong>{key.name}</strong><span className="meta mono">{key.key_hint}</span></div></td>

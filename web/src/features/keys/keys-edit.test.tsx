@@ -31,7 +31,7 @@ async function mount(options: { path?: string; user?: unknown; items?: () => unk
     return read?.(call.url) ?? Promise.resolve(response({ items: items(), next_cursor: null, as_of: '2026-06-01T00:00:00Z' }));
   }));
   render(<App />);
-  await waitFor(() => expect((screen.getByRole('button', { name: '키 조회' }) as HTMLButtonElement).disabled).toBe(false));
+  await waitFor(() => expect((screen.getByRole('button', { name: '조회' }) as HTMLButtonElement).disabled).toBe(false));
   return calls;
 }
 const lists = (calls: Call[], url = '/api/keys') => calls.filter(c => c.method === 'GET' && c.url === url).length;
@@ -50,8 +50,9 @@ test('owner_renames_a_key_and_changes_apis_with_one_patch_then_the_list_reloads'
   // 처음 값은 지금 이름·연결·허용 API다.
   const name = within(dialog).getByLabelText('키 이름') as HTMLInputElement;
   expect(name.value).toBe('현재 키');
-  expect(selectedValue(within(dialog).getByLabelText('Anthropic Provider 키'))).toBe('cred1');
-  expect(selectedValue(within(dialog).getByLabelText('OpenAI Provider 키'))).toBe('');
+  expect(selectedValue(within(dialog).getByLabelText('연동할 Provider 키 (1개 이상 필수)'))).toBe('cred1');
+  // Provider 키는 선택 칸 하나에서 고른다. 고른 키는 배지로 보이고, 고르지 않은 Provider(OpenAI)는 배지가 없다.
+  expect(within(dialog).getAllByRole('button', { name: / 제거$/ }).map(b => b.getAttribute('aria-label'))).toEqual(['Anthropic · team-a (…0001) 제거']);
   expect(api(dialog, 'anthropic / synthetic-text / messages').checked).toBe(true);
   expect(api(dialog, 'anthropic / synthetic-text / count_tokens').checked).toBe(false);
   // 연동하지 않은 Provider의 API는 고를 수 없다.
@@ -82,7 +83,7 @@ test('owner_renames_a_key_and_changes_apis_with_one_patch_then_the_list_reloads'
 test('save_stays_disabled_without_a_name_a_provider_key_or_an_api_for_each_chosen_provider', async () => {
   const calls = await mount();
   const dialog = await openEdit(), save = saveButton(dialog);
-  const name = within(dialog).getByLabelText('키 이름'), anthropic = within(dialog).getByLabelText('Anthropic Provider 키');
+  const name = within(dialog).getByLabelText('키 이름'), anthropic = within(dialog).getByLabelText('연동할 Provider 키 (1개 이상 필수)');
   expect(save.disabled).toBe(false);
   // 이름이 비었거나 공백뿐이면 저장할 수 없다.
   fireEvent.change(name, { target: { value: '' } });
@@ -92,18 +93,18 @@ test('save_stays_disabled_without_a_name_a_provider_key_or_an_api_for_each_chose
   fireEvent.change(name, { target: { value: '현재 키' } });
   expect(save.disabled).toBe(false);
   // Provider 키를 하나도 고르지 않으면 저장할 수 없고, 고를 API도 없다.
-  pickOption(anthropic, '연동 안 함');
+  fireEvent.click(within(dialog).getByRole('button', { name: / 제거$/ }));
   expect(save.disabled).toBe(true);
   expect(within(dialog).queryAllByRole('checkbox')).toHaveLength(0);
   expect(within(dialog).getByText('Provider 키를 먼저 고르면 그 Provider의 API를 고를 수 있습니다.')).toBeTruthy();
   // 연동을 풀면 그 Provider의 API도 빠진다. 다시 연동해도 API를 골라야 저장할 수 있다.
-  pickOption(anthropic, 'team-b (…0002)');
+  pickOption(anthropic, 'Anthropic · team-b (…0002)');
   expect(api(dialog, 'anthropic / synthetic-text / messages').checked).toBe(false);
   expect(save.disabled).toBe(true);
   fireEvent.click(api(dialog, 'anthropic / synthetic-text / messages'));
   expect(save.disabled).toBe(false);
   // 고른 Provider마다 API가 하나 이상 있어야 한다.
-  pickOption(within(dialog).getByLabelText('OpenAI Provider 키'), 'oa (…0003)');
+  pickOption(anthropic, 'OpenAI · oa (…0003)');
   expect(save.disabled).toBe(true);
   fireEvent.click(api(dialog, 'openai / synthetic-gpt / responses'));
   expect(save.disabled).toBe(false);
@@ -181,13 +182,13 @@ test('admin_key_list_reads_the_key_owner_before_showing_the_edit_form', async ()
   await act(async () => { owner.resolve(response({ principal, execution_ceiling: { grants: ownerPolicy, limits: principal.policy.limits } })); });
   // 폼은 키 주인의 정책과 인가로 채운다(관리자 자신의 정책·인가가 아니다).
   const form = await screen.findByRole('dialog', { name: '현재 키 수정' });
-  const select = await within(form).findByLabelText('Anthropic Provider 키');
+  const select = await within(form).findByLabelText('연동할 Provider 키 (1개 이상 필수)');
   expect(selectedValue(select)).toBe('cred1');
-  expect(optionNames(select)).toEqual(['연동 안 함', 'team-b (…0002)', 'team-a (…0001)']);
+  expect(optionNames(select)).toEqual(['Anthropic · team-b (…0002)', 'Anthropic · team-a (…0001)']);
   expect(within(form).queryByLabelText('OpenAI Provider 키')).toBeNull();
   // 허용할 API 표: 머리 칸의 전체 선택 하나와 API 한 줄.
   expect(within(form).getAllByRole('checkbox')).toHaveLength(2);
-  pickOption(select, 'team-b (…0002)');
+  pickOption(select, 'Anthropic · team-b (…0002)');
   fireEvent.click(saveButton(form));
   expect((await screen.findByRole('status')).textContent).toBe('현재 키 키를 수정했습니다.');
   const sent = writes(calls);
@@ -211,7 +212,7 @@ test('admin_key_list_shows_no_edit_form_when_the_key_owner_cannot_be_read', asyn
 });
 
 test('revoked_and_expired_keys_have_no_edit_button', async () => {
-  // 목록 조회 시각(2026-06-01)보다 만료일이 이른 키는 만료된 키다.
+  // 조회 시각(2026-06-01)보다 만료일이 이른 키는 만료된 키다.
   await mount({ items: () => [key, { ...key, id: 'revoked-id', name: '회수된 키', revoked_at: '2026-02-01T00:00:00Z' }, { ...key, id: 'expired-id', name: '만료된 키', expires_at: '2026-05-01T00:00:00Z' }] });
   expect(screen.getByRole('button', { name: '현재 키 수정' })).toBeTruthy();
   expect(screen.getByRole('button', { name: '현재 키 회수' })).toBeTruthy();
@@ -229,13 +230,13 @@ test('binding_whose_authorization_was_removed_starts_unselected_and_dropped_apis
   const hint = screen.getByLabelText('현재 키 Provider 키 연결');
   expect(hint.textContent).toContain('인가 해제됨');
   expect(hint.textContent).toContain('수정에서 인가된 Provider 키로 다시 연결하세요.');
-  const dialog = await openEdit(), select = within(dialog).getByLabelText('Anthropic Provider 키');
+  const dialog = await openEdit(), select = within(dialog).getByLabelText('연동할 Provider 키 (1개 이상 필수)');
   expect(selectedValue(select)).toBe('');
-  expect(optionNames(select)).toEqual(['연동 안 함', 'team-a (…0001)', 'team-b (…0002)']);
+  expect(optionNames(select)).toEqual(['Anthropic · team-a (…0001)', 'Anthropic · team-b (…0002)', 'OpenAI · oa (…0003)']);
   expect(saveButton(dialog).disabled).toBe(true);
   expect(within(dialog).getByText('키 주인의 지금 정책에 없어 저장하면 빠지는 API: anthropic / old-model / messages')).toBeTruthy();
   // 인가된 키를 다시 고르면 정책에 남아 있는 허용 API는 그대로 체크돼 있다.
-  pickOption(select, 'team-b (…0002)');
+  pickOption(select, 'Anthropic · team-b (…0002)');
   expect(api(dialog, 'anthropic / synthetic-text / messages').checked).toBe(true);
   expect(within(dialog).queryByLabelText('anthropic / old-model / messages')).toBeNull();
   expect(saveButton(dialog).disabled).toBe(false);

@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 
 /**
@@ -97,8 +97,8 @@ function Check() {
   return <svg className="icon select-check" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5" /></svg>;
 }
 
-type ListProps = { id: string; options: SelectOption[]; value: string; active: number; optionId: (index: number) => string; onActive: (index: number) => void; onChoose: (option: SelectOption) => void; style: { popup: CSSProperties; list: CSSProperties }; empty?: string };
-function List({ id, options, value, active, optionId, onActive, onChoose, style, empty }: ListProps) {
+type ListProps = { id: string; options: SelectOption[]; value: string; /** 여러 개를 고르는 목록이면 고른 값 전부. */ values?: readonly string[]; active: number; optionId: (index: number) => string; onActive: (index: number) => void; onChoose: (option: SelectOption) => void; style: { popup: CSSProperties; list: CSSProperties }; empty?: string };
+function List({ id, options, value, values, active, optionId, onActive, onChoose, style, empty }: ListProps) {
   const list = useRef<HTMLUListElement>(null);
   useEffect(() => {
     if (active < 0) return;
@@ -107,9 +107,9 @@ function List({ id, options, value, active, optionId, onActive, onChoose, style,
   }, [active]);
   // 목록을 눌러도 입력(버튼·입력칸)의 초점을 잃지 않게 한다.
   return <div className="select-popup" style={style.popup} onMouseDown={event => event.preventDefault()}>
-    <ul ref={list} id={id} role="listbox" className="select-list" style={style.list}>
+    <ul ref={list} id={id} role="listbox" aria-multiselectable={values ? true : undefined} className="select-list" style={style.list}>
       {options.map((option, index) => {
-        const selected = option.value === value;
+        const selected = values ? values.includes(option.value) : option.value === value;
         return <li key={option.value} id={optionId(index)} data-index={index} data-value={option.value} role="option" aria-selected={selected} aria-disabled={option.disabled || undefined}
           className={index === active ? 'select-option active' : 'select-option'}
           onMouseMove={() => { if (!option.disabled && index !== active) onActive(index); }}
@@ -237,5 +237,77 @@ export function SearchSelect(props: SelectProps) {
     <input ref={hidden} type="hidden" name={name} value={value} disabled={disabled} />
     {required && <Validity value={value} disabled={disabled} onInvalid={() => setInvalid(true)} focusTarget={input} />}
     {open && <List id={listId} options={shown} value={value} active={active} optionId={optionId} onActive={setActive} onChoose={choose} style={style} empty={t('결과 없음')} />}
+  </div>;
+}
+
+/** 여러 개를 고르는 목록의 항목. group이 같은 항목은 하나만 고를 수 있어, 새로 고르면 같은 group의 이전 선택이 빠진다. */
+export type MultiSelectOption = SelectOption & { group?: string; /** 고른 뒤 배지에 보일 내용. 없으면 label을 보인다. 배지의 제거 버튼 이름은 언제나 label을 쓴다. */ chip?: ReactNode };
+export type MultiSelectProps = {
+  options: MultiSelectOption[];
+  /** 고른 값. 고른 순서대로 배지로 보인다. */
+  value: readonly string[];
+  onChange: (value: string[]) => void;
+  id?: string;
+  disabled?: boolean;
+  placeholder?: string;
+  maxHeight?: number;
+  'aria-label'?: string;
+  'aria-describedby'?: string;
+};
+
+/**
+ * 여러 개를 고르는 선택. 고른 항목은 입력칸 안에 배지로 보이고, 배지의 × 버튼이나 목록에서 다시 눌러 뺀다.
+ * 글자를 치면 목록이 좁혀지고, 빈 입력칸에서 Backspace를 누르면 마지막 배지가 빠진다. 고른 뒤에도 목록은 열려 있다.
+ */
+export function MultiSelect(props: MultiSelectProps) {
+  const { t } = useTranslation();
+  const { options, value, onChange, id, disabled, placeholder, maxHeight = 320 } = props;
+  const auto = useId(), listId = `${auto}-list`, optionId = (index: number) => `${auto}-option-${index}`;
+  const root = useRef<HTMLDivElement>(null), input = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false), [active, setActive] = useState(-1), [query, setQuery] = useState('');
+  const needle = query.trim().toLowerCase();
+  const shown = needle ? options.filter(option => option.label.toLowerCase().includes(needle) || option.value.toLowerCase().includes(needle)) : options;
+  const style = usePopupPosition(open, root, maxHeight, shown.length);
+  const close = () => { setOpen(false); setActive(-1); setQuery(''); };
+  useOutsideClose(open, root, close);
+  const show = () => { if (disabled) return; setOpen(true); setActive(firstEnabled(shown, 0, 1)); };
+  const remove = (target: string) => onChange(value.filter(v => v !== target));
+  const toggle = (option: MultiSelectOption) => {
+    if (value.includes(option.value)) { remove(option.value); return; }
+    // 같은 group의 이전 선택은 새 선택으로 바뀐다.
+    const kept = option.group === undefined ? value : value.filter(v => options.find(o => o.value === v)?.group !== option.group);
+    onChange([...kept, option.value]); setQuery('');
+  };
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    const key = event.key;
+    if (key === 'Tab') { if (open) close(); return; }
+    if (key === 'Backspace' && !query && value.length) { remove(value[value.length - 1]); return; }
+    if (!open) {
+      if (key === 'ArrowDown' || key === 'ArrowUp') { event.preventDefault(); show(); }
+      return;
+    }
+    if (key === 'ArrowDown') { event.preventDefault(); const next = firstEnabled(shown, active + 1, 1); if (next >= 0) setActive(next); }
+    else if (key === 'ArrowUp') { event.preventDefault(); const prev = firstEnabled(shown, active - 1, -1); if (prev >= 0) setActive(prev); }
+    else if (key === 'Home') { event.preventDefault(); setActive(firstEnabled(shown, 0, 1)); }
+    else if (key === 'End') { event.preventDefault(); setActive(firstEnabled(shown, shown.length - 1, -1)); }
+    else if (key === 'Enter') { event.preventDefault(); if (active >= 0 && shown[active]) toggle(shown[active]); }
+    else if (key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
+  };
+  return <div ref={root} className={disabled ? 'select-box multi-select disabled' : 'select-box multi-select'} data-value={value.join(',')}
+    onBlur={event => { if (!root.current?.contains(event.relatedTarget as Node | null)) close(); }}
+    onMouseDown={event => { if (event.target === event.currentTarget) { event.preventDefault(); input.current?.focus(); if (!open) show(); } }}>
+    {value.map(v => { const option = options.find(o => o.value === v), label = option?.label ?? v; return <span key={v} className="chip">{option?.chip ?? label}
+      <button type="button" className="chip-remove" disabled={disabled} aria-label={t('{{name}} 제거', { name: label })} onClick={() => { remove(v); input.current?.focus(); }}>
+        <svg className="icon" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" /></svg>
+      </button></span>; })}
+    <input ref={input} id={id} type="text" role="combobox" className="multi-select-input" autoComplete="off" spellCheck={false} data-value={value.join(',')}
+      aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listId : undefined}
+      aria-activedescendant={open && active >= 0 && shown[active] ? optionId(active) : undefined}
+      aria-label={props['aria-label']} aria-describedby={props['aria-describedby']}
+      disabled={disabled} placeholder={value.length ? undefined : placeholder} value={query}
+      onChange={event => { const text = event.target.value, low = text.trim().toLowerCase(); const next = low ? options.filter(option => option.label.toLowerCase().includes(low) || option.value.toLowerCase().includes(low)) : options; setQuery(text); setOpen(true); setActive(firstEnabled(next, 0, 1)); }}
+      onClick={() => { if (!open) show(); }}
+      onKeyDown={onKeyDown} />
+    {open && <List id={listId} options={shown} value="" values={value} active={active} optionId={optionId} onActive={setActive} onChoose={toggle} style={style} empty={t('결과 없음')} />}
   </div>;
 }

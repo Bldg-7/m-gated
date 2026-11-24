@@ -6,7 +6,7 @@ const transport = process.env.E2E_BASE_URL!;
 // 제품 Origin 검사나 CSP를 변경하지 않고 canonical PUBLIC_ORIGIN을 그대로 검증한다.
 const origin = 'https://m-gated.example.test';
 const cookie = process.env.E2E_COOKIE!;
-const labels = ['3개월', '6개월', '1년', '3년', '무제한 (만료 없음, 회수·정지는 적용)'];
+const labels = ['3개월', '6개월', '1년', '3년', '무제한'];
 const presets = ['3_months', '6_months', '1_year', '3_years', 'unlimited'];
 async function authenticate(context: BrowserContext, value = process.env.E2E_TOKEN!) {
   await context.addCookies([{ name: cookie, value, url: origin, httpOnly: true, secure: true, sameSite: 'Lax' }]);
@@ -25,7 +25,7 @@ async function open(page: Page, context: BrowserContext) {
   });
   await authenticate(context); phase('cookie'); await page.goto(`${origin}/dashboard/keys`); phase('shell');
   await expect(page.getByRole('region', { name: '내 가상 키', exact: true })).toBeVisible(); phase('heading');
-  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled(); phase('list');
+  await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled(); phase('list');
   const grantState = await page.evaluate(async () => { const me = await (await fetch('/api/me')).json(); return { count: me.grants.length, allowed: me.grants.some((g: { provider: string; model: string; capabilities: string[] }) => g.provider === 'anthropic' && g.model === 'synthetic-text' && g.capabilities.includes('messages')) }; });
   const boxes = page.getByRole('checkbox'); const named = page.getByLabel('anthropic / synthetic-text / messages', { exact: true });
   test.info().annotations.push({ type: 'key-grants', description: `${grantState.count}:${grantState.allowed}:${await boxes.count()}:${await named.count()}` });
@@ -44,7 +44,7 @@ async function backToList(page: Page) {
   await page.getByRole('link', { name: '내 가상 키로 돌아가기', exact: true }).click();
   await expect(page).toHaveURL(`${origin}/dashboard/keys`);
   await expect(listHeading(page)).toBeVisible();
-  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+  await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled();
 }
 /** 발급된 키 창을 닫는다. 발급 페이지는 닫으면 목록 페이지로 돌아간다. */
 async function closeIssued(page: Page) {
@@ -52,7 +52,7 @@ async function closeIssued(page: Page) {
   await expect(page.getByRole('dialog', { name: '발급된 키', exact: true })).toHaveCount(0);
   await expect(page).toHaveURL(`${origin}/dashboard/keys`);
   await expect(listHeading(page)).toBeVisible();
-  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+  await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled();
 }
 async function prepare(page: Page, name: string, preset = 'unlimited') {
   await openIssue(page);
@@ -73,7 +73,7 @@ async function revoke(page: Page, name: string) {
   await page.getByRole('button', { name: `${name} 회수`, exact: true }).click();
   await page.getByRole('button', { name: '회수 확인', exact: true }).click();
   await expect(page.getByRole('button', { name: `${name} 회수`, exact: true })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+  await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled();
 }
 function barrier() { let release!: () => void; const promise = new Promise<void>(r => { release = r; }); return { promise, release }; }
 test.beforeEach(async ({ context }) => {
@@ -99,7 +99,7 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
   expect(await optionNames(page.getByLabel('유효기간', { exact: true }))).toEqual(labels);
   await page.getByLabel('키 이름', { exact: true }).fill('duration-required');
   // Provider 키와 API를 고르기 전에는 발급 내용을 확인할 수 없다. Provider 키는 미리 골라 두지 않는다.
-  await expect(issueForm(page).getByLabel('Anthropic Provider 키', { exact: true })).toHaveAttribute('data-value', '');
+  await expect(issueForm(page).getByLabel('연동할 Provider 키 (1개 이상 필수)', { exact: true })).toHaveAttribute('data-value', '');
   await expect(issueForm(page).getByRole('checkbox')).toHaveCount(0);
   await expect(page.getByRole('button', { name: '발급 내용 확인', exact: true })).toBeDisabled();
   await ensureProviderKey(issueForm(page));
@@ -127,7 +127,7 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
     // 키 창을 닫으면 목록 페이지로 돌아가고, 방금 발급한 키가 목록에 있다.
     await expect(page).toHaveURL(`${origin}/dashboard/keys`);
     await expect(page.getByRole('cell').getByText(name, { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+    await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled();
     expect(await page.locator('main').textContent()).not.toContain(secret);
   }
   expect(writes).toBe(5);
@@ -135,7 +135,8 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
   await page.getByRole('button', { name: 'duration-unlimited 수정', exact: true }).click();
   const edit = page.getByRole('dialog', { name: 'duration-unlimited 수정', exact: true });
   await expect(edit.getByLabel('키 이름', { exact: true })).toHaveValue('duration-unlimited');
-  await ensureProviderKey(edit);
+  await expect(edit.getByLabel('연동할 Provider 키 (1개 이상 필수)', { exact: true })).not.toHaveAttribute('data-value', '');
+  await expect(edit.getByRole('button', { name: /^Anthropic · .+ 제거$/ })).toHaveCount(1);
   await expect(edit.getByLabel('anthropic / synthetic-text / messages', { exact: true })).toBeChecked();
   await edit.getByLabel('키 이름', { exact: true }).fill('duration-renamed');
   await edit.getByRole('button', { name: '수정 저장', exact: true }).click();
@@ -143,7 +144,7 @@ test('personal_keys_five_explicit_durations_one_time_secret_and_bodyless_revoke'
   await expect(page.getByRole('status').filter({ hasText: 'duration-renamed 키를 수정했습니다.' })).toBeVisible();
   await expect(page.getByRole('cell').getByText('duration-renamed', { exact: true })).toBeVisible();
   await expect(page.getByRole('cell').getByText('duration-unlimited', { exact: true })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+  await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled();
   expect(patches).toBe(1); expect(writes).toBe(5);
   await revoke(page, 'duration-renamed'); expect(deletes).toBe(1);
   await page.reload(); await expect(page.getByRole('region', { name: '내 가상 키', exact: true })).toBeVisible();
@@ -187,9 +188,9 @@ test('key_read_refresh_once_then_cookie_write401_never_refreshes_or_replays', as
   page.on('response', response => { if (response.url() === filtered) reads.push(response.status()); });
   const recovered = page.waitForResponse(response => response.url() === filtered && response.status() === 200);
   await pickOption(page.getByLabel('키 상태', { exact: true }), '회수');
-  await page.getByRole('button', { name: '키 조회', exact: true }).click();
+  await page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true }).click();
   await recovered;
-  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+  await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled();
   await expect(page.getByLabel('키 상태', { exact: true })).toHaveAttribute('data-value', 'revoked');
   expect(reads).toEqual([401, 200]);
   await expect(page.getByRole('region', { name: '내 가상 키', exact: true })).toBeVisible(); expect(refresh).toBe(1);
@@ -232,13 +233,13 @@ test('key_secret_and_forms_disappear_on_bfcache_broadcast_identity_and_cross_tab
     if (mode === 'identity') expect(await page.locator('input[name="name"]').evaluateAll(inputs => inputs.every(input => (input as HTMLInputElement).value === ''))).toBe(true);
     else {
       await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('');
-      await expect(issueForm(page).getByLabel('Anthropic Provider 키', { exact: true })).toHaveAttribute('data-value', '');
+      await expect(issueForm(page).getByLabel('연동할 Provider 키 (1개 이상 필수)', { exact: true })).toHaveAttribute('data-value', '');
     }
     expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);
     await page.unroute(`${origin}/api/me`);
     if (mode === 'identity') {
       await authenticate(context); await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
-      await expect(issueForm(page).getByLabel('Anthropic Provider 키', { exact: true })).toBeVisible();
+      await expect(issueForm(page).getByLabel('연동할 Provider 키 (1개 이상 필수)', { exact: true })).toBeVisible();
       await expect(page.getByLabel('키 이름', { exact: true })).toHaveValue('');
     }
   }
@@ -421,8 +422,8 @@ test('s9_real_origin_denial_never_refreshes_or_replays_cookie_write', async ({ p
   await expect(page).toHaveURL(`${origin}/dashboard/keys/new`);
   await expect(page.getByRole('region', { name: '명령 결과 확인', exact: true })).toHaveCount(0);
   await backToList(page);
-  await page.getByRole('button', { name: '키 조회', exact: true }).click();
-  await expect(page.getByRole('button', { name: '키 조회', exact: true })).toBeEnabled();
+  await page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true }).click();
+  await expect(page.getByRole('form', { name: '키 조회', exact: true }).getByRole('button', { name: '조회', exact: true })).toBeEnabled();
   const after = await page.evaluate(async () => (await (await fetch('/api/keys')).json()).items.length as number);
   expect(after).toBe(before); expect(writes).toBe(1); expect(refresh).toBe(0);
   expect(await page.getByRole('dialog', { name: '발급된 키', exact: true }).count()).toBe(0);

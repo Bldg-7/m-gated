@@ -55,7 +55,7 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
 type Back = { href: string; label: string; name: string };
 const toPrincipals: Back = { href: '/dashboard/admin/principals', label: msgid('사용자 목록'), name: msgid('사용자 목록으로 돌아가기') };
 const pages: Record<Screen, { nav: string; title: string; lead?: string; back?: (search: URLSearchParams) => Back }> = {
-  '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다. 모든 값은 서버가 조회한 시각 기준이며 화면에서 다시 계산하지 않습니다.') },
+  '/dashboard/': { nav: msgid('내 사용량'), title: msgid('내 사용량'), lead: msgid('조회 기간의 확정 비용과 현재 예산 잔액입니다.') },
   '/dashboard/keys': { nav: msgid('내 가상 키'), title: msgid('내 가상 키') },
   '/dashboard/keys/new': { nav: msgid('내 가상 키'), title: msgid('가상 키 발급'), lead: msgid('연동할 Provider 키와 허용할 API를 골라 가상 키를 발급합니다.'), back: () => ({ href: '/dashboard/keys', label: msgid('내 가상 키'), name: msgid('내 가상 키로 돌아가기') }) },
   '/dashboard/admin/principals': { nav: msgid('사용자·정책·키 관리'), title: msgid('사용자 · 정책 · 키'), lead: msgid('사용자와 서비스 계정의 정책, 자동 안전차단, 가상 키를 관리합니다.') },
@@ -66,7 +66,7 @@ const pages: Record<Screen, { nav: string; title: string; lead?: string; back?: 
   '/dashboard/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
   '/dashboard/admin/models': { nav: msgid('모델·가격'), title: msgid('모델 · 가격 카탈로그'), lead: msgid('공급사 모델과 가격을 공개 가격 목록 models.dev 에서 불러옵니다. 동기화는 변경안만 만들고, 관리자가 이전 값과 비교해 승인해야 적용됩니다. 이미 기록된 요청의 금액은 바뀌지 않습니다.') },
   '/dashboard/admin/settings': { nav: msgid('설정'), title: msgid('게이트웨이 설정'), lead: msgid('게이트웨이 전체에 한 번 정하는 설정입니다. 지금은 월 예산의 기준 시간대를 정합니다.') },
-  '/dashboard/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 키'), lead: msgid('Provider마다 Provider 키를 여러 개 등록하고, 키마다 알아볼 이름을 붙입니다. 사용자는 관리자가 인가한 Provider 키만 쓸 수 있고, 가상 키는 발급할 때 Provider마다 인가된 Provider 키 하나에 연결됩니다. 추론 요청은 가상 키로만 보냅니다. 키는 DB에 암호화해 저장하며, 저장 전에 Provider의 모델 목록 API로 실제 확인을 1회 거칩니다. 저장한 키는 다시 볼 수 없고 끝 4자리만 표시합니다. 다른 서버 인스턴스에는 상태 점검 주기(수 초) 안에 반영되고, 진행 중인 요청은 시작할 때의 키를 끝까지 씁니다.') },
+  '/dashboard/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 키'), lead: msgid('Provider마다 키를 등록하고 관리합니다. 사용자는 관리자가 인가한 키만 쓸 수 있습니다.') },
 };
 /** 서버가 내준 경로를 화면으로. 등록되지 않은 /dashboard/admin/* 는 전체 사용량, 그 밖은 내 사용량(기존 동작과 같음). */
 function screenOf(path: string): Screen {
@@ -95,6 +95,11 @@ export function App() {
   const { t } = useTranslation();
   const auth = useSyncExternalStore(session.subscribe, session.snapshot);
   const principal = useRef<string | null>(null);
+  // 이 페이지에서 로그인·관리자 권한이 있었는지. 잃으면 화면(입력 중이던 내용, 발급된 키 원문)을 지웠다고 알리고 다시 로그인하게 한다.
+  const wasReady = useRef(false), wasAdmin = useRef(false);
+  if (auth.status === 'ready') { wasReady.current = true; if (auth.me?.role === 'admin') wasAdmin.current = true; }
+  // 스스로 로그아웃한 경우는 알릴 것이 없다.
+  const cleared = wasReady.current && auth.error !== '로그아웃되었습니다.';
   if (auth.me) principal.current = auth.me.principal.id; else if (!auth.refreshing) principal.current = null;
   useEffect(() => {
     const detach = session.attach();
@@ -115,7 +120,7 @@ export function App() {
   }, [route.href]);
   // 하위 페이지(사용자 상세)에 있을 때도 상위 메뉴를 현재 위치로 표시한다.
   const link = (path: Screen) => <Link href={path} aria-current={screen === path || screen.startsWith(`${path}/`) ? 'page' : undefined}>{t(pages[path].nav)}</Link>;
-  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p> : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/principals/key' ? <PrincipalKeyIssueScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/keys' ? <KeysScreen adminAll key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : screen === '/dashboard/keys/new' ? <KeysScreen key={`${principal.current}:new`} view="issue" /> : <UsageScreen key={principal.current} />;
+  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? (wasAdmin.current && auth.status === 'ready' ? <div className="stack-sm"><p role="alert">{t('현재 관리자 권한이 없습니다.')} {t('입력 중이던 내용과 원문은 지웠습니다.')}</p><p><a href="/auth/login">{t('SSO 다시 로그인')}</a></p></div> : <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p>) : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/principals/key' ? <PrincipalKeyIssueScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/keys' ? <KeysScreen adminAll key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : screen === '/dashboard/keys/new' ? <KeysScreen key={`${principal.current}:new`} view="issue" /> : <UsageScreen key={principal.current} />;
   return <div className="app">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark" aria-hidden="true">mg</span>m-gated</div>
@@ -135,7 +140,7 @@ export function App() {
         {back && <Link className="back-link" href={back.href} aria-label={t(back.name)}><svg className="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" /></svg>{t(back.label)}</Link>}
         <h1 className="page-title" tabIndex={-1} ref={title}>{pageTitle}</h1>{page.lead && <p className="lead">{t(page.lead)}</p>}</header>
       {auth.status === 'checking' && <p role="status">{t('인증 확인 중…')}</p>}
-      {auth.status === 'error' && <div className="auth-state"><p role="alert">{auth.error && t(auth.error)}</p><div className="actions"><a className="btn btn-primary" href="/auth/login">{t('SSO 로그인')}</a><button onClick={() => void session.validate()}>{t('다시 확인')}</button></div></div>}
+      {auth.status === 'error' && <div className="auth-state"><p role="alert">{auth.error && t(auth.error)}{cleared && <> {t('입력 중이던 내용과 원문은 지웠습니다.')}</>}</p><div className="actions"><a className="btn btn-primary" href="/auth/login">{cleared ? t('SSO 다시 로그인') : t('SSO 로그인')}</a><button onClick={() => void session.validate()}>{t('다시 확인')}</button></div></div>}
       {(auth.status === 'ready' || auth.refreshing) && <div key={route.href} className="stack-lg">{content}</div>}
     </div></main>
   </div>;

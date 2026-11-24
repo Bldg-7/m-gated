@@ -48,6 +48,7 @@ pub(super) fn error(e: ManagementError) -> Response {
         Invariant => (500, "invariant_violation"),
         CommandConflict => (409, "command_conflict"),
         Quota => (409, "key_quota_exceeded"),
+        LimitExceeded => (422, "limit_exceeds_maximum"),
         PolicyPeriod => (409, "policy_period_conflict"),
         ConfigurationConflict => (409, "configuration_conflict"),
         SecurityFence => (409, "security_fence_conflict"),

@@ -190,7 +190,8 @@ async fn read(State(state): State<ApiState>, request: Request) -> Response {
                     let budget_timezone=principal.as_object_mut().expect("principal object").remove("budget_timezone").unwrap_or(Value::Null);
                     let provider_credentials=principal.as_object_mut().expect("principal object").remove("provider_credentials").unwrap_or(json!([]));
                     let Some(expires)=time::OffsetDateTime::from_unix_timestamp(human.identity.expires_at()).ok().and_then(|t|t.format(&time::format_description::well_known::Rfc3339).ok()) else { return query_error(QueryError::Invariant); };
-                    success(json!({"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}))
+                    let key_limit_maximum=crate::ledger::policy::PolicyLimits::key_maximum_view(&principal["policy"]["limits"],&state.api.ceiling);
+                    success(json!({"key_limit_maximum":key_limit_maximum,"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}))
                 },Err(error)=>query_error(error),
             }
         } else if request.uri.path()=="/api/usage/models" {

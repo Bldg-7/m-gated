@@ -24,6 +24,8 @@ pub enum ManagementError {
     Version(i64),
     SecretUnavailable(Uuid),
     Quota,
+    /// 가상 키의 한도가 정책 한도나 서버 실행 상한을 넘는다.
+    LimitExceeded,
     PolicyPeriod,
     ConfigurationConflict,
     SecurityFence,

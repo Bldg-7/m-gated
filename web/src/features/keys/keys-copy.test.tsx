@@ -18,8 +18,8 @@ async function issue() {
   render(<App />);
   await screen.findByRole('region', { name: '가상 키 발급' });
   fireEvent.change(screen.getByLabelText('키 이름'), { target: { value: '복사 키' } });
-  pickOption(screen.getByLabelText('유효기간'), '무제한 (만료 없음, 회수·정지는 적용)');
-  pickOption(screen.getByLabelText('Anthropic Provider 키'), 'team-a (…0001)');
+  pickOption(screen.getByLabelText('유효기간'), '무제한');
+  pickOption(screen.getByLabelText('연동할 Provider 키 (1개 이상 필수)'), 'Anthropic · team-a (…0001)');
   fireEvent.click(screen.getByLabelText('anthropic / synthetic-text / messages'));
   fireEvent.submit(screen.getByRole('form', { name: '가상 키 발급' }));
   fireEvent.click(await screen.findByRole('button', { name: '발급 확인' }));

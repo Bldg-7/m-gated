@@ -1954,5 +1954,23 @@ async fn admin_reads_request_models_and_key_owner() {
             .as_str()
             .is_some_and(|n| !n.is_empty())
     );
+
+    // 가상 키의 한도는 키 주인의 정책 한도를 넘을 수 없다. 최대값은 /api/me 로 알려 주고, 넘으면 발급을 거절한다.
+    sqlx::query("UPDATE gw_policies SET rpm_limit=5 WHERE key_id IS NULL")
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let (_, me) = h.call("GET", "/api/me", &h.bob, None).await;
+    assert_eq!(me["key_limit_maximum"]["rpm"], json!(5), "{me}");
+    assert_eq!(me["key_limit_maximum"]["tpm"], json!(null));
+    let mut over = issue(Some(a_id));
+    over["limits"]["rpm"] = json!(6);
+    let (status, v) = h.call("POST", "/api/keys", &h.bob, Some(over)).await;
+    assert_eq!(status, 422, "{v}");
+    assert_eq!(v["error"]["code"], "limit_exceeds_maximum");
+    let mut within = issue(Some(a_id));
+    within["limits"]["rpm"] = json!(5);
+    let (status, v) = h.call("POST", "/api/keys", &h.bob, Some(within)).await;
+    assert_eq!(status, 201, "{v}");
     h.db.close().await;
 }
