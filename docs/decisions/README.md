@@ -13,6 +13,7 @@ status. A later decision that changes an earlier one gets a new file, and the ea
 | [0002](0002-account-suspension.md) | Suspend an account with its own button; remove the security fence | Dashboard implemented, server part not implemented |
 | [0003](0003-dashboard-screen-rules.md) | Rules for dashboard screens | Implemented |
 | [0004](0004-filter-bars-stay-simple.md) | Filter bars get no summary line, reset button or "not applied" marker | Accepted |
+| [0005](0005-gateway-prices-and-cut-off-requests.md) | The catalog is the gateway's own price list; cut-off requests are settled at once; reservations are removed | Accepted, not implemented |
 
 ## Format
 
