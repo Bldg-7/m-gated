@@ -146,7 +146,9 @@ test('refresh_success_then_current_me403_stays_permission_error_without_login', 
   try {
     await context.addCookies([{ name: cookie, value: process.env.E2E_EXPIRED_TOKEN!, url: base, httpOnly: true, sameSite: 'Lax' }]);
     await pickModel(page, 'refresh-denied'); await page.getByRole('button', { name: '조회', exact: true }).click();
-    await expect(page.getByRole('alert')).toHaveText('접근 권한이 없습니다.');
+    // 로그인했던 화면이 권한을 잃었으므로 화면을 지웠다는 안내와 다시 로그인 링크가 붙는다.
+    await expect(page.getByRole('alert')).toHaveText('접근 권한이 없습니다. 입력 중이던 내용과 원문은 지웠습니다.');
+    await expect(page.getByRole('link', { name: 'SSO 다시 로그인', exact: true })).toHaveAttribute('href', '/auth/login');
     expect(page.url()).toBe(`${base}/dashboard/`); expect(login).toBe(0); expect(refresh).toBe(1); expect(meReads).toBe(1); expect(usageReads).toBe(1);
     expect(await page.getByRole('heading', { name: '조회 기간 사용량' }).count()).toBe(0);
     expect(await page.getByText(/<img src=x/).count()).toBe(0);
