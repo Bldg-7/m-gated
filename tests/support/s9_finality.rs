@@ -1,14 +1,36 @@
 use super::*;
 use std::time::Duration;
 
+/// 시작 event 뒤에 끊긴 스트림을 끊긴 요청 규칙으로 정산했는지 본다. 규칙이 없는 Provider(`S9_CUTOFF`가 None)는
+/// 미정산으로 남기고 막는다(결정 0005). 규칙이 있으면 받은 출력이 없어 입력 token만 정산한다.
+fn cut_settled() -> bool {
+    S9_CUTOFF.is_some()
+}
+/// 다음 요청이 받을 완전한 native 스트림을 Provider 기본 응답으로 둔다.
+async fn complete_next(h: &Harness, native: &str) {
+    h.provider
+        .set(
+            StatusCode::OK,
+            HeaderMap::from_iter([(
+                "content-type".parse().unwrap(),
+                "text/event-stream".parse().unwrap(),
+            )]),
+            Bytes::from(native.to_owned()),
+        )
+        .await;
+}
+
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s9_complete_final_survives_client_cancellation() {
     cancellation(true, false).await;
 }
+/// 시작 event만 받고 끊긴 스트림은 끊긴 요청 규칙이 있는 Provider(Anthropic)면 바로 정산하고,
+/// 없는 Provider(OpenAI·DeepSeek)면 미정산이다(결정 0005).
+/// 모르는 모델을 알린 완전한 final은 가격을 정할 수 없어 어느 Provider든 미정산이다.
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s9_partial_and_unpriced_final_cancel_keep_unknown() {
+async fn s9_partial_cancel_follows_cutoff_rule_and_unpriced_final_stays_unknown() {
     cancellation(false, false).await;
     cancellation(false, true).await;
 }
@@ -25,6 +47,8 @@ async fn cancellation(complete: bool, shutdown: bool) {
             &["\n"][..]
         } {
             let (h, path, body, native, partial, cost) = s9_finality_fixture(variant).await;
+            let cut = !complete && !variant && cut_settled();
+            let unknown = !complete && !cut;
             let wire = if complete {
                 native.replace("\r\n", "\n").replace('\n', ending)
             } else if variant {
@@ -69,23 +93,16 @@ async fn cancellation(complete: bool, shutdown: bool) {
                 .await
                 .unwrap();
             let row:(String,String,Option<String>,bool,String)=sqlx::query_as("SELECT accounting_state,reason_code,cost_usd::text,execution_stopped_at IS NOT NULL,outcome FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
-            let budget:(String,i64,i64,i64,i64,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final' AND normalized_usage->>'source'='provider'),w.reserved_tokens,w.settled_tokens FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+            // 정산한 토큰은 받은 시각이 아니라 정산한 1분 칸에 쌓인다. 이 scope의 칸 전체 합으로 본다.
+            let budget:(i64,i64,i64)=sqlx::query_as("SELECT t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final' AND normalized_usage->>'source'='provider'),(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+            let settled = finance::settlement(h.db.store.pool(), id).await;
             let calls = h.provider.calls.lock().await.len();
             let resources = h.runtime.request_resources();
             let available = h.runtime.available_inference();
             // assertion Red도 자신의 schema를 정리하고 나서 실패한다.
             let mut next_status = None;
             if !shutdown {
-                h.provider
-                    .set(
-                        StatusCode::OK,
-                        HeaderMap::from_iter([(
-                            "content-type".parse().unwrap(),
-                            "text/event-stream".parse().unwrap(),
-                        )]),
-                        Bytes::from(native),
-                    )
-                    .await;
+                complete_next(&h, &native).await;
                 let next = h.request(path, body).send().await.unwrap();
                 let status = next.status();
                 let _ = next.bytes().await;
@@ -94,7 +111,7 @@ async fn cancellation(complete: bool, shutdown: bool) {
             }
             h.close().await;
             if let Some(status) = next_status {
-                assert_eq!(status, if complete { 200 } else { 403 });
+                assert_eq!(status, if unknown { 403 } else { 200 });
             }
             assert_eq!(calls, 1);
             assert_eq!(available, 16);
@@ -104,7 +121,7 @@ async fn cancellation(complete: bool, shutdown: bool) {
             assert!(resources.parser_peak <= 256 * 1024);
             assert!(row.3);
             assert_eq!(row.4, "cancelled");
-            assert_eq!(row.0, if complete { "settled" } else { "unknown" });
+            assert_eq!(row.0, if unknown { "unknown" } else { "settled" });
             assert_eq!(
                 row.1,
                 if shutdown {
@@ -113,26 +130,25 @@ async fn cancellation(complete: bool, shutdown: bool) {
                     "client_cancelled"
                 }
             );
-            assert_eq!(row.2.as_deref(), complete.then_some(cost));
+            assert_eq!(
+                row.2.as_deref(),
+                if complete {
+                    Some(cost)
+                } else if cut {
+                    S9_CUTOFF.map(|(cost, _)| cost)
+                } else {
+                    None
+                }
+            );
             if complete {
-                assert_eq!(budget, ("0.000000000000".into(), 0, 0, 1, 0, 120));
+                assert_eq!(budget, (0, 1, 120));
+            } else if cut {
+                // 시작 event가 알린 입력 token만 정산한 1분 칸에 쌓인다. Provider final은 없다.
+                assert_eq!(budget, (0, 0, S9_CUTOFF.unwrap().1));
+                assert_eq!(settled, finance::cutoff_received(S9_CUTOFF.unwrap().0, 0));
             } else {
-                // 완전한 관측의 존재와 가격 확정은 다르다. 미가격 final도 비용은 계속 unknown이다.
-                assert_eq!(
-                    budget,
-                    if cost == "0.000140000000" {
-                        ("0.000000000000".into(), 0, 1, i64::from(variant), 0, 0)
-                    } else {
-                        (
-                            "0.004296000000".into(),
-                            4196,
-                            1,
-                            i64::from(variant),
-                            4196,
-                            0,
-                        )
-                    }
-                );
+                // 완전한 관측의 존재와 가격 확정은 다르다. 미가격 final도 비용은 계속 unknown이고 토큰을 쌓지 않는다.
+                assert_eq!(budget, (1, i64::from(variant), 0));
             }
         }
     }
@@ -143,7 +159,7 @@ async fn cancellation(complete: bool, shutdown: bool) {
 async fn s9_failure_after_final_discards_snapshot_before_supervised_finalization() {
     for split in [false, true] {
         for kind in ["syntax", "native", "oversized_native", "duplicate_terminal"] {
-            let (h, path, body, native, partial, cost) = s9_finality_fixture(false).await;
+            let (h, path, body, native, partial, _) = s9_finality_fixture(false).await;
             let (tx, stopped) = h.provider.stream().await;
             tx.send(Bytes::from(partial.clone())).await.unwrap();
             let mut r = h.request(path, body.clone()).send().await.unwrap();
@@ -189,7 +205,9 @@ async fn s9_failure_after_final_discards_snapshot_before_supervised_finalization
                 .unwrap();
             drop(tx);
             h.runtime.wait_requests().await;
-            let row:(String,bool,i64,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+            let row:(String,bool,i64,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,t.unknown_count,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final') FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+            let settled = finance::last_settlement(h.db.store.pool()).await;
+            complete_next(&h, &native).await;
             let next = h.request(path, body).send().await.unwrap();
             let next_status = next.status();
             let _ = next.bytes().await;
@@ -197,25 +215,20 @@ async fn s9_failure_after_final_discards_snapshot_before_supervised_finalization
             let calls = h.provider.calls.lock().await.len();
             let available = h.runtime.available_inference();
             h.close().await;
-            assert_eq!(next_status, 403);
-            assert_eq!(calls, 1);
             assert_eq!(available, 16);
-            assert_eq!(
-                row,
-                (
-                    "unknown".into(),
-                    true,
-                    1,
-                    0,
-                    if cost == "0.000140000000" {
-                        "0.000000000000"
-                    } else {
-                        "0.004296000000"
-                    }
-                    .into(),
-                    if cost == "0.000140000000" { 0 } else { 4196 }
-                )
-            );
+            // 오류 event 뒤의 limit는 시작 event 뒤의 끊김이다. 규칙이 있으면 옛 성공 final(출력 20)을
+            // 되살리지 않고 받은 출력(없음)만 정산하며 막지 않는다. 해석하지 못한 응답과 규칙이 없는
+            // Provider의 끊김은 미정산으로 남기고 막는다.
+            if cut_settled() && matches!(kind, "native" | "oversized_native") {
+                assert_eq!(next_status, 200);
+                assert_eq!(calls, 2);
+                assert_eq!(row, ("settled".into(), false, 0, 1));
+                assert_eq!(settled, finance::cutoff_received(S9_CUTOFF.unwrap().0, 0));
+            } else {
+                assert_eq!(next_status, 403);
+                assert_eq!(calls, 1);
+                assert_eq!(row, ("unknown".into(), true, 1, 0));
+            }
         }
     }
 }
@@ -224,7 +237,7 @@ async fn s9_failure_after_final_discards_snapshot_before_supervised_finalization
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s9_incomplete_native_error_before_cancel_invalidates_success_without_claiming_failure() {
     for shutdown in [false, true] {
-        let (h, path, body, native, _, cost) = s9_finality_fixture(false).await;
+        let (h, path, body, native, _, _) = s9_finality_fixture(false).await;
         let (tx, stopped) = h.provider.stream().await;
         tx.send(Bytes::from(native.clone())).await.unwrap();
         let mut r = h.request(path, body.clone()).send().await.unwrap();
@@ -249,7 +262,9 @@ async fn s9_incomplete_native_error_before_cancel_invalidates_success_without_cl
         stopped.await.unwrap();
         drop(tx);
         h.runtime.wait_requests().await;
-        let row:(String,String,String,bool,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.outcome,r.reason_code,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").fetch_one(h.db.store.pool()).await.unwrap();
+        let row:(String,String,String,bool,i64)=sqlx::query_as("SELECT r.accounting_state,r.outcome,r.reason_code,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final') FROM gw_requests r").fetch_one(h.db.store.pool()).await.unwrap();
+        let settled = finance::last_settlement(h.db.store.pool()).await;
+        complete_next(&h, &native).await;
         let next = h.request(path, body).send().await.unwrap();
         let status = next.status();
         let _ = next.bytes().await;
@@ -257,14 +272,17 @@ async fn s9_incomplete_native_error_before_cancel_invalidates_success_without_cl
         let calls = h.provider.calls.lock().await.len();
         let resources = h.runtime.request_resources();
         h.close().await;
-        assert_eq!(status, 403);
-        assert_eq!(calls, 1);
+        // 끝나지 않은 오류는 옛 성공 final을 무효로 하지만 실패를 주장하지 않는다(취소로 남긴다).
+        // 끊긴 요청 규칙이 있으면 받은 출력(없음)만 정산하고 막지 않으며, 없으면 미정산으로 막는다.
+        let cut = cut_settled();
+        assert_eq!(status, if cut { 200 } else { 403 });
+        assert_eq!(calls, if cut { 2 } else { 1 });
         assert_eq!(resources.body_bytes, 0);
         assert_eq!(resources.queue_bytes, 0);
         assert_eq!(
             row,
             (
-                "unknown".into(),
+                if cut { "settled" } else { "unknown" }.into(),
                 "cancelled".into(),
                 if shutdown {
                     "shutdown_cancelled"
@@ -272,16 +290,12 @@ async fn s9_incomplete_native_error_before_cancel_invalidates_success_without_cl
                     "client_cancelled"
                 }
                 .into(),
-                true,
-                0,
-                if cost == "0.000140000000" {
-                    "0.000000000000"
-                } else {
-                    "0.004296000000"
-                }
-                .into(),
-                if cost == "0.000140000000" { 0 } else { 4196 }
+                !cut,
+                i64::from(cut)
             )
         );
+        if cut {
+            assert_eq!(settled, finance::cutoff_received(S9_CUTOFF.unwrap().0, 0));
+        }
     }
 }

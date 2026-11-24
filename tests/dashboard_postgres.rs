@@ -530,7 +530,7 @@ async fn selected_key_balance_and_null_tokens_are_independent_of_period_filters(
     let mut tx = db.store.pool().begin().await.unwrap();
     sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection) VALUES($1,$2,decode(repeat('01',32),'hex'),'issue_key','key',$3,201,'{}')").bind(id).bind(command).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_virtual_keys(id,principal_id,secret_hash,hash_version,public_prefix,name,grant_snapshot,validity_preset,created_by,created_command_id) VALUES($1,$2,decode(repeat('02',32),'hex'),1,'fixture','fixture','[]','unlimited',$2,$3)").bind(key).bind(id).bind(command).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'[]','reserved',(10),'calendar_month','UTC',$2)").bind(scope).bind(id).bind(key).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_limit_usd,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'[]',(10),'calendar_month','UTC',$2)").bind(scope).bind(id).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("UPDATE gw_request_budgets SET applied_input_tokens=NULL,applied_output_tokens=NULL WHERE request_id=$1").bind(source).execute(&mut *tx).await.unwrap();
     sqlx::query("UPDATE gw_usage_totals SET input_tokens=0,output_tokens=0,settled_unknown_tokens_count=1 WHERE scope_id=(SELECT id FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL)").bind(id).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
@@ -551,7 +551,11 @@ async fn selected_key_balance_and_null_tokens_are_independent_of_period_filters(
     assert_eq!(usage["budget_balances"].as_array().unwrap().len(), 2);
     assert_eq!(usage["balance_context"], "current_principal_and_key");
     assert_eq!(usage["budget_balances"][1]["scope_id"], scope.to_string());
-    assert_eq!(usage["budget_balances"][1]["mode"], "reserved");
+    // 예산에는 방식이 없고 실행 중인 요청이 잡아 둔 금액도 없다. 잔액은 한도에서 확정 비용만 뺀다.
+    for field in ["mode", "reserved_usd"] {
+        assert!(usage["budget_balances"][1].get(field).is_none(), "{field}");
+    }
+    assert!(usage.get("held_reservation_usd").is_none());
     assert_eq!(
         usage["budget_balances"][1]["remaining_usd"],
         "10.000000000000"

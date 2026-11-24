@@ -140,7 +140,7 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
       if (!/^(0|[1-9][0-9]{0,15})\.[0-9]{12}$/.test(amount)) { setError(i18n.t('예산은 소수점 12자리 USD 문자열로 입력하세요.')); return; }
       const most = maximum?.budget?.limit_usd ?? null;
       if (most !== null && BigInt(amount.replace('.', '')) > BigInt(most.replace('.', ''))) { setError(i18n.t('{{field}}에 넣을 수 있는 최대값은 {{max}}입니다.', { field: i18n.t('예산'), max: `${most} USD` })); return; }
-      limits.budget = { mode: data.get('mode') === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month' } };
+      limits.budget = { limit_usd: amount, period: { kind: 'calendar_month' } };
     }
     // 가상 키는 키 주인에게 인가된 Provider 키 하나 이상에 연동해야 하고, 연동한 Provider마다 허용할 API가 있어야 한다.
     if (!chosenProviders.length) { setError(i18n.t('연동할 Provider 키를 하나 이상 고르세요.')); return; }
@@ -232,7 +232,6 @@ export function KeysScreen({ adminPrincipal, adminAll = false, view = 'list' }: 
         <p className="meta">{t('사용자 정책과 서버 설정 파일의 limit가 우선 적용됩니다.')}</p>
         <div className="form-grid">
           <label>{t('예산 USD (소수점 12자리)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} placeholder={maximum?.budget?.limit_usd ?? '0.000000000000'} /></label>
-          <div className="field"><label htmlFor={`${prefix}-key-budget-mode`}>{t('예산 모드')}</label><Select id={`${prefix}-key-budget-mode`} name="mode" defaultValue="actual" options={[{ value: 'actual', label: t('실사용량 (하드캡 아님)') }, { value: 'reserved', label: t('예약 기반') }]} /></div>
         </div>
         <BudgetTimezoneNote />
         {/* 분당 한도는 잘 쓰지 않아 접어 둔다. 빈 칸에는 관리자가 정한 최대값이 보인다. */}

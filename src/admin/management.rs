@@ -25,6 +25,7 @@ const PRINCIPALS_ADMIN: &str = "/api/admin/principals/";
 const PRINCIPAL_CREDENTIALS: &str = "/provider-credentials";
 const SETTINGS: &str = "/api/admin/settings";
 const BUDGET_TIMEZONE: &str = "/api/admin/settings/budget-timezone";
+const CUTOFF_RULE: &str = "/api/admin/settings/cutoff-rule";
 fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
 }
@@ -137,6 +138,7 @@ pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> R
         } else if (path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING))
             || (path.starts_with(PRINCIPALS_ADMIN) && path.ends_with(PRINCIPAL_CREDENTIALS))
             || path == BUDGET_TIMEZONE
+            || path == CUTOFF_RULE
         {
             vec![Method::PUT]
         } else if path == "/api/keys" || path == "/api/admin/principals" {
@@ -302,7 +304,7 @@ async fn execute(
     {
         return provider_credentials(state, &head, body, human.current.id).await;
     }
-    if path == SETTINGS || path == BUDGET_TIMEZONE {
+    if path == SETTINGS || path == BUDGET_TIMEZONE || path == CUTOFF_RULE {
         return settings(state, &head, body, human.current.id).await;
     }
     if path == CATALOG || path.starts_with(CATALOG) {
@@ -996,18 +998,40 @@ async fn settings(
         timezone: String,
         expected_version: String,
     }
-    let Ok(input) = serde_json::from_slice::<SetTimezone>(&bytes) else {
-        return error(ManagementError::Invalid);
+    /// 끊긴 요청의 정산 규칙. 이번 단계에서는 Anthropic 규칙만 바꿀 수 있다.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SetCutoffRule {
+        provider: String,
+        cutoff_rule: String,
+        expected_version: String,
+    }
+    let result = if path == CUTOFF_RULE {
+        let Ok(input) = serde_json::from_slice::<SetCutoffRule>(&bytes) else {
+            return error(ManagementError::Invalid);
+        };
+        let Ok(expected) = input.expected_version.parse::<i64>() else {
+            return error(ManagementError::Invalid);
+        };
+        state
+            .api
+            .store
+            .set_cutoff_rule(&ctx, &input.provider, &input.cutoff_rule, expected)
+            .await
+    } else {
+        let Ok(input) = serde_json::from_slice::<SetTimezone>(&bytes) else {
+            return error(ManagementError::Invalid);
+        };
+        let Ok(expected) = input.expected_version.parse::<i64>() else {
+            return error(ManagementError::Invalid);
+        };
+        state
+            .api
+            .store
+            .set_budget_timezone(&ctx, &input.timezone, expected)
+            .await
     };
-    let Ok(expected) = input.expected_version.parse::<i64>() else {
-        return error(ManagementError::Invalid);
-    };
-    match state
-        .api
-        .store
-        .set_budget_timezone(&ctx, &input.timezone, expected)
-        .await
-    {
+    match result {
         Ok(result) => {
             let mut r = match result.body {
                 Some(v) => success(v),

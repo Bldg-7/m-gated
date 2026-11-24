@@ -181,8 +181,13 @@ async fn full_queue_cancel_finalizes_real_sql_without_task_or_permit_leak() {
     .fetch_one(h.db.store.pool())
     .await
     .unwrap();
-    assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
+    // 시작 event 뒤의 client 취소는 끊긴 요청이다. 받은 출력 내용(delta)이 없어 입력만 센다.
+    assert_eq!(row.get::<String, _>("accounting_state"), "settled");
     assert!(row.get::<bool, _>("stopped"));
+    assert_eq!(
+        finance::last_settlement(h.db.store.pool()).await,
+        finance::cutoff_received("0.000100000000", 0)
+    );
     assert_eq!(h.provider.calls.lock().await.len(), 1);
     producer.abort();
     let _ = producer.await;
@@ -224,10 +229,15 @@ async fn absolute_transport_deadline_cancels_upstream_and_reserves_finalization_
         .unwrap()
         .unwrap();
     idle(&h).await;
-    let row=sqlx::query("SELECT accounting_state,execution_stopped_at IS NOT NULL AS stopped,extract(epoch from execution_deadline-transport_deadline)::bigint AS gap FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
+    let row=sqlx::query("SELECT accounting_state,reason_code,execution_stopped_at IS NOT NULL AS stopped,extract(epoch from execution_deadline-transport_deadline)::bigint AS gap FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(row.get::<String, _>("reason_code"), "upstream_read_timeout");
     assert!(row.get::<bool, _>("stopped"));
     assert_eq!(row.get::<i64, _>("gap"), 5);
+    // 시작 event 뒤에 기한으로 끊긴 스트림은 끊긴 요청 규칙으로 바로 정산한다. 받은 출력이 없어 입력만 센다.
+    assert_eq!(
+        finance::settlement(h.db.store.pool(), id).await,
+        finance::cutoff_received("0.000100000000", 0)
+    );
     assert_eq!(h.provider.calls.lock().await.len(), 1);
     h.close().await;
 }
@@ -507,12 +517,10 @@ async fn idle_upstream_h2_client_reset_cancels_even_while_body_poll_is_pending()
         .expect("body Pending 중에도 client RST가 upstream 취소를 깨워야 한다")
         .unwrap();
     idle(&h).await;
+    // 시작 event 뒤의 client RST는 끊긴 요청이다. 미정산으로 남기지 않고 바로 정산한다.
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT accounting_state FROM gw_requests")
-            .fetch_one(h.db.store.pool())
-            .await
-            .unwrap(),
-        "unknown"
+        finance::last_settlement(h.db.store.pool()).await,
+        finance::cutoff_received("0.000100000000", 0)
     );
     drop(tx);
     drop(client);
@@ -728,16 +736,15 @@ async fn sse_event_and_total_wire_boundaries_have_distinct_accounting_outcomes()
         }
         producer.await.unwrap();
         idle(&h).await;
-        let state = sqlx::query_scalar::<_, String>("SELECT accounting_state FROM gw_requests")
-            .fetch_one(h.db.store.pool())
-            .await
-            .unwrap();
+        // 한도를 넘은 event는 시작 event 뒤의 끊김이라 받은 출력(없음)으로 정산하고, 나머지는 Provider final로 정산한다.
+        let (state, cost, source, _, _) = finance::last_settlement(h.db.store.pool()).await;
+        assert_eq!(state, "settled");
         assert_eq!(
-            state,
-            if case.ends_with("exact") || case == "total_over" {
-                "settled"
+            (cost.as_deref(), source.as_deref()),
+            if case == "event_over" {
+                (Some("0.000100000000"), Some("cutoff_received"))
             } else {
-                "unknown"
+                (Some("0.000140000000"), Some("provider"))
             }
         );
         assert_eq!(h.provider.calls.lock().await.len(), 1);
@@ -774,13 +781,18 @@ async fn http1_client_drop_cancels_idle_upstream_and_joins_before_stopped() {
         .unwrap();
     idle(&h).await;
     let row = sqlx::query(
-        "SELECT accounting_state,execution_stopped_at IS NOT NULL AS stopped FROM gw_requests",
+        "SELECT reason_code,execution_stopped_at IS NOT NULL AS stopped FROM gw_requests",
     )
     .fetch_one(h.db.store.pool())
     .await
     .unwrap();
-    assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
+    assert_eq!(row.get::<String, _>("reason_code"), "client_cancelled");
     assert!(row.get::<bool, _>("stopped"));
+    // 시작 event 뒤에 client가 끊은 스트림은 끊긴 요청 규칙으로 바로 정산한다.
+    assert_eq!(
+        finance::last_settlement(h.db.store.pool()).await,
+        finance::cutoff_received("0.000100000000", 0)
+    );
     drop(tx);
     h.close().await;
 }
@@ -1297,24 +1309,45 @@ async fn native_error_event_boundaries_preserve_wire_without_retaining_messages(
             assert!(r.parser_peak <= 256 * 1024);
             assert!(r.body_peak <= 16 * 1024);
             let row=sqlx::query("SELECT accounting_state,cost_usd,execution_stopped_at IS NOT NULL AS stopped,reason_code FROM gw_requests").fetch_one(h.db.store.pool()).await.unwrap();
-            assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
-            assert!(row.try_get_raw("cost_usd").unwrap().is_null());
             assert!(row.get::<bool, _>("stopped"));
             if accepted {
                 assert_eq!(row.get::<String, _>("reason_code"), "provider_error");
             }
-            assert_eq!(
-                sqlx::query_scalar::<_, i64>("SELECT unknown_count FROM test_user_usage_totals")
+            if truncated {
+                // 끝나지 않은 오류 event는 해석하지 못한 응답이다. 미정산으로 남기고 막는다.
+                assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
+                assert!(row.try_get_raw("cost_usd").unwrap().is_null());
+                assert_eq!(
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT unknown_count FROM test_user_usage_totals"
+                    )
                     .fetch_one(h.db.store.pool())
                     .await
                     .unwrap(),
-                1
-            );
-            let blocked = h.request("/v1/messages", BODY).send().await.unwrap();
-            assert_eq!(blocked.status(), 403);
-            drop(blocked);
-            idle(&h).await;
-            assert_eq!(h.provider.calls.lock().await.len(), 1);
+                    1
+                );
+                let blocked = h.request("/v1/messages", BODY).send().await.unwrap();
+                assert_eq!(blocked.status(), 403);
+                drop(blocked);
+                idle(&h).await;
+                assert_eq!(h.provider.calls.lock().await.len(), 1);
+            } else {
+                // 오류 event와 크기 한도는 끊김이다. 시작 event 전이면 0원, 뒤면 끊긴 요청 규칙으로 바로 정산한다.
+                assert_eq!(
+                    finance::last_settlement(h.db.store.pool()).await,
+                    if started {
+                        finance::cutoff_received("0.000100000000", 0)
+                    } else {
+                        finance::no_response()
+                    },
+                    "size={size} crlf={crlf} terminal_cr={terminal_cr} started={started}"
+                );
+                let next = h.request("/v1/messages", BODY).send().await.unwrap();
+                assert_eq!(next.status(), 200);
+                drop(next);
+                idle(&h).await;
+                assert_eq!(h.provider.calls.lock().await.len(), 2);
+            }
             h.close().await;
         }
     }
@@ -1337,10 +1370,12 @@ async fn sdk_native_error_message_and_event_boundaries_are_not_projection_limits
         let mut cr_only = native_error_wire(65537, true);
         cr_only.pop();
         cases.push((cr_only, true));
-        let mut truncated = native_error_wire(1111, false);
-        truncated.truncate(truncated.len() - 5);
-        cases.push((truncated, false));
+        let mut cut = native_error_wire(1111, false);
+        cut.truncate(cut.len() - 5);
+        let cut_wire = cut.clone();
+        cases.push((cut, false));
         for (error, valid) in cases {
+            let truncated = error == cut_wire;
             let h = Harness::new().await;
             let length = if valid {
                 let data = error.split("data: ").nth(1).unwrap().trim_end();
@@ -1383,9 +1418,22 @@ async fn sdk_native_error_message_and_event_boundaries_are_not_projection_limits
             assert!(r.parser_peak <= 256 * 1024);
             assert_eq!(h.provider.calls.lock().await.len(), 1);
             let row=sqlx::query("SELECT accounting_state,cost_usd,execution_stopped_at IS NOT NULL AS stopped FROM gw_requests").fetch_one(h.db.store.pool()).await.unwrap();
-            assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
-            assert!(row.try_get_raw("cost_usd").unwrap().is_null());
             assert!(row.get::<bool, _>("stopped"));
+            if truncated {
+                // 끝나지 않은 오류 event는 해석하지 못한 응답이라 미정산이다.
+                assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
+                assert!(row.try_get_raw("cost_usd").unwrap().is_null());
+            } else {
+                // 오류 event와 크기 한도는 끊김이다. 시작 event 전이면 0원, 뒤면 끊긴 요청 규칙으로 정산한다.
+                assert_eq!(
+                    finance::last_settlement(h.db.store.pool()).await,
+                    if started {
+                        finance::cutoff_received("0.000100000000", 0)
+                    } else {
+                        finance::no_response()
+                    }
+                );
+            }
             h.close().await;
         }
     }

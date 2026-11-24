@@ -123,6 +123,7 @@ impl DashboardApi {
                 "/api/admin/settings/budget-timezone",
                 any(management::handle),
             )
+            .route("/api/admin/settings/cutoff-rule", any(management::handle))
             .route("/api/admin/model-catalog", any(management::handle))
             .route("/api/admin/model-catalog/sync", any(management::handle))
             .route("/api/admin/model-catalog/approve", any(management::handle))

@@ -1,6 +1,5 @@
 pub mod amount;
 pub mod finance;
-pub mod handoff;
 pub mod policy;
 pub mod recovery;
 pub mod retention;
@@ -46,6 +45,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         13,
         include_str!("../../migrations/0013_drop_amount_function.sql"),
+    ),
+    (14, include_str!("../../migrations/0014_drop_handoff.sql")),
+    (
+        15,
+        include_str!("../../migrations/0015_remove_reservations.sql"),
+    ),
+    (
+        16,
+        include_str!("../../migrations/0016_settlement_rules.sql"),
     ),
 ];
 
@@ -161,7 +169,7 @@ impl PgIdentityStore {
             }
         }
         let future: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM gw_schema_migrations WHERE version NOT IN (1,2,3,4,5,6,7,8,9,10,11,12,13))",
+            "SELECT EXISTS(SELECT 1 FROM gw_schema_migrations WHERE version NOT IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16))",
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -177,9 +185,9 @@ impl PgIdentityStore {
             let mut connection = self.pool.acquire().await?;
             sqlx::query("SELECT 1").execute(&mut *connection).await?;
             let schema = async {
-                let rows=sqlx::query("SELECT version,checksum FROM gw_schema_migrations ORDER BY version LIMIT 14").fetch_all(&mut *connection).await?;
+                let rows=sqlx::query("SELECT version,checksum FROM gw_schema_migrations ORDER BY version LIMIT 17").fetch_all(&mut *connection).await?;
                 let versions=rows.len()==MIGRATIONS.len() && rows.iter().zip(MIGRATIONS).all(|(r,(version,sql))|r.get::<i64,_>("version")==*version&&r.get::<Vec<u8>,_>("checksum")==Sha256::digest(sql.as_bytes()).to_vec());
-                let tables:bool=sqlx::query_scalar("SELECT count(*)=18 FROM unnest(ARRAY['gw_principals','gw_virtual_keys','gw_policies','gw_requests','gw_request_budgets','gw_usage_events','gw_usage_totals','gw_rate_windows','gw_commands','gw_audit_events','gw_handoffs','gw_alarm_totals','gw_provider_credentials','gw_model_catalog_proposals','gw_model_catalog_versions','gw_virtual_key_credentials','gw_principal_credentials','gw_budget_timezones']::text[]) AS names(name) WHERE to_regclass(name) IS NOT NULL").fetch_one(&mut *connection).await?;
+                let tables:bool=sqlx::query_scalar("SELECT count(*)=18 FROM unnest(ARRAY['gw_principals','gw_virtual_keys','gw_policies','gw_requests','gw_request_budgets','gw_usage_events','gw_usage_totals','gw_rate_windows','gw_commands','gw_audit_events','gw_alarm_totals','gw_provider_credentials','gw_model_catalog_proposals','gw_model_catalog_versions','gw_virtual_key_credentials','gw_principal_credentials','gw_budget_timezones','gw_settlement_rules']::text[]) AS names(name) WHERE to_regclass(name) IS NOT NULL").fetch_one(&mut *connection).await?;
                 Ok::<_,sqlx::Error>(versions && tables)
             }.await.unwrap_or(false);
             Ok::<_,sqlx::Error>((true,schema))
@@ -232,7 +240,7 @@ impl PgIdentityStore {
             version=sqlx::query_scalar("UPDATE gw_principals SET email=$2,display_name=$3,version=version+1,updated_at=clock_timestamp() WHERE id=$1 RETURNING version")
                     .bind(id).bind(identity.email()).bind(identity.display_name()).fetch_one(&mut *tx).await?;
         }
-        sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','actual','calendar_month','UTC',$2) ON CONFLICT(principal_id) WHERE key_id IS NULL DO NOTHING")
+        sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','calendar_month','UTC',$2) ON CONFLICT(principal_id) WHERE key_id IS NULL DO NOTHING")
                 .bind(Uuid::new_v4()).bind(id).execute(&mut *tx).await?;
         let policy = sqlx::query(
             "SELECT id,version FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL",

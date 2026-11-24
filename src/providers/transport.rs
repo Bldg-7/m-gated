@@ -37,17 +37,73 @@ pub enum VerifyError {
     Rejected,
     Unavailable,
 }
-/// 감독자가 relay future를 폐기해도 완전 검증한 작은 관측만 남긴다. 원문/부분 usage는 없다.
+/// 감독자가 relay future를 폐기해도 완전 검증한 작은 관측만 남긴다.
+/// 끊긴 요청을 정산하려고 Anthropic 시작 event의 입력 usage와 받은 출력 내용도 메모리에 둔다.
+/// 받은 내용은 DB에 저장하지 않고, 요청이 끝나면 버린다.
 #[derive(Default)]
 pub struct StreamProgress {
     pub final_usage: Option<FinalUsage>,
     pub provider_error_observed: bool,
+    /// Provider가 보낸 event를 하나라도 해석했는지. 없으면 첫 응답 전에 끊긴 것이다.
+    pub started: bool,
+    /// Anthropic `message_start`가 알린 입력 usage. 끊긴 요청의 입력 토큰이다.
+    pub start: Option<crate::ledger::finance::StartUsage>,
+    /// 끊기기 전에 받은 출력 내용(텍스트, thinking, 도구 인자).
+    pub received: ReceivedOutput,
 }
 impl StreamProgress {
     // FinalUsage 고정 필드와 최대200byte model의 별도 보관을 기존 parser 예산에서 예약한다.
     pub const RETAINED_BYTES: usize = 512;
     pub fn invalidate(&mut self) {
         self.final_usage = None;
+    }
+}
+/// 끊긴 요청의 `received` 정산에 쓰는 받은 출력 내용. 상한을 넘으면 내용을 버리고 넘었다는 것만 남긴다.
+#[derive(Default)]
+pub struct ReceivedOutput {
+    text: String,
+    cap: usize,
+    overflow: bool,
+}
+impl ReceivedOutput {
+    /// 요청의 max_tokens 1개당 8바이트까지 담는다. 서버 메모리를 지키려고 2 MiB를 넘지 않는다.
+    pub const MAX_BYTES: usize = 2 * 1024 * 1024;
+    pub fn with_output_limit(max_tokens: Option<u64>) -> Self {
+        Self {
+            text: String::new(),
+            cap: max_tokens
+                .and_then(|n| usize::try_from(n.saturating_mul(8)).ok())
+                .map_or(0, |n| n.min(Self::MAX_BYTES)),
+            overflow: false,
+        }
+    }
+    pub fn push(&mut self, part: &str) {
+        if self.overflow {
+            return;
+        }
+        if self.text.len().saturating_add(part.len()) > self.cap {
+            self.overflow = true;
+            self.text = String::new();
+            return;
+        }
+        self.text.push_str(part);
+    }
+    /// 한 조각이 decoder의 내용 상한을 넘어 받지 못했다. 담아 둔 내용도 버리고 넘었다는 것만 남긴다.
+    pub fn drop_content(&mut self) {
+        self.overflow = true;
+        self.text = String::new();
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn overflow(&self) -> bool {
+        self.overflow
+    }
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +119,9 @@ pub enum UpstreamError {
     TooLarge,
     Cancelled,
     Credential,
+    /// Provider가 HTTP 오류로 답했지만 그 본문을 읽거나 확인하지 못했다(인증 오류·되돌림은 따로 센다).
+    /// 클라이언트에는 형식 오류와 같은 코드로 알린다. 장부는 오류 응답이므로 0원으로 정산한다(결정 0005).
+    ErrorResponse,
 }
 impl UpstreamError {
     pub fn code(self) -> &'static str {
@@ -78,6 +137,7 @@ impl UpstreamError {
             Self::TooLarge => "upstream_response_too_large",
             Self::Cancelled => "shutdown_cancelled",
             Self::Credential => "provider_credential_unavailable",
+            Self::ErrorResponse => "upstream_protocol_error",
         }
     }
     pub fn status(self) -> StatusCode {
@@ -88,6 +148,22 @@ impl UpstreamError {
         } else {
             StatusCode::BAD_GATEWAY
         }
+    }
+}
+/// HTTP 오류 응답의 본문을 읽다 실패하면 그 실패를 [`UpstreamError::ErrorResponse`]로 바꾼다.
+/// 상태 코드가 오류라는 사실은 본문을 읽지 못해도 바뀌지 않는다. 인증 오류·되돌림은 그대로 둔다.
+pub(super) fn keep_error_status(
+    status: StatusCode,
+    result: Result<UpstreamResponse, UpstreamError>,
+) -> Result<UpstreamResponse, UpstreamError> {
+    match result {
+        Err(e)
+            if !status.is_success()
+                && !matches!(e, UpstreamError::Auth | UpstreamError::Redirect) =>
+        {
+            Err(UpstreamError::ErrorResponse)
+        }
+        other => other,
     }
 }
 impl From<crate::stream::ParseError> for UpstreamError {
@@ -240,6 +316,61 @@ impl NativeClient {
         } else {
             request.header("x-api-key", secret)
         }
+    }
+    /// 끊긴 Anthropic 스트림에서 받은 출력 내용의 토큰 수를 센다(결정 0005의 `received` 규칙).
+    /// 무료인 count_tokens를 쓰고, 사용자 요청이 아니므로 장부의 송신 권한(permit) 없이 보낸다.
+    /// 받은 내용을 사용자 메시지 하나로 세고, 한 글자짜리 기준 메시지의 수를 빼서 내용의 토큰 수를 낸다.
+    /// 재시도하지 않는다. 실패하면 호출한 쪽이 `max_tokens` 규칙으로 정산한다.
+    pub async fn count_received(
+        &self,
+        model: &str,
+        text: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<u64, UpstreamError> {
+        if self.provider != ProviderId::Anthropic {
+            return Err(UpstreamError::Protocol);
+        }
+        if text.is_empty() {
+            return Ok(0);
+        }
+        let secret = self.secret().ok_or(UpstreamError::Credential)?;
+        let url = self
+            .base
+            .join("v1/messages/count_tokens")
+            .map_err(|_| UpstreamError::Protocol)?;
+        let one = |content: &str| {
+            let body =
+                serde_json::json!({"model":model,"messages":[{"role":"user","content":content}]});
+            let request = self
+                .authorize(self.client.post(url.clone()), secret)
+                .header("anthropic-version", "2023-06-01")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body.to_string());
+            async move {
+                let response = tokio::time::timeout_at(deadline, request.send())
+                    .await
+                    .map_err(|_| UpstreamError::Timeout)?
+                    .map_err(classify_transport)?;
+                if response.status() != StatusCode::OK
+                    || response.content_length().is_some_and(|n| n > 4096)
+                {
+                    return Err(UpstreamError::Protocol);
+                }
+                let bytes = tokio::time::timeout_at(deadline, response.bytes())
+                    .await
+                    .map_err(|_| UpstreamError::Timeout)?
+                    .map_err(classify_transport)?;
+                if bytes.len() > 4096 {
+                    return Err(UpstreamError::Protocol);
+                }
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|v| v["input_tokens"].as_u64())
+                    .ok_or(UpstreamError::Protocol)
+            }
+        };
+        let (base, full) = tokio::join!(one("."), one(text));
+        Ok(full?.saturating_sub(base?).saturating_add(1))
     }
     /// 등록 직전 후보 키를 과금 없는 모델 목록 API로 확인한다. 응답 본문은 읽지 않는다.
     pub async fn verify_credential(&self, secret: &str) -> Result<(), VerifyError> {
@@ -481,6 +612,7 @@ mod tests {
                 reasoning_tokens: None,
             }),
             provider_error_observed: false,
+            ..Default::default()
         };
         progress.invalidate();
         assert!(progress.final_usage.is_none());
@@ -488,5 +620,33 @@ mod tests {
             !progress.provider_error_observed,
             "검증 실패와 검증된 native 실패는 다르다"
         );
+    }
+    #[test]
+    fn received_output_keeps_eight_bytes_per_max_token_then_drops_the_content() {
+        let mut received = ReceivedOutput::with_output_limit(Some(1));
+        received.push("abcd");
+        received.push("efgh");
+        assert_eq!(received.text(), "abcdefgh");
+        assert!(!received.overflow());
+        // 상한(max_tokens × 8바이트)을 넘으면 내용을 버리고 넘었다는 것만 남긴다.
+        received.push("i");
+        assert!(received.overflow());
+        assert!(received.is_empty());
+        received.push("j");
+        assert!(received.is_empty());
+        // max_tokens가 커도 2 MiB를 넘게 담지 않는다. max_tokens가 없으면 담지 않는다.
+        let mut huge = ReceivedOutput::with_output_limit(Some(u64::MAX));
+        huge.push(&"x".repeat(ReceivedOutput::MAX_BYTES + 1));
+        assert!(huge.overflow());
+        let mut none = ReceivedOutput::with_output_limit(None);
+        none.push("a");
+        assert!(none.overflow());
+        // 한 조각이 decoder의 내용 상한을 넘어 받지 못하면 담아 둔 내용도 버린다.
+        let mut dropped = ReceivedOutput::with_output_limit(Some(100));
+        dropped.push("abc");
+        dropped.drop_content();
+        assert!(dropped.overflow() && dropped.is_empty());
+        dropped.push("d");
+        assert!(dropped.is_empty());
     }
 }

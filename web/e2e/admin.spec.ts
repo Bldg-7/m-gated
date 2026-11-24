@@ -116,7 +116,7 @@ test('admin_cursor_pages_and_selected_key_balance_remain_server_scoped', async (
 test('admin_usage_current_balances_period_totals_and_retention409_remove_old_amounts', async ({ page, context }) => {
   await open(page, context, '/dashboard/admin/usage'); await expect(page.getByText('전체 합계: 사용자별 예산을 합산한 잔액은 제공하지 않습니다.', { exact: true })).toBeVisible();
   await pickValue(page.getByLabel('사용자', { exact: true }), service); await page.getByRole('button', { name: '조회', exact: true }).click(); await expect(page.getByText('확인 불가 (미정산)', { exact: true })).toBeVisible();
-  await expect(page.getByText('실사용량 모드: 진행 호출 때문에 초과할 수 있으며 하드캡 보장이 아닙니다.', { exact: true })).toBeVisible();
+  await expect(page.getByText('처리 중인 요청 때문에 한도를 조금 넘을 수 있습니다.', { exact: true }).first()).toBeVisible();
   const usage = (await json(page, `/api/admin/usage?principal_id=${service}`)).body;
   const from = new Date(usage.from), to = new Date(from); to.setUTCMonth(to.getUTCMonth() + 1);
   const oldFigures = await page.locator('table').textContent(); expect(oldFigures).toContain('USD');

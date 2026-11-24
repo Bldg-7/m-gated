@@ -45,7 +45,7 @@ impl PgLedger {
         let failed = runtime.failed_request_ids();
         if !failed.is_empty() {
             // request.finished만으로는 부족하다. 귀속과 전 기간 totals의 전역 차단도 함께 확인한다.
-            let confirmed: Vec<Uuid> = sqlx::query("SELECT r.id FROM gw_requests r WHERE r.id=ANY($1) AND r.phase='finished' AND EXISTS(SELECT 1 FROM gw_request_budgets b WHERE b.request_id=r.id) AND NOT EXISTS(SELECT 1 FROM gw_request_budgets b WHERE b.request_id=r.id AND b.state<>r.accounting_state) AND NOT EXISTS(SELECT 1 FROM gw_usage_totals t JOIN gw_policies p ON p.id=t.scope_id WHERE p.principal_id=r.principal_id AND t.unknown_count<>(SELECT count(*) FROM gw_request_budgets b WHERE b.scope_id=t.scope_id AND b.period_start=t.period_start AND b.state='unknown') OR (p.principal_id=r.principal_id AND t.reserved_usd<>(SELECT coalesce(sum(b.remaining_reservation_usd),0) FROM gw_request_budgets b WHERE b.scope_id=t.scope_id AND b.period_start=t.period_start)))")
+            let confirmed: Vec<Uuid> = sqlx::query("SELECT r.id FROM gw_requests r WHERE r.id=ANY($1) AND r.phase='finished' AND EXISTS(SELECT 1 FROM gw_request_budgets b WHERE b.request_id=r.id) AND NOT EXISTS(SELECT 1 FROM gw_request_budgets b WHERE b.request_id=r.id AND b.state<>r.accounting_state) AND NOT EXISTS(SELECT 1 FROM gw_usage_totals t JOIN gw_policies p ON p.id=t.scope_id WHERE p.principal_id=r.principal_id AND t.unknown_count<>(SELECT count(*) FROM gw_request_budgets b WHERE b.scope_id=t.scope_id AND b.period_start=t.period_start AND b.state='unknown'))")
                 .bind(&failed).fetch_all(self.database().pool()).await?.iter().map(|r|r.get("id")).collect();
             runtime.confirm_durable_finalizations(&confirmed);
         }

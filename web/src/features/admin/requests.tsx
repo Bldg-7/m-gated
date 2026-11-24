@@ -11,6 +11,19 @@ const providers = [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['deepseek'
 const phases = [['admitted', msgid('입장')], ['dispatching', msgid('전송 중')], ['finished', msgid('종료')]];
 const outcomes = [['completed', msgid('완료')], ['rejected', msgid('거절')], ['failed', msgid('실패')], ['cancelled', msgid('취소됨')]];
 const accounting = [['unknown', msgid('미정산')], ['pending', msgid('정산 대기')], ['settled', msgid('확정')]];
+/** 확정한 금액을 어떻게 정했는지. 장부 usage 기록의 source 값이다. */
+const settledBy: Record<string, string> = {
+  provider: msgid('Provider가 알린 사용량'),
+  cutoff_received: msgid('끊김 · 받은 만큼'),
+  cutoff_max_tokens: msgid('끊김 · 최대 출력(max_tokens)'),
+  no_response: msgid('응답 없음 · 0원'),
+  gateway_no_dispatch: msgid('보내지 않음 · 0원'),
+  profile_no_charge: msgid('무료 요청'),
+};
+const fallbackReasons: Record<string, string> = {
+  cutoff_count_unavailable: msgid('받은 내용을 세지 못해 최대 출력으로 정산했습니다.'),
+  cutoff_content_too_large: msgid('받은 내용이 너무 커서 최대 출력으로 정산했습니다.'),
+};
 export function RequestsScreen() {
   const { t } = useTranslation();
   const options = (list: string[][]) => list.map(([value, label]) => ({ value, label: `${t(label)} (${value})` }));
@@ -74,6 +87,7 @@ function RequestEditor({ id, onChanged }: { id: string; onChanged: () => Promise
           <dt>{t('부모 요청')}</dt><dd className="mono">{r.parent_request_id ?? t('없음')}</dd>
           <dt>{t('상태')}</dt><dd>{r.phase} / {r.outcome ?? t('결과 미확인')} / {r.accounting_state}</dd>
           <dt>{t('비용')}</dt><dd><Money value={r.cost_usd} /></dd>
+          {r.usage.final && settledBy[r.usage.final.source] && <><dt>{t('정산 방식')}</dt><dd>{t(settledBy[r.usage.final.source])}{r.usage.final.cutoff_fallback_reason && fallbackReasons[r.usage.final.cutoff_fallback_reason] && <span className="meta"> · {t(fallbackReasons[r.usage.final.cutoff_fallback_reason])}</span>}</dd></>}
           <dt>{t('사유')}</dt><dd className="mono">{r.reason_code ?? t('없음')}</dd>
           <dt>{t('입장 · 마감')}</dt><dd><Time value={r.admitted_at} /> · {r.finished_at ? <Time value={r.finished_at} /> : t('미종료')}</dd>
           <dt>executor</dt><dd className="mono">{r.executor_id}</dd>

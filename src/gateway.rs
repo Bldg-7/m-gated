@@ -4,7 +4,7 @@ use crate::{
     http,
     ledger::{
         PgLedger,
-        finance::{FinalObservation, FinalOutcome, LedgerError, RequestSpec},
+        finance::{FinalObservation, FinalOutcome, LedgerError, NoUsage, RequestSpec},
     },
     providers::{
         anthropic::{self, ApiError},
@@ -206,35 +206,6 @@ async fn handle_inner(state: GatewayState, request: Request) -> Response {
             }
         };
         // 실행 future를 drop한 다음에만 stopped를 기록한다. Drop에는 DB/spawn이 없다.
-        if let Some(child) = &progress.child {
-            let deadline = control.begin_finalizing();
-            if child.uncertain {
-                state
-                    .runtime
-                    .record_family_finalization_failure(id, Some(child.id));
-            } else {
-                let observation = failed_observation("client_cancelled");
-                if !child.finalized
-                    && !finalize_family_until(&state, id, child.id, &observation, deadline).await
-                {
-                    state
-                        .runtime
-                        .record_family_finalization_failure(id, Some(child.id));
-                }
-                if tokio::time::timeout_at(
-                    deadline,
-                    state.gateway.ledger.record_execution_stopped(child.id),
-                )
-                .await
-                .map_or(true, |r| r.is_err())
-                {
-                    state
-                        .runtime
-                        .record_family_finalization_failure(id, Some(child.id));
-                }
-            }
-        }
-
         if progress.admitted && !progress.finalized && !progress.uncertain {
             use crate::runtime::request::RequestInterruption;
             let mut observation = failed_observation(if progress.stream.provider_error_observed {
@@ -261,7 +232,9 @@ async fn handle_inner(state: GatewayState, request: Request) -> Response {
             } else {
                 FinalOutcome::Cancelled
             };
-            let _ = finalize_until(&state, id, &observation, control.begin_finalizing()).await;
+            let deadline = control.begin_finalizing();
+            let settlement = no_usage(&state, id, &progress, &observation, None, deadline).await;
+            let _ = finalize_with(&state, id, &observation, &settlement, deadline).await;
         }
         if progress.admitted
             && !progress.uncertain
@@ -318,8 +291,16 @@ struct ExecutionProgress {
     dispatch: DispatchEvidence,
     finalized: bool,
     uncertain: bool,
+    /// 스트림 요청인지. 비스트림 요청은 응답 전체를 한 번에 받는다.
+    streaming: bool,
     stream: crate::providers::transport::StreamProgress,
-    child: Option<ChildProgress>,
+    /// 끊긴 Anthropic 스트림의 받은 출력 내용을 셀 때 쓰는 client와 모델.
+    counter: Option<CutoffCounter>,
+}
+/// 요청에 고정한 Provider 키를 그대로 쓴다.
+struct CutoffCounter {
+    client: crate::providers::transport::NativeClient,
+    model: String,
 }
 #[derive(Default)]
 enum DispatchEvidence {
@@ -332,11 +313,6 @@ impl DispatchEvidence {
     fn known_not_dispatched(&self) -> bool {
         matches!(self, Self::NotAuthorized)
     }
-}
-struct ChildProgress {
-    id: Uuid,
-    finalized: bool,
-    uncertain: bool,
 }
 #[allow(clippy::too_many_arguments)]
 async fn execute(
@@ -570,40 +546,6 @@ async fn execute(
         return ledger_error(id, e, true);
     }
     progress.admitted = true;
-    if profile.internal_count
-        && let Err(failure) = internal_count(
-            state,
-            &human.current,
-            human.key,
-            &spec,
-            profile.max_input_tokens,
-            &body,
-            &outbound,
-            control,
-            progress,
-            client,
-        )
-        .await
-    {
-        let observation = FinalObservation {
-            outcome: FinalOutcome::Rejected,
-            usage: None,
-            counted_input_tokens: None,
-            reason: failure.code(),
-            http_status: None,
-            provider_request_id: None,
-        };
-        progress.finalized = true;
-        if !finalize_until(state, id, &observation, control.begin_finalizing()).await {
-            return error(
-                id,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "finalization_unavailable",
-                true,
-            );
-        }
-        return error(id, failure.status(), failure.code(), true);
-    }
     // authorize await 중 취소/COMMIT 불명에는 permit이 없어도 N을 추정하지 않는다.
     progress.dispatch = DispatchEvidence::MayBeAuthorized;
     control.set_phase(RequestPhase::Dispatching);
@@ -647,7 +589,18 @@ async fn execute(
     };
     let deadline = started + Duration::from_millis(limits.transport_timeout_ms);
     control.set_phase(RequestPhase::Relaying);
+    progress.streaming = validated.stream;
     if validated.stream {
+        if api == ApiKind::Messages {
+            progress.stream.received =
+                crate::providers::transport::ReceivedOutput::with_output_limit(
+                    validated.output_limit,
+                );
+            progress.counter = Some(CutoffCounter {
+                client: client.clone(),
+                model: profile.model.clone(),
+            });
+        }
         let observation = client
             .relay(
                 permit,
@@ -670,17 +623,18 @@ async fn execute(
                 },
             )
             .await;
-        control.begin_finalizing();
+        let deadline = control.begin_finalizing();
         progress.finalized = true;
-        let obs = match observation {
-            Ok(obs) => obs,
+        let (obs, failure) = match observation {
+            Ok(obs) => (obs, None),
             Err(e) => {
                 let mut observation = failed_observation(e.code());
                 observation.usage = progress.stream.final_usage.take();
-                observation
+                (observation, Some(e))
             }
         };
-        if !finalize_until(state, id, &obs, control.begin_finalizing()).await {
+        let settlement = no_usage(state, id, progress, &obs, failure, deadline).await;
+        if !finalize_with(state, id, &obs, &settlement, deadline).await {
             return error(
                 id,
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -714,27 +668,30 @@ async fn execute(
         }
     })
     .await;
-    let (response, observation) = match upstream {
+    let (response, observation, failure) = match upstream {
         Ok(Ok(result)) => {
             let mut response = (result.status, control.retain_body(result.body)).into_response();
             *response.headers_mut() = result.headers;
-            (response, result.observation)
+            (response, result.observation, None)
         }
         Err(_) => {
             let e = crate::providers::anthropic::UpstreamError::Timeout;
             (
                 error(id, e.status(), e.code(), false),
                 failed_observation(e.code()),
+                Some(e),
             )
         }
         Ok(Err(e)) => (
             error(id, e.status(), e.code(), false),
             failed_observation(e.code()),
+            Some(e),
         ),
     };
-    control.begin_finalizing();
+    let deadline = control.begin_finalizing();
     progress.finalized = true;
-    if !finalize_until(state, id, &observation, control.begin_finalizing()).await {
+    let settlement = no_usage(state, id, progress, &observation, failure, deadline).await;
+    if !finalize_with(state, id, &observation, &settlement, deadline).await {
         return error(
             id,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -744,143 +701,6 @@ async fn execute(
     }
     stamped(response, id)
 }
-enum InternalCountError {
-    Ledger(LedgerError),
-    Count(&'static str),
-}
-impl InternalCountError {
-    fn code(&self) -> &'static str {
-        match self {
-            Self::Ledger(e) => ledger_code(*e),
-            Self::Count(code) => code,
-        }
-    }
-    fn status(&self) -> StatusCode {
-        match self {
-            Self::Ledger(e) => ledger_status(*e),
-            Self::Count("unsupported_strict_policy") => StatusCode::BAD_REQUEST,
-            Self::Count("finalization_unavailable") => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Count(_) => StatusCode::BAD_GATEWAY,
-        }
-    }
-}
-#[allow(clippy::too_many_arguments)]
-async fn internal_count(
-    state: &GatewayState,
-    human: &crate::ledger::CurrentHuman,
-    key: Option<crate::ledger::finance::KeyScope>,
-    root: &RequestSpec,
-    input_limit: u64,
-    body: &Bytes,
-    headers: &axum::http::HeaderMap,
-    control: &Arc<crate::runtime::RequestControl>,
-    progress: &mut ExecutionProgress,
-    client: &NativeClient,
-) -> Result<(), InternalCountError> {
-    let profile = state
-        .gateway
-        .profiles
-        .iter()
-        .find(|p| p.model == root.pricing.requested_model && p.api == ApiKind::CountTokens)
-        .ok_or(InternalCountError::Count("unsupported_strict_policy"))?;
-    if body.len() > profile.max_body_bytes {
-        return Err(InternalCountError::Count("unsupported_strict_policy"));
-    }
-    let projection = anthropic::count_projection(body.clone())
-        .await
-        .map_err(|_| InternalCountError::Count("unsupported_strict_policy"))?;
-    let mut child = RequestSpec::from_profile(ProviderId::Anthropic, profile, None);
-    child.provider_credential_id = root.provider_credential_id;
-    child.deadline = root.deadline;
-    child.api_version = root.api_version.clone();
-    child.approved_beta = root.approved_beta.clone();
-    // count profile의 헤더 허용 목록도 부모와 독립적으로 검사한다.
-    let approved = anthropic::approved_headers(headers, profile)
-        .map_err(|_| InternalCountError::Count("unsupported_strict_policy"))?;
-    state
-        .gateway
-        .ledger
-        .admit_scoped(human, &child, key, Some(root.id))
-        .await
-        .map_err(InternalCountError::Ledger)?;
-    progress.child = Some(ChildProgress {
-        id: child.id,
-        finalized: false,
-        uncertain: false,
-    });
-    let permit = match state.gateway.ledger.authorize_dispatch(child.id).await {
-        Ok(p) => p,
-        Err(e) => {
-            if e == LedgerError::DispatchUncertain {
-                progress.child.as_mut().expect("등록한 자식").uncertain = true;
-                state
-                    .runtime
-                    .record_family_finalization_failure(root.id, Some(child.id));
-            }
-            return Err(InternalCountError::Ledger(e));
-        }
-    };
-    let result = tokio::time::timeout_at(
-        control.transport_deadline,
-        client.send(
-            permit,
-            projection,
-            anthropic::SendOptions {
-                api: ApiKind::CountTokens,
-                headers: &approved,
-                profile,
-                deadline: control.transport_deadline,
-                runtime: &state.runtime,
-            },
-        ),
-    )
-    .await;
-    let (observation, count) = match result {
-        Ok(Ok(response)) => {
-            let count = response.observation.counted_input_tokens;
-            (response.observation, count)
-        }
-        Ok(Err(e)) => (failed_observation(e.code()), None),
-        Err(_) => (failed_observation("upstream_read_timeout"), None),
-    };
-    let deadline = control
-        .execution_deadline
-        .min(Instant::now() + Duration::from_secs(5));
-    if !finalize_family_until(state, root.id, child.id, &observation, deadline).await {
-        state
-            .runtime
-            .record_family_finalization_failure(root.id, Some(child.id));
-        return Err(InternalCountError::Count("finalization_unavailable"));
-    }
-    progress.child.as_mut().expect("등록한 자식").finalized = true;
-    if state
-        .gateway
-        .ledger
-        .record_execution_stopped(child.id)
-        .await
-        .is_err()
-    {
-        state
-            .runtime
-            .record_family_finalization_failure(root.id, Some(child.id));
-        return Err(InternalCountError::Count("finalization_unavailable"));
-    }
-    // 최종 count만 입력 상한 증거다. 결과 유실을 0 token으로 추정하지 않는다.
-    if count.is_none() {
-        return Err(InternalCountError::Count(
-            if observation.reason == "completed" {
-                "unsupported_strict_policy"
-            } else {
-                observation.reason
-            },
-        ));
-    }
-    if count.is_some_and(|n| n > input_limit) {
-        return Err(InternalCountError::Count("unsupported_strict_policy"));
-    }
-    Ok(())
-}
-
 fn failed_observation(reason: &'static str) -> FinalObservation {
     FinalObservation {
         outcome: FinalOutcome::Failed,
@@ -897,18 +717,113 @@ async fn finalize_until(
     observation: &FinalObservation,
     deadline: Instant,
 ) -> bool {
-    finalize_family_until(state, id, id, observation, deadline).await
+    finalize_with(state, id, observation, &NoUsage::Unknown, deadline).await
 }
-async fn finalize_family_until(
+/// 최종 usage 없이 끝난 요청을 어떻게 정산할지 정한다(결정 0005).
+/// - Provider가 HTTP 오류로 답했거나 첫 응답 전에 끊겼으면 0원이다.
+/// - Anthropic 스트림이 시작 event 뒤에 끊겼으면 정산 규칙을 쓴다. `received` 규칙이면 받은 내용을 센다.
+/// - 알 수 없는 응답, OpenAI·DeepSeek 스트림의 중간 끊김은 미정산이다.
+async fn no_usage(
     state: &GatewayState,
-    root: Uuid,
+    id: Uuid,
+    progress: &ExecutionProgress,
+    observation: &FinalObservation,
+    failure: Option<crate::providers::anthropic::UpstreamError>,
+    deadline: Instant,
+) -> NoUsage {
+    use crate::providers::anthropic::UpstreamError;
+    if observation.usage.is_some() {
+        return NoUsage::Unknown;
+    }
+    if observation
+        .http_status
+        .is_some_and(|status| !(200..300).contains(&status))
+        || matches!(
+            failure,
+            Some(
+                UpstreamError::Auth
+                    | UpstreamError::Redirect
+                    | UpstreamError::Credential
+                    | UpstreamError::ErrorResponse
+            )
+        )
+    {
+        return NoUsage::NoResponse;
+    }
+    if matches!(
+        failure,
+        Some(
+            UpstreamError::Protocol
+                | UpstreamError::StreamParse
+                | UpstreamError::Encoding
+                | UpstreamError::TooLarge
+        )
+    ) {
+        return NoUsage::Unknown;
+    }
+    if !progress.streaming {
+        // 비스트림 요청은 응답을 받았는데 usage가 없으면 알 수 없는 응답이다.
+        return if observation.http_status.is_some() {
+            NoUsage::Unknown
+        } else {
+            NoUsage::NoResponse
+        };
+    }
+    // 첫 event 전, 또는 Anthropic 시작 event(`message_start`) 전에 끊기면 입력 토큰도 모른다.
+    if !progress.stream.started || (progress.counter.is_some() && progress.stream.start.is_none()) {
+        return NoUsage::NoResponse;
+    }
+    let (Some(start), Some(counter)) = (progress.stream.start.clone(), progress.counter.as_ref())
+    else {
+        return NoUsage::Unknown;
+    };
+    // 규칙은 받을 때 기록한 값이다. 규칙이 없는 요청은 장부가 미정산으로 둔다.
+    // 읽지 못하면 일단 센다. 장부가 마감 때 규칙을 다시 확인한다.
+    let count = match state.gateway.ledger.cutoff_rule(id).await {
+        Ok(Some(rule)) => rule == "received",
+        Ok(None) => false,
+        Err(_) => true,
+    };
+    let (received_output, count_failure) = if !count {
+        (None, None)
+    } else if progress.stream.received.overflow() {
+        (None, Some("cutoff_content_too_large"))
+    } else {
+        // 장부 기록에 쓸 시간을 1초 남긴다.
+        let limit = deadline
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or(deadline)
+            .min(Instant::now() + Duration::from_secs(2));
+        match counter
+            .client
+            .count_received(&counter.model, progress.stream.received.text(), limit)
+            .await
+        {
+            Ok(n) => (Some(n), None),
+            Err(_) => (None, Some("cutoff_count_unavailable")),
+        }
+    };
+    NoUsage::Cutoff {
+        start,
+        received_output,
+        count_failure,
+    }
+}
+async fn finalize_with(
+    state: &GatewayState,
     id: Uuid,
     observation: &FinalObservation,
+    settlement: &NoUsage,
     deadline: Instant,
 ) -> bool {
     let attempt = async {
         for n in 0..3 {
-            match state.gateway.ledger.finalize_request(id, observation).await {
+            match state
+                .gateway
+                .ledger
+                .finalize_request_with(id, observation, settlement)
+                .await
+            {
                 Ok(_) => return true,
                 Err(LedgerError::DatabaseUnavailable) => {}
                 Err(_) => return false,
@@ -928,9 +843,7 @@ async fn finalize_family_until(
     {
         true
     } else {
-        state
-            .runtime
-            .record_family_finalization_failure(root, if root == id { None } else { Some(id) });
+        state.runtime.record_request_finalization_failure(id);
         false
     }
 }
@@ -992,7 +905,6 @@ fn ledger_code(e: LedgerError) -> &'static str {
         LedgerError::OwnerInactive => "owner_inactive",
         LedgerError::PolicyChanged => "policy_changed",
         LedgerError::ConfigurationConflict => "configuration_conflict",
-        LedgerError::UnsupportedStrictPolicy => "unsupported_strict_policy",
         LedgerError::Unsettled => "unsettled_usage_block",
         LedgerError::InferencePaused => "inference_paused",
         LedgerError::BudgetExhausted => "budget_exhausted",
@@ -1014,9 +926,7 @@ fn ledger_status(e: LedgerError) -> StatusCode {
         LedgerError::DatabaseUnavailable | LedgerError::DispatchUncertain => {
             StatusCode::SERVICE_UNAVAILABLE
         }
-        LedgerError::UnsupportedStrictPolicy
-        | LedgerError::InvalidSnapshot
-        | LedgerError::AmountOverflow => StatusCode::BAD_REQUEST,
+        LedgerError::InvalidSnapshot | LedgerError::AmountOverflow => StatusCode::BAD_REQUEST,
         LedgerError::BudgetExhausted | LedgerError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         LedgerError::PolicyChanged
         | LedgerError::ConfigurationConflict
@@ -1145,8 +1055,7 @@ pub(crate) fn openai_error(mut response: Response) -> Response {
 pub fn auth_config_digest(config: &ValidatedConfig) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let profiles=config.providers().iter().flat_map(|provider|provider.profiles.iter().map(move |p|{
-        let mut projection=serde_json::json!({"provider":crate::ledger::finance::provider_name(provider.provider),"api":crate::ledger::finance::api_name(p.api),"model":p.model,"profile_version":p.profile_version,"actual_models":p.actual_models.iter().collect::<BTreeSet<_>>(),"features":p.features.iter().collect::<BTreeSet<_>>(),"approved_beta":p.approved_beta.iter().collect::<BTreeSet<_>>(),"input_bound_contract":p.input_bound_contract,"count_billing":p.count_billing,"internal_count":p.internal_count,"max_input_tokens":p.max_input_tokens,"max_output_tokens":p.max_output_tokens,"max_body_bytes":p.max_body_bytes,"max_response_bytes":p.max_response_bytes});
-        if provider.provider == ProviderId::Deepseek { projection["billing_time_rule"] = serde_json::json!(p.billing_time_rule.map(|r|r.as_str())); }
+        let projection=serde_json::json!({"provider":crate::ledger::finance::provider_name(provider.provider),"api":crate::ledger::finance::api_name(p.api),"model":p.model,"profile_version":p.profile_version,"actual_models":p.actual_models.iter().collect::<BTreeSet<_>>(),"features":p.features.iter().collect::<BTreeSet<_>>(),"approved_beta":p.approved_beta.iter().collect::<BTreeSet<_>>(),"count_billing":p.count_billing,"max_input_tokens":p.max_input_tokens,"max_output_tokens":p.max_output_tokens,"max_body_bytes":p.max_body_bytes,"max_response_bytes":p.max_response_bytes});
         serde_json::to_string(&projection).expect("비밀 없는 유한 profile projection")
     })).collect::<BTreeSet<_>>();
     let projection = serde_json::json!({"issuer":config.auth().issuer_literal,"audience":config.auth().audience_literal,"allowed":config.allowed_emails(),"admins":config.admin_emails(),"profiles":profiles,"execution_ceiling":config.execution_ceiling()});
@@ -1189,7 +1098,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn internal_count_and_direct_ledger_errors_share_native_status() {
+    async fn ledger_errors_have_native_status() {
         for (failure, status, code, kind) in [
             (
                 LedgerError::AccessDenied,
@@ -1208,12 +1117,6 @@ mod tests {
                 403,
                 "inference_paused",
                 "permission_error",
-            ),
-            (
-                LedgerError::UnsupportedStrictPolicy,
-                400,
-                "unsupported_strict_policy",
-                "invalid_request_error",
             ),
             (
                 LedgerError::InvalidSnapshot,
@@ -1282,36 +1185,14 @@ mod tests {
                 "overloaded_error",
             ),
         ] {
-            let id = Uuid::new_v4();
-            let internal = InternalCountError::Ledger(failure);
-            let responses = [
-                ledger_error(id, failure, true),
-                error(id, internal.status(), internal.code(), true),
-            ];
-            for response in responses {
-                assert_eq!(response.status().as_u16(), status, "{code}");
-                assert_eq!(response.headers()["x-gateway-error-code"], code);
-                let body = axum::body::to_bytes(response.into_body(), 1024)
-                    .await
-                    .unwrap();
-                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(body["error"]["type"], kind, "{code}");
-            }
-        }
-    }
-
-    #[test]
-    fn internal_count_nonledger_errors_keep_their_own_classification() {
-        for (code, status) in [
-            ("unsupported_strict_policy", StatusCode::BAD_REQUEST),
-            ("finalization_unavailable", StatusCode::SERVICE_UNAVAILABLE),
-            ("upstream_auth_error", StatusCode::BAD_GATEWAY),
-            ("upstream_transport_error", StatusCode::BAD_GATEWAY),
-            ("upstream_protocol_error", StatusCode::BAD_GATEWAY),
-        ] {
-            let failure = InternalCountError::Count(code);
-            assert_eq!(failure.status(), status);
-            assert_eq!(failure.code(), code);
+            let response = ledger_error(Uuid::new_v4(), failure, true);
+            assert_eq!(response.status().as_u16(), status, "{code}");
+            assert_eq!(response.headers()["x-gateway-error-code"], code);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["type"], kind, "{code}");
         }
     }
 }

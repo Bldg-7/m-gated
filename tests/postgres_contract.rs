@@ -133,8 +133,18 @@ fn finance_yaml() -> String {
     )
 }
 fn configuration_from_yaml(yaml: &str) -> config::ValidatedConfig {
+    configuration_with_admin(yaml, false)
+}
+/// 설정 화면의 관리 API를 쓰는 시험은 alice를 관리자로 둔다.
+fn admin_configuration() -> config::ValidatedConfig {
+    configuration_with_admin(&finance_yaml(), true)
+}
+fn configuration_with_admin(yaml: &str, admin: bool) -> config::ValidatedConfig {
     let mut env = support::environment();
     env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    if admin {
+        env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+    }
     config::load(ConfigInputs {
         yaml,
         file_environment: None,
@@ -249,6 +259,8 @@ struct Harness {
     task: tokio::task::JoinHandle<std::io::Result<()>>,
     base: String,
     token: String,
+    /// 관리 API용 SSO 토큰. 추론은 `token`(가상 키)으로만 한다.
+    sso: String,
     principal: uuid::Uuid,
     runtime: Arc<m_gated::runtime::Runtime>,
 }
@@ -290,9 +302,9 @@ impl Harness {
             cfg.auth(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
-        let token = sso::Signer::shared().sign(&sso::claims(), "key1");
+        let sso_token = sso::Signer::shared().sign(&sso::claims(), "key1");
         let identity = verifier
-            .verify(&sso::credential(token.clone()), 1900000000)
+            .verify(&sso::credential(sso_token.clone()), 1900000000)
             .await
             .unwrap();
         let current = database
@@ -329,10 +341,17 @@ impl Harness {
             ledger,
             client,
         ));
+        // 설정 화면의 관리 API도 같은 장부에 붙인다. 관리자는 설정의 ADMIN_EMAILS로 정한다.
+        let dashboard = Arc::new(m_gated::admin::DashboardApi::new(
+            &cfg,
+            auth.clone(),
+            database.clone(),
+        ));
         let app = bootstrap::build(
             cfg,
             Dependencies::unassembled()
                 .with_authentication(auth)
+                .with_dashboard(dashboard)
                 .with_inference(gateway),
         )
         .unwrap();
@@ -384,6 +403,7 @@ impl Harness {
             task,
             base: format!("http://{address}"),
             token,
+            sso: sso_token,
             principal,
             runtime,
         }
@@ -591,8 +611,15 @@ async fn provider_auth_redirect_encoding_and_retry_have_no_second_send() {
         if !code.is_empty(){assert_eq!(r.headers()["x-gateway-error-code"],code);}
         let bytes=r.bytes().await.unwrap();assert!(!bytes.windows(b"company credential sentinel".len()).any(|b|b==b"company credential sentinel"));
         assert_eq!(h.provider.calls.lock().await.len(),1);
-        let state:String=sqlx::query_scalar("SELECT accounting_state FROM gw_requests WHERE principal_id=$1").bind(h.principal).fetch_one(h.db.store.pool()).await.unwrap();assert_eq!(state,"unknown");
-        let blocked=h.request("/anthropic/v1/messages",BODY).send().await.unwrap();assert_eq!(blocked.status(),StatusCode::FORBIDDEN);assert_eq!(blocked.headers()["x-gateway-error-code"],"unsettled_usage_block");assert_eq!(h.provider.calls.lock().await.len(),1);
+        if code=="upstream_encoding_error" {
+            // 해석하지 못한 응답은 사용량을 알 수 없다. 미정산으로 남기고 과금 호출을 막는다.
+            let state:String=sqlx::query_scalar("SELECT accounting_state FROM gw_requests WHERE principal_id=$1").bind(h.principal).fetch_one(h.db.store.pool()).await.unwrap();assert_eq!(state,"unknown");
+            let blocked=h.request("/anthropic/v1/messages",BODY).send().await.unwrap();assert_eq!(blocked.status(),StatusCode::FORBIDDEN);assert_eq!(blocked.headers()["x-gateway-error-code"],"unsettled_usage_block");assert_eq!(h.provider.calls.lock().await.len(),1);
+        } else {
+            // 인증 오류·redirect·HTTP 오류 응답은 0원으로 정산하고 막지 않는다(결정 0005). 다음 요청은 다시 송신한다.
+            assert_eq!(finance::last_settlement(h.db.store.pool()).await,finance::no_response());
+            let next=h.request("/anthropic/v1/messages",BODY).send().await.unwrap();assert_eq!(next.status().as_u16(),expected);let _=next.bytes().await;h.runtime.wait_requests().await;assert_eq!(h.provider.calls.lock().await.len(),2);
+        }
         h.close().await;
     }
 }
@@ -1568,11 +1595,16 @@ async fn fixed_anthropic_sdk_nonstream_alias_count_and_errors_have_one_attempt()
         )
         .await;
         assert_eq!(h.provider.calls.lock().await.len(), 1);
+        // Provider가 HTTP 오류로 답한 요청은 0원으로 정산하고 미정산으로 남기지 않는다(결정 0005).
         let unknown: i64 = sqlx::query_scalar("SELECT unknown_count FROM test_user_usage_totals")
             .fetch_one(h.db.store.pool())
             .await
             .unwrap();
-        assert_eq!(unknown, 1);
+        assert_eq!(unknown, 0);
+        assert_eq!(
+            finance::last_settlement(h.db.store.pool()).await,
+            finance::no_response()
+        );
         h.close().await;
     }
     let h = Harness::new().await;
@@ -1793,7 +1825,7 @@ async fn expired_first_final_is_final_observation_but_unknown_accounting() {
             .unwrap_err(),
         LedgerError::Conflict
     );
-    let row = sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.reason_code,r.version,r.result_digest,r.execution_stopped_at IS NULL AS no_stop,r.pricing_snapshot,r.execution_snapshot,r.admitted_at::text AS admitted_at,e.actual_model,e.provider_usage,e.normalized_usage,e.pricing_resolution,e.content_digest,b.state,b.remaining_reservation_usd=b.reservation_usd AS held_money,b.remaining_reserved_tokens=b.reserved_tokens AS held_tokens,t.cost_usd::text AS total,t.unknown_count,t.settled_count,w.settled_tokens,p.inference_safety_version FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(expired).fetch_one(db.store.pool()).await.unwrap();
+    let row = sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,r.reason_code,r.version,r.result_digest,r.execution_stopped_at IS NULL AS no_stop,r.pricing_snapshot,r.execution_snapshot,r.admitted_at::text AS admitted_at,e.actual_model,e.provider_usage,e.normalized_usage,e.pricing_resolution,e.content_digest,b.state,t.cost_usd::text AS total,t.unknown_count,t.settled_count,(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) AS settled_tokens,p.inference_safety_version FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(expired).fetch_one(db.store.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
     assert!(row.get::<Option<String>, _>("cost").is_none());
     assert_eq!(row.get::<String, _>("reason_code"), "lease_expired");
@@ -1803,8 +1835,6 @@ async fn expired_first_final_is_final_observation_but_unknown_accounting() {
         row.get::<Vec<u8>, _>("content_digest")
     );
     assert!(row.get::<bool, _>("no_stop"));
-    assert!(row.get::<bool, _>("held_money"));
-    assert!(row.get::<bool, _>("held_tokens"));
     for field in ["pricing_snapshot", "execution_snapshot"] {
         assert_eq!(
             row.get::<serde_json::Value, _>(field),
@@ -2149,10 +2179,10 @@ async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_
             .fetch_one(db.store.pool())
             .await
             .unwrap();
-        assert_eq!(n, 13);
+        assert_eq!(n, 16);
         if future {
             sqlx::query(
-                "INSERT INTO gw_schema_migrations VALUES(14,decode(repeat('00',32),'hex'))",
+                "INSERT INTO gw_schema_migrations VALUES(17,decode(repeat('00',32),'hex'))",
             )
             .execute(db.store.pool())
             .await
@@ -2169,7 +2199,7 @@ async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn internal_count_relationship_and_budget_states_are_constrained() {
+async fn budget_states_are_constrained_without_reservations() {
     let db = postgres::TestDb::new().await;
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
@@ -2178,57 +2208,42 @@ async fn internal_count_relationship_and_budget_states_are_constrained() {
         AccessSettings::from_config(&configuration()),
         [1; 32],
     );
-    let parent = specification();
-    ledger.admit_request(&current, &parent).await.unwrap();
-    let cfg = configuration();
-    let count =
-        RequestSpec::from_profile(ProviderId::Anthropic, &cfg.providers()[0].profiles[1], None);
-    ledger.admit_request(&current, &count).await.unwrap();
-    let statement = "INSERT INTO gw_requests(id,principal_id,key_id,parent_request_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest) SELECT $1,principal_id,key_id,$3,'internal_count','anthropic',requested_model,'count_tokens',admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest FROM gw_requests WHERE id=$2";
-    let child = uuid::Uuid::new_v4();
-    sqlx::query(statement)
-        .bind(child)
-        .bind(count.id)
-        .bind(parent.id)
-        .execute(db.store.pool())
-        .await
-        .unwrap();
-    assert!(
-        sqlx::query(statement)
-            .bind(uuid::Uuid::new_v4())
-            .bind(count.id)
-            .bind(parent.id)
-            .execute(db.store.pool())
-            .await
-            .is_err(),
-        "second internal child accepted"
-    );
+    let spec = specification();
+    ledger.admit_request(&current, &spec).await.unwrap();
+    // 정산 상태는 적용 금액이 있어야 하고, 정산 전에는 적용 값이 없어야 한다. 예약 열 없이도 같다.
     for assignment in [
         "state='settled'",
         "applied_cost_usd=1",
-        "remaining_reservation_usd=1",
-        "remaining_reserved_tokens=1",
-        "reservation_usd='NaN'",
         "applied_input_tokens=-1",
+        "state='settled',applied_cost_usd='NaN'",
+        "state='settled',applied_cost_usd=-1",
+        "state='settled',applied_cost_usd=0,applied_output_tokens=-1",
         "state=NULL",
     ] {
         assert!(
             sqlx::query(&format!(
                 "UPDATE gw_request_budgets SET {assignment} WHERE request_id=$1"
             ))
-            .bind(parent.id)
+            .bind(spec.id)
             .execute(db.store.pool())
             .await
             .is_err(),
-            "invalid budget state accepted"
+            "invalid budget state accepted: {assignment}"
         );
     }
+    sqlx::query(
+        "UPDATE gw_request_budgets SET state='settled',applied_cost_usd=0 WHERE request_id=$1",
+    )
+    .bind(spec.id)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
     db.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn free_count_ignores_generation_tpm_reserved_budget_unknown_and_safety_only() {
+async fn free_count_ignores_generation_tpm_zero_budget_unknown_and_safety_only() {
     let h = Harness::new().await;
     let headers = HeaderMap::from_iter([(
         "content-type".parse().unwrap(),
@@ -2243,7 +2258,7 @@ async fn free_count_ignores_generation_tpm_reserved_budget_unknown_and_safety_on
             .status(),
         StatusCode::OK
     );
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('0.000000000000'),tpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_limit_usd=('0.000000000000'),tpm_limit=1,count_rpm_limit=1 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     sqlx::query("UPDATE gw_principals SET inference_paused_at=clock_timestamp(),inference_pause_reason='amount_overflow',inference_pause_request_id=(SELECT id FROM gw_requests WHERE principal_id=$1 LIMIT 1),inference_safety_version=inference_safety_version+1 WHERE id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     h.provider
         .set(
@@ -2272,11 +2287,11 @@ async fn free_count_ignores_generation_tpm_reserved_budget_unknown_and_safety_on
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.headers()["x-gateway-error-code"], "rate_limited");
     assert_eq!(h.provider.calls.lock().await.len(), 2);
-    let b=sqlx::query("SELECT b.budget_mode,b.reservation_usd::text AS reserved,b.policy_snapshot FROM test_user_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='count_tokens'").fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(b.get::<String, _>("budget_mode"), "reserved");
-    assert_eq!(b.get::<String, _>("reserved"), "0.000000000000");
-    let p: serde_json::Value = b.get("policy_snapshot");
-    assert_eq!(p["limits"]["budget"]["mode"], "reserved");
+    let p: serde_json::Value=sqlx::query_scalar("SELECT b.policy_snapshot FROM test_user_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE r.api='count_tokens'").fetch_one(h.db.store.pool()).await.unwrap();
+    // 받은 시점의 정책 한도를 그대로 남긴다. 예산에는 방식이 없다.
+    assert_eq!(p["limits"]["budget"]["limit_usd"], "0.000000000000");
+    assert!(p["limits"]["budget"].get("mode").is_none());
+    assert_eq!(p["limits"]["tpm"], 1);
     sqlx::query("UPDATE gw_principals SET disabled_at=clock_timestamp(),disabled_reason='synthetic_access_denial' WHERE id=$1").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
     assert_eq!(
         h.request("/v1/messages/count_tokens", body)
@@ -2484,7 +2499,7 @@ async fn body_exact_limit_is_preserved_and_declared_or_chunked_overflow_never_di
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn provider_connection_reset_after_post_body_never_retries_or_settles_zero() {
+async fn provider_connection_reset_after_post_body_never_retries_and_settles_zero() {
     let h = Harness::with_reset(configuration(), true).await;
     let r = h.request("/v1/messages", BODY).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
@@ -2494,21 +2509,22 @@ async fn provider_connection_reset_after_post_body_never_retries_or_settles_zero
     );
     assert_eq!(r.headers()["x-should-retry"], "false");
     assert!(!r.headers().contains_key("x-gateway-dispatch-state"));
+    let id: uuid::Uuid = r.headers()["x-gateway-request-id"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert_eq!(h.provider.calls.lock().await.len(), 1);
-    let row=sqlx::query("SELECT accounting_state,cost_usd IS NULL AS unresolved FROM gw_requests WHERE principal_id=$1").bind(h.principal).fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
-    assert!(row.get::<bool, _>("unresolved"));
+    // 비스트림 요청이 응답 전에 끊기면 0원으로 정산하고 사용자를 막지 않는다(결정 0005).
+    assert_eq!(
+        finance::settlement(h.db.store.pool(), id).await,
+        finance::no_response()
+    );
+    assert_first_usage_event_kind(h.db.store.pool(), id, "final").await;
     let r = h.request("/v1/messages", BODY).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::FORBIDDEN);
-    assert_eq!(h.provider.calls.lock().await.len(), 1);
-    let id: uuid::Uuid = sqlx::query_scalar(
-        "SELECT id FROM gw_requests WHERE principal_id=$1 AND accounting_state='unknown'",
-    )
-    .bind(h.principal)
-    .fetch_one(h.db.store.pool())
-    .await
-    .unwrap();
-    assert_first_usage_event_kind(h.db.store.pool(), id, "partial").await;
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    h.runtime.wait_requests().await;
+    assert_eq!(h.provider.calls.lock().await.len(), 2);
     h.close().await;
 }
 
@@ -2650,10 +2666,12 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
     for carried in [false, true] {
         for overflow in [false, true] {
             let db = postgres::TestDb::new().await;
-            let principal = finance::human(db.store.pool()).await;
-            let current = finance::current(db.store.pool(), principal).await;
+            // 분당 토큰은 정산한 1분 칸에 더한다. 고정 시계로 받은 칸과 정산 칸을 같게 둔다.
+            let store = db.clock_store(None).await;
+            let principal = finance::human(store.pool()).await;
+            let current = finance::current(store.pool(), principal).await;
             let ledger = PgLedger::new(
-                db.store.clone(),
+                store.clone(),
                 AccessSettings::from_config(&configuration()),
                 [1; 32],
             );
@@ -2673,7 +2691,7 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
             };
             sqlx::query(&sql)
                 .bind(initial)
-                .execute(db.store.pool())
+                .execute(store.pool())
                 .await
                 .unwrap();
             let obs = observation();
@@ -2696,7 +2714,7 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
             } else {
                 format!("SELECT {field} FROM test_user_usage_totals")
             })
-            .fetch_one(db.store.pool())
+            .fetch_one(store.pool())
             .await
             .unwrap();
             assert_eq!(value, if overflow { initial } else { i64::MAX });
@@ -2704,23 +2722,23 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
                 let carried_value: i64 = sqlx::query_scalar(&format!(
                     "SELECT carried_{field} FROM test_user_usage_totals"
                 ))
-                .fetch_one(db.store.pool())
+                .fetch_one(store.pool())
                 .await
                 .unwrap();
                 assert_eq!(carried_value, initial, "finalizer rewrote carried counter");
             }
             let unknown: i64 =
                 sqlx::query_scalar("SELECT unknown_count FROM test_user_usage_totals")
-                    .fetch_one(db.store.pool())
+                    .fetch_one(store.pool())
                     .await
                     .unwrap();
             assert_eq!(unknown, i64::from(overflow));
             let audit: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_audit_events")
-                .fetch_one(db.store.pool())
+                .fetch_one(store.pool())
                 .await
                 .unwrap();
             assert_eq!(audit, i64::from(overflow));
-            let row = sqlx::query("SELECT disabled_at,inference_pause_reason,inference_safety_version,version FROM gw_principals WHERE id=$1").bind(principal).fetch_one(db.store.pool()).await.unwrap();
+            let row = sqlx::query("SELECT disabled_at,inference_pause_reason,inference_safety_version,version FROM gw_principals WHERE id=$1").bind(principal).fetch_one(store.pool()).await.unwrap();
             assert!(
                 row.get::<Option<String>, _>("inference_pause_reason")
                     .is_some()
@@ -2738,7 +2756,7 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
                 if overflow { 2 } else { 1 }
             );
             assert!(row.try_get_raw("disabled_at").unwrap().is_null());
-            let event = sqlx::query("SELECT normalized_usage,provider_usage,pricing_resolution FROM gw_usage_events WHERE request_id=$1").bind(spec.id).fetch_one(db.store.pool()).await.unwrap();
+            let event = sqlx::query("SELECT normalized_usage,provider_usage,pricing_resolution FROM gw_usage_events WHERE request_id=$1").bind(spec.id).fetch_one(store.pool()).await.unwrap();
             assert_eq!(
                 event.get::<serde_json::Value, _>("normalized_usage")["input_tokens"],
                 "100"
@@ -2756,7 +2774,8 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
                     event.get::<serde_json::Value, _>("pricing_resolution")["cost_usd"].is_null()
                 );
             }
-            assert_first_usage_event_kind(db.store.pool(), spec.id, "final").await;
+            assert_first_usage_event_kind(store.pool(), spec.id, "final").await;
+            store.pool().close().await;
             db.close().await;
         }
     }
@@ -2853,19 +2872,11 @@ async fn two_scope_finalizer_fixture(pool: &sqlx::PgPool, source: uuid::Uuid) ->
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection) SELECT principal_id,$2,decode(repeat('00',32),'hex'),'issue_key','key',$3,201,'{}' FROM gw_requests WHERE id=$1").bind(source).bind(command).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_virtual_keys(id,principal_id,secret_hash,hash_version,public_prefix,name,grant_snapshot,validity_preset,created_by,created_command_id) SELECT $2,principal_id,decode(repeat('01',32),'hex'),1,'fixture','fixture','[]','unlimited',principal_id,$3 FROM gw_requests WHERE id=$1").bind(source).bind(key).bind(command).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) SELECT $2,principal_id,$3,allow_rules,budget_mode,period_kind,period_timezone,updated_by FROM gw_policies WHERE id=(SELECT scope_id FROM gw_request_budgets WHERE request_id=$1)").bind(source).bind(scope).bind(key).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,period_kind,period_timezone,updated_by) SELECT $2,principal_id,$3,allow_rules,period_kind,period_timezone,updated_by FROM gw_policies WHERE id=(SELECT scope_id FROM gw_request_budgets WHERE request_id=$1)").bind(source).bind(scope).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_requests(id,principal_id,key_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,dispatch_authorized_at,lease_expires_at,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest) SELECT $2,principal_id,$3,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,dispatch_authorized_at,lease_expires_at,executor_id,phase,accounting_state,pricing_snapshot,jsonb_set(execution_snapshot,'{auth_dependency_versions,key}',jsonb_build_object('id',$3::uuid::text,'version','1')),auth_config_digest FROM gw_requests WHERE id=$1").bind(source).bind(id).bind(key).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_usage_totals(scope_id,period_start,period_end,timezone_snapshot) SELECT $2,period_start,period_end,timezone_snapshot FROM gw_request_budgets WHERE request_id=$1").bind(source).bind(scope).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_rate_windows(scope_id,lane,window_start,window_end,admitted_count) SELECT $2,rate_lane,rate_start,rate_end,1 FROM gw_request_budgets WHERE request_id=$1").bind(source).bind(scope).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) SELECT $2,sc.id,1,b.policy_snapshot,b.period_start,b.period_end,b.timezone_snapshot,b.rate_lane,b.rate_start,b.rate_end,b.budget_mode,(0.000001),(0.000001),3,3,'active' FROM gw_request_budgets b CROSS JOIN (SELECT scope_id AS id FROM gw_request_budgets WHERE request_id=$1 UNION ALL SELECT $3) sc WHERE b.request_id=$1").bind(source).bind(id).bind(scope).execute(&mut *tx).await.unwrap();
-    sqlx::query("UPDATE gw_usage_totals SET reserved_usd=(0.000001)")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE gw_rate_windows SET reserved_tokens=3")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+    sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,state) SELECT $2,sc.id,1,b.policy_snapshot,b.period_start,b.period_end,b.timezone_snapshot,b.rate_lane,b.rate_start,b.rate_end,'active' FROM gw_request_budgets b CROSS JOIN (SELECT scope_id AS id FROM gw_request_budgets WHERE request_id=$1 UNION ALL SELECT $3) sc WHERE b.request_id=$1").bind(source).bind(id).bind(scope).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
     id
 }
@@ -2880,17 +2891,19 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
         "settled_count",
     ] {
         let db = postgres::TestDb::new().await;
-        let principal = finance::human(db.store.pool()).await;
-        let current = finance::current(db.store.pool(), principal).await;
+        // 분당 토큰은 정산한 1분 칸에 더한다. 고정 시계로 받은 칸과 정산 칸을 같게 둔다.
+        let store = db.clock_store(None).await;
+        let principal = finance::human(store.pool()).await;
+        let current = finance::current(store.pool(), principal).await;
         let ledger = Arc::new(PgLedger::new(
-            db.store.clone(),
+            store.clone(),
             AccessSettings::from_config(&configuration()),
             [1; 32],
         ));
         let spec = specification();
         ledger.admit_request(&current, &spec).await.unwrap();
         let _permit = ledger.authorize_dispatch(spec.id).await.unwrap();
-        let id = two_scope_finalizer_fixture(db.store.pool(), spec.id).await;
+        let id = two_scope_finalizer_fixture(store.pool(), spec.id).await;
         // UUID상 뒤 scope만 overflow: 앞 scope의 정상 정산도 전체 unknown으로 바뀌어야 한다.
         let sql = if field == "settled_tokens" {
             "UPDATE gw_rate_windows SET settled_tokens=$1 WHERE scope_id=(SELECT max(scope_id::text)::uuid FROM gw_request_budgets WHERE request_id=$2)".to_owned()
@@ -2902,20 +2915,20 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
         sqlx::query(&sql)
             .bind(i64::MAX)
             .bind(id)
-            .execute(db.store.pool())
+            .execute(store.pool())
             .await
             .unwrap();
-        sqlx::query("ALTER TABLE gw_audit_events ADD CONSTRAINT injected_audit_failure CHECK(false) NOT VALID").execute(db.store.pool()).await.unwrap();
+        sqlx::query("ALTER TABLE gw_audit_events ADD CONSTRAINT injected_audit_failure CHECK(false) NOT VALID").execute(store.pool()).await.unwrap();
         let obs = observation();
         assert_eq!(
             ledger.finalize_request(id, &obs).await,
             Err(LedgerError::DatabaseUnavailable)
         );
-        let unchanged: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_usage_totals WHERE unknown_count=0 AND settled_count=CASE WHEN $1='settled_count' AND scope_id=(SELECT max(scope_id::text)::uuid FROM gw_request_budgets WHERE request_id=$2) THEN 9223372036854775807 ELSE 0 END AND cost_usd=0 AND reserved_usd=0.000001").bind(field).bind(id).fetch_one(db.store.pool()).await.unwrap();
+        let unchanged: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_usage_totals WHERE unknown_count=0 AND settled_count=CASE WHEN $1='settled_count' AND scope_id=(SELECT max(scope_id::text)::uuid FROM gw_request_budgets WHERE request_id=$2) THEN 9223372036854775807 ELSE 0 END AND cost_usd=0").bind(field).bind(id).fetch_one(store.pool()).await.unwrap();
         assert_eq!(unchanged, 2, "audit failure partially mutated totals");
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gw_usage_events")
-                .fetch_one(db.store.pool())
+                .fetch_one(store.pool())
                 .await
                 .unwrap(),
             0
@@ -2923,7 +2936,7 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
         assert_eq!(
             sqlx::query_scalar::<_, String>("SELECT phase FROM gw_requests WHERE id=$1")
                 .bind(id)
-                .fetch_one(db.store.pool())
+                .fetch_one(store.pool())
                 .await
                 .unwrap(),
             "dispatching"
@@ -2933,13 +2946,13 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
                 "SELECT inference_safety_version FROM gw_principals WHERE id=$1"
             )
             .bind(principal)
-            .fetch_one(db.store.pool())
+            .fetch_one(store.pool())
             .await
             .unwrap(),
             1
         );
         sqlx::query("ALTER TABLE gw_audit_events DROP CONSTRAINT injected_audit_failure")
-            .execute(db.store.pool())
+            .execute(store.pool())
             .await
             .unwrap();
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -2965,23 +2978,24 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
             ledger.finalize_request(id, &conflict).await,
             Err(LedgerError::Conflict)
         );
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM gw_usage_totals WHERE unknown_count=1 AND cost_usd=0 AND reserved_usd=0.000001").fetch_one(db.store.pool()).await.unwrap(), 2);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM gw_request_budgets WHERE request_id=$1 AND state='unknown' AND remaining_reservation_usd=0.000001 AND remaining_reserved_tokens=3").bind(id).fetch_one(db.store.pool()).await.unwrap(), 2);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM gw_rate_windows WHERE reserved_tokens=3"
+                "SELECT count(*) FROM gw_usage_totals WHERE unknown_count=1 AND cost_usd=0"
             )
-            .fetch_one(db.store.pool())
+            .fetch_one(store.pool())
             .await
             .unwrap(),
             2
         );
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM gw_request_budgets WHERE request_id=$1 AND state='unknown' AND applied_cost_usd IS NULL").bind(id).fetch_one(store.pool()).await.unwrap(), 2);
+        // unknown은 어느 1분 칸에도 토큰을 더하지 않는다. 미리 넣은 overflow 값만 남는다.
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM gw_rate_windows WHERE settled_tokens=CASE WHEN $1='settled_tokens' AND scope_id=(SELECT max(scope_id::text)::uuid FROM gw_request_budgets WHERE request_id=$2) THEN 9223372036854775807 ELSE 0 END").bind(field).bind(id).fetch_one(store.pool()).await.unwrap(), 2);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM gw_usage_events WHERE request_id=$1"
             )
             .bind(id)
-            .fetch_one(db.store.pool())
+            .fetch_one(store.pool())
             .await
             .unwrap(),
             1
@@ -2991,12 +3005,12 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
                 "SELECT count(*) FROM gw_audit_events WHERE request_id=$1"
             )
             .bind(id)
-            .fetch_one(db.store.pool())
+            .fetch_one(store.pool())
             .await
             .unwrap(),
             1
         );
-        let r = sqlx::query("SELECT cost_usd::text,accounting_state,safety_violation_recorded,pricing_snapshot FROM gw_requests WHERE id=$1").bind(id).fetch_one(db.store.pool()).await.unwrap();
+        let r = sqlx::query("SELECT cost_usd::text,accounting_state,safety_violation_recorded,pricing_snapshot FROM gw_requests WHERE id=$1").bind(id).fetch_one(store.pool()).await.unwrap();
         assert_eq!(r.get::<String, _>("accounting_state"), "unknown");
         assert!(r.get::<Option<String>, _>("cost_usd").is_none());
         assert!(r.get::<bool, _>("safety_violation_recorded"));
@@ -3009,11 +3023,12 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
                 "SELECT inference_safety_version FROM gw_principals WHERE id=$1"
             )
             .bind(principal)
-            .fetch_one(db.store.pool())
+            .fetch_one(store.pool())
             .await
             .unwrap(),
             2
         );
+        store.pool().close().await;
         db.close().await;
     }
 }
@@ -3166,145 +3181,23 @@ async fn anthropic_sdk_streaming_alias_and_native_error_have_one_attempt_and_rea
             .await
             .unwrap();
         assert_eq!(h.provider.calls.lock().await.len(), 1);
+        // 시작 event 뒤의 오류 event는 끊긴 요청이다. 받은 출력이 없어 입력만 받은 규칙(`received`)으로 정산한다.
         assert_eq!(
-            sqlx::query_scalar::<_, String>("SELECT accounting_state FROM gw_requests")
-                .fetch_one(h.db.store.pool())
-                .await
-                .unwrap(),
-            if is_error { "unknown" } else { "settled" }
+            finance::last_settlement(h.db.store.pool()).await,
+            if is_error {
+                finance::cutoff_received("0.000100000000", 0)
+            } else {
+                (
+                    "settled".into(),
+                    Some("0.000140000000".into()),
+                    Some("provider".into()),
+                    Some("20".into()),
+                    None,
+                )
+            }
         );
         h.close().await;
     }
-}
-
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s4_reserved_last_budget_is_atomic() {
-    let db = postgres::TestDb::new().await;
-    let id = finance::human(db.store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('0.004296000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
-    let current = finance::current(db.store.pool(), id).await;
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    ));
-    let a = s4::strict_specification();
-    let b = s4::strict_specification();
-    assert!(
-        ledger.admit_request(&current, &a).await.is_ok(),
-        "verified reserved profile must be admitted"
-    );
-    ledger.admit_request(&current, &b).await.unwrap();
-    s4::complete_count(&ledger, &current, &a).await;
-    s4::complete_count(&ledger, &current, &b).await;
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let (one, two) = tokio::join!(
-        async {
-            barrier.wait().await;
-            ledger.authorize_dispatch(a.id).await
-        },
-        async {
-            barrier.wait().await;
-            ledger.authorize_dispatch(b.id).await
-        }
-    );
-    assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
-    assert!(
-        matches!(one, Err(LedgerError::BudgetExhausted))
-            || matches!(two, Err(LedgerError::BudgetExhausted))
-    );
-    let reserved: String =
-        sqlx::query_scalar("SELECT reserved_usd::text FROM test_user_usage_totals")
-            .fetch_one(db.store.pool())
-            .await
-            .unwrap();
-    assert_eq!(reserved, "0.004296000000");
-    let (winner, permit) = match (one, two) {
-        (Ok(permit), Err(_)) => (a.id, permit),
-        (Err(_), Ok(permit)) => (b.id, permit),
-        _ => panic!("정확히 하나의 송신 권한"),
-    };
-    let provider = provider::Provider::new();
-    let server = provider.serve().await;
-    let client = m_gated::providers::anthropic::AnthropicClient::loopback_for_test(
-        server.base.clone(),
-        "synthetic-company-key".into(),
-    )
-    .unwrap();
-    let cfg = configuration();
-    let runtime = m_gated::runtime::Runtime::new(config::Limits::default()).unwrap();
-    let headers = HeaderMap::from_iter([(
-        "anthropic-version".parse().unwrap(),
-        "2023-06-01".parse().unwrap(),
-    )]);
-    let result = client
-        .send(
-            permit,
-            Bytes::from_static(BODY.as_bytes()),
-            m_gated::providers::anthropic::SendOptions {
-                api: config::ApiKind::Messages,
-                headers: &headers,
-                profile: &cfg.providers()[0].profiles[0],
-                deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-                runtime: &runtime,
-            },
-        )
-        .await
-        .unwrap();
-    ledger
-        .finalize_request(winner, &result.observation)
-        .await
-        .unwrap();
-    let calls = provider.calls.lock().await.len();
-    db.close().await;
-    assert_eq!(calls, 1);
-}
-
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s4_internal_count_is_independent_native_call() {
-    let cfg = configuration_from_yaml(&finance_yaml().replace(
-        "api: messages",
-        "api: messages\n        internal_count: true",
-    ));
-    let h = Harness::with_config(cfg).await;
-    h.provider
-        .set_count(
-            StatusCode::OK,
-            HeaderMap::from_iter([(
-                "content-type".parse().unwrap(),
-                "application/json".parse().unwrap(),
-            )]),
-            Bytes::from_static(br#"{"input_tokens":321}"#),
-        )
-        .await;
-    let response = h.request("/v1/messages", BODY).send().await.unwrap();
-    let status = response.status();
-    let _ = response.bytes().await.unwrap();
-    let rows=sqlx::query("SELECT purpose,api,cost_usd::text AS cost,parent_request_id,(SELECT normalized_usage->>'counted_input_tokens' FROM gw_usage_events e WHERE e.request_id=r.id AND kind='final') AS counted FROM gw_requests r ORDER BY purpose").fetch_all(h.db.store.pool()).await.unwrap();
-    let calls = h.provider.calls.lock().await.clone();
-    h.close().await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(rows.len(), 2, "internal count needs its own durable child");
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].path, "/v1/messages/count_tokens");
-    assert_eq!(calls[1].path, "/v1/messages");
-    assert_eq!(calls[1].body.as_ref(), BODY.as_bytes());
-    let projected: serde_json::Value = serde_json::from_slice(&calls[0].body).unwrap();
-    assert!(projected.get("max_tokens").is_none());
-    assert_eq!(
-        projected["messages"][0]["content"],
-        "synthetic prompt sentinel"
-    );
-    assert_eq!(rows[0].get::<String, _>("purpose"), "internal_count");
-    assert_eq!(rows[0].get::<String, _>("cost"), "0.000000000000");
-    assert_eq!(rows[0].get::<String, _>("counted"), "321");
-    assert!(
-        rows[0]
-            .get::<Option<uuid::Uuid>, _>("parent_request_id")
-            .is_some()
-    );
 }
 
 #[path = "support/s4.rs"]
@@ -3449,15 +3342,25 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
             .fetch_one(h.db.store.pool())
             .await
             .unwrap();
-            assert_eq!(
-                row,
-                ("finished".into(), code.into(), "unknown".into(), true)
-            );
-            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
-            assert_eq!(
-                held,
-                ("0.000000000000".into(), "0.000000000000".into(), 0, 0)
-            );
+            if code == "stream_parse_error" {
+                // 문법이 깨진 응답은 해석하지 못한 응답이라 미정산이다.
+                assert_eq!(
+                    row,
+                    ("finished".into(), code.into(), "unknown".into(), true)
+                );
+            } else {
+                // 크기 한도는 끊김이다. 첫 event 전이면 0원, 시작 event 뒤면 끊긴 요청 규칙으로 정산한다.
+                assert_eq!((row.0.as_str(), row.1.as_str()), ("finished", code));
+                assert_eq!(
+                    finance::last_settlement(h.db.store.pool()).await,
+                    if mode == "h1" {
+                        finance::cutoff_received("0.000100000000", 0)
+                    } else {
+                        finance::no_response()
+                    },
+                    "{mode}"
+                );
+            }
             assert_eq!(h.provider.calls.lock().await.len(), 1);
             assert_eq!(h.runtime.available_inference(), 16);
             assert_eq!(h.runtime.request_resources().body_bytes, 0);
@@ -3535,11 +3438,8 @@ async fn s9_finalization_h0_failure_is_503_pending_not_unknown_or_success() {
     let body: serde_json::Value = serde_json::from_slice(&r.bytes().await.unwrap()).unwrap();
     assert_eq!(body["error"]["type"], "overloaded_error");
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,i64,i64,bool)=sqlx::query_as("SELECT phase,accounting_state,cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events),(SELECT COALESCE(sum(unknown_count),0)::bigint FROM test_user_usage_totals),(SELECT bool_and(remaining_reservation_usd=0 AND remaining_reserved_tokens=0) FROM test_user_request_budgets) FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(
-        row,
-        ("dispatching".into(), "pending".into(), true, 0, 0, true)
-    );
+    let row:(String,String,bool,i64,i64)=sqlx::query_as("SELECT phase,accounting_state,cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events),(SELECT COALESCE(sum(unknown_count),0)::bigint FROM test_user_usage_totals) FROM gw_requests WHERE id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(row, ("dispatching".into(), "pending".into(), true, 0, 0));
     assert_eq!(h.runtime.failed_request_ids(), vec![id]);
     assert_eq!(h.provider.calls.lock().await.len(), 1);
     assert_eq!(h.runtime.request_resources().body_bytes, 0);
@@ -3549,7 +3449,7 @@ async fn s9_finalization_h0_failure_is_503_pending_not_unknown_or_success() {
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_reservation() {
+async fn s9_verified_terminal_before_stream_limit_settles_once() {
     let h = Harness::with_config(configuration()).await;
 
     let body = BODY.replacen('{', "{\"stream\":true,", 1);
@@ -3605,12 +3505,10 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
             Some("0.000140000000".into())
         )
     );
-    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(
-        budget,
-        ("0.000000000000".into(), 0, 0, "0.000140000000".into(), 1)
-    );
-    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(i64,String,i64)=sqlx::query_as("SELECT t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(budget, (0, "0.000140000000".into(), 1));
+    // 정산한 토큰은 정산한 1분 칸에 쌓인다. 이 scope의 칸 전체 합으로 본다.
+    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(final_state, ("failed".into(), "provider".into(), 120));
     h.provider
         .set(
@@ -3675,18 +3573,8 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
     stopped.await.unwrap();
     drop(tx);
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(
-        row,
-        (
-            "stream_limit".into(),
-            "unknown".into(),
-            true,
-            "0.000000000000".into(),
-            0,
-            1
-        )
-    );
+    let row:(String,String,bool,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(row, ("stream_limit".into(), "unknown".into(), true, 1));
     let blocked = h
         .request("/anthropic/v1/messages", body)
         .send()
@@ -3706,71 +3594,34 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s9_admitted_main_before_authorize_is_n_even_with_dispatched_count_child() {
-    s9_count_cancellation_dispatch_evidence(false).await;
-}
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s9_authorize_entered_main_is_conservative_not_n_when_cancelled() {
-    s9_count_cancellation_dispatch_evidence(true).await;
-}
-async fn s9_count_cancellation_dispatch_evidence(enter_authorize: bool) {
-    let cfg = configuration_from_yaml(&finance_yaml().replace(
-        "api: messages",
-        "api: messages\n        internal_count: true",
-    ));
-    let h = Harness::with_config(cfg).await;
-    h.provider
-        .set_count(
-            StatusCode::OK,
-            HeaderMap::from_iter([(
-                "content-type".parse().unwrap(),
-                "application/json".parse().unwrap(),
-            )]),
-            Bytes::from_static(br#"{"input_tokens":321}"#),
-        )
-        .await;
-    let (started, release) = h.provider.hold_count().await;
+    let h = Harness::new().await;
+    // 송신 승인 transaction이 요청 행을 dispatching으로 바꾸는 문장에서 기다리게 하는 시험 고정 장치다.
+    // 시험 연결이 같은 advisory 잠금을 쥔 동안 승인은 완료(COMMIT)할 수 없다.
+    sqlx::raw_sql("CREATE FUNCTION gw_fixture_hold_dispatch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(7171); RETURN NEW; END $$; CREATE TRIGGER gw_fixture_hold_dispatch BEFORE UPDATE ON gw_requests FOR EACH ROW WHEN (NEW.phase='dispatching') EXECUTE FUNCTION gw_fixture_hold_dispatch()").execute(h.db.store.pool()).await.unwrap();
+    let mut holder = h.db.store.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(7171)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
     let mut phase_changes = h.runtime.resource_changes();
     let request = h.request("/anthropic/v1/messages", BODY).send();
     let interrupt = async {
-        started.await.unwrap();
-        let root: uuid::Uuid =
-            sqlx::query_scalar("SELECT id FROM gw_requests WHERE purpose='root'")
-                .fetch_one(h.db.store.pool())
-                .await
-                .unwrap();
-        let child_dispatch:bool=sqlx::query_scalar("SELECT dispatch_authorized_at IS NOT NULL FROM gw_requests WHERE purpose='internal_count'").fetch_one(h.db.store.pool()).await.unwrap();
-        assert!(child_dispatch);
-        if enter_authorize {
-            let mut holder = h.db.store.pool().begin().await.unwrap();
-            sqlx::query("SELECT id FROM gw_requests WHERE id=$1 FOR UPDATE")
-                .bind(root)
-                .fetch_one(&mut *holder)
-                .await
-                .unwrap();
-            release.send(()).unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                loop {
-                    if h.runtime.request_phases().iter().any(|(id, phase)| {
-                        *id == root
-                            && *phase == m_gated::runtime::request::RequestPhase::Dispatching
-                    }) {
-                        break;
-                    }
-                    phase_changes.changed().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if h.runtime.request_phases().iter().any(|(_, phase)| {
+                    *phase == m_gated::runtime::request::RequestPhase::Dispatching
+                }) {
+                    break;
                 }
-            })
-            .await
-            .unwrap();
-            // phase는 진입 의도이며 COMMIT 증명이 아니다. root 잠금은 승인 완료를 막는다.
-            h.runtime.cancel_requests();
-            holder.rollback().await.unwrap();
-        } else {
-            h.runtime.cancel_requests();
-            // 응답 준비 중인 count를 먼저 해제하지 않아 main authorize 이전 경계를 유지한다.
-            drop(release);
-        }
+                phase_changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        // phase는 진입 의도이며 COMMIT 증명이 아니다. 잠금이 승인 완료를 막는 동안 취소한다.
+        h.runtime.cancel_requests();
+        holder.rollback().await.unwrap();
     };
     let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(6), async {
         tokio::join!(request, interrupt)
@@ -3790,44 +3641,30 @@ async fn s9_count_cancellation_dispatch_evidence(enter_authorize: bool) {
     r.bytes().await.unwrap();
     h.runtime.wait_requests().await;
     let rows:Vec<(String,String,bool,String)>=sqlx::query_as("SELECT purpose,accounting_state,dispatch_authorized_at IS NOT NULL,cost_usd::text FROM gw_requests ORDER BY purpose").fetch_all(h.db.store.pool()).await.unwrap();
-    let paths: Vec<String> = h
-        .provider
-        .calls
-        .lock()
-        .await
-        .iter()
-        .map(|c| c.path.clone())
-        .collect();
+    let calls = h.provider.calls.lock().await.len();
     let available = h.runtime.available_inference();
     h.close().await;
     assert_eq!(
         rows,
-        vec![
-            (
-                "internal_count".into(),
-                "settled".into(),
-                true,
-                "0.000000000000".into()
-            ),
-            (
-                "root".into(),
-                "settled".into(),
-                false,
-                "0.000000000000".into()
-            )
-        ]
+        vec![(
+            "root".into(),
+            "settled".into(),
+            false,
+            "0.000000000000".into()
+        )]
     );
-    assert_eq!(paths, vec!["/v1/messages/count_tokens"]);
+    assert_eq!(calls, 0);
     assert_eq!(available, 16);
-    assert_eq!(
-        header_n,
-        (!enter_authorize).then(|| b"not_dispatched".to_vec())
-    );
-    assert_eq!(retry, enter_authorize.then(|| b"false".to_vec()));
+    // 승인에 들어간 뒤의 취소는 미송신(N)을 주장하지 않고 재시도도 권하지 않는다.
+    assert_eq!(header_n, None);
+    assert_eq!(retry, Some(b"false".to_vec()));
 }
 
 #[path = "support/s9_finality.rs"]
 mod s9_finality;
+/// 시작 event 뒤에 끊긴 Anthropic 스트림은 끊긴 요청 규칙(`received`)으로 정산한다(결정 0005).
+/// 받은 출력이 없으면 시작 event의 입력 100 token만 센다: (비용, 정산 token).
+const S9_CUTOFF: Option<(&str, i64)> = Some(("0.000100000000", 100));
 async fn s9_finality_fixture(
     alias: bool,
 ) -> (Harness, &'static str, String, String, String, &'static str) {
@@ -3864,3 +3701,6 @@ mod s10_process;
 
 #[path = "support/closure.rs"]
 mod closure;
+
+#[path = "support/cutoff.rs"]
+mod cutoff;

@@ -246,14 +246,7 @@ fn validate_amounts(value: &Value) -> Result<(), QueryError> {
         }
         Value::Object(fields) => {
             for (key, value) in fields {
-                if [
-                    "settled_usd",
-                    "held_reservation_usd",
-                    "reserved_usd",
-                    "limit_usd",
-                    "remaining_usd",
-                ]
-                .contains(&key.as_str())
+                if ["settled_usd", "limit_usd", "remaining_usd"].contains(&key.as_str())
                     && !value.is_null()
                 {
                     value
@@ -529,11 +522,11 @@ impl PgIdentityStore {
                     boundary.clone().ok_or(QueryError::Invariant)?,
                 ));
             }
-            let totals=sqlx::query("SELECT COALESCE(sum(cost_usd),0)::numeric(38,12)::text AS cost,COALESCE(sum(reserved_usd),0)::numeric(38,12)::text AS held,COALESCE(sum(unknown_count),0)::text AS unknown FROM gw_usage_totals WHERE scope_id=$1::uuid AND period_start >= $2::timestamptz AND period_end <= $3::timestamptz").bind(scope).bind(from).bind(to).fetch_one(&mut *tx).await?;
+            let totals=sqlx::query("SELECT COALESCE(sum(cost_usd),0)::numeric(38,12)::text AS cost,COALESCE(sum(unknown_count),0)::text AS unknown FROM gw_usage_totals WHERE scope_id=$1::uuid AND period_start >= $2::timestamptz AND period_end <= $3::timestamptz").bind(scope).bind(from).bind(to).fetch_one(&mut *tx).await?;
             ("period_totals", totals)
         } else {
             let base = "FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id JOIN gw_policies p ON p.id=b.scope_id AND p.key_id IS NULL WHERE ($1::uuid IS NULL OR r.principal_id=$1) AND r.admitted_at >= $2::timestamptz AND r.admitted_at < $3::timestamptz AND r.admitted_at <= $4::timestamptz AND ($5::text IS NULL OR r.provider=$5) AND ($6::text IS NULL OR r.requested_model=$6) AND ($7::uuid IS NULL OR r.key_id=$7)";
-            let sums = "COALESCE(sum(b.applied_cost_usd),0)::numeric(38,12)::text AS cost,COALESCE(sum(b.remaining_reservation_usd),0)::numeric(38,12)::text AS held,count(*) FILTER(WHERE r.accounting_state='unknown')::text AS unknown";
+            let sums = "COALESCE(sum(b.applied_cost_usd),0)::numeric(38,12)::text AS cost,count(*) FILTER(WHERE r.accounting_state='unknown')::text AS unknown";
             let totals = sqlx::query(&format!("SELECT {sums} {base}"))
                 .bind(id)
                 .bind(from)
@@ -605,13 +598,13 @@ impl PgIdentityStore {
                     };
                     let input: Option<String> = row.get("input");
                     let output: Option<String> = row.get("output");
-                    buckets.push(json!({"group":group,"settled_usd":row.get::<String,_>("cost"),"held_reservation_usd":row.get::<String,_>("held"),"unknown_count":row.get::<String,_>("unknown"),"tokens_complete":input.is_some()&&output.is_some(),"input_tokens":input,"output_tokens":output}));
+                    buckets.push(json!({"group":group,"settled_usd":row.get::<String,_>("cost"),"unknown_count":row.get::<String,_>("unknown"),"tokens_complete":input.is_some()&&output.is_some(),"input_tokens":input,"output_tokens":output}));
                     previous = vec![a, b];
                 }
             }
             ("detail", totals)
         };
-        let value = json!({"currency":"USD","from":from,"to":to,"as_of":now,"detail_available_from":boundary,"aggregation":aggregation,"settled_usd":totals.get::<String,_>("cost"),"held_reservation_usd":totals.get::<String,_>("held"),"period_unknown_count":totals.get::<String,_>("unknown"),"global_unknown_count":p["block_state"]["global_unknown_count"],"global_expired_dispatch_count":p["block_state"]["expired_dispatch_count"],"block_state":if id.is_none(){Value::Null}else{p["block_state"].clone()},"balance_context":if id.is_none(){"aggregate_no_balance"}else if filter.key_id.is_some() {"current_principal_and_key"}else{"current_principal"},"budget_balances":balances,"buckets":{"items":buckets,"next_cursor":next_cursor,"as_of":as_of}});
+        let value = json!({"currency":"USD","from":from,"to":to,"as_of":now,"detail_available_from":boundary,"aggregation":aggregation,"settled_usd":totals.get::<String,_>("cost"),"period_unknown_count":totals.get::<String,_>("unknown"),"global_unknown_count":p["block_state"]["global_unknown_count"],"global_expired_dispatch_count":p["block_state"]["expired_dispatch_count"],"block_state":if id.is_none(){Value::Null}else{p["block_state"].clone()},"balance_context":if id.is_none(){"aggregate_no_balance"}else if filter.key_id.is_some() {"current_principal_and_key"}else{"current_principal"},"budget_balances":balances,"buckets":{"items":buckets,"next_cursor":next_cursor,"as_of":as_of}});
         validate_amounts(&value)?;
         if serde_json::to_vec(&value)
             .map_err(|_| QueryError::Invariant)?
@@ -630,7 +623,7 @@ pub(crate) async fn principal(
     configured_grants: &Value,
     digest: &str,
 ) -> Result<(Value, Vec<Value>, String), QueryError> {
-    let row=sqlx::query("SELECT p.*,q.id AS scope,q.version AS pv,q.allow_rules,q.budget_mode,q.budget_limit_usd::text AS budget,q.period_timezone,q.rpm_limit,q.tpm_limit,q.count_rpm_limit FROM gw_principals p JOIN gw_policies q ON q.principal_id=p.id AND q.key_id IS NULL WHERE p.id=$1").bind(id).fetch_optional(&mut *c).await?.ok_or(QueryError::AccessDenied)?;
+    let row=sqlx::query("SELECT p.*,q.id AS scope,q.version AS pv,q.allow_rules,q.budget_limit_usd::text AS budget,q.period_timezone,q.rpm_limit,q.tpm_limit,q.count_rpm_limit FROM gw_principals p JOIN gw_policies q ON q.principal_id=p.id AND q.key_id IS NULL WHERE p.id=$1").bind(id).fetch_optional(&mut *c).await?.ok_or(QueryError::AccessDenied)?;
     let now: String = sqlx::query_scalar(&format!("SELECT {}", stamp_sql("clock_timestamp()")))
         .fetch_one(&mut *c)
         .await?;
@@ -655,12 +648,11 @@ pub(crate) async fn principal(
     let effective = intersect_grants(&grants, configured_grants);
     let scope: Uuid = row.get("scope");
     let version = row.get::<i64, _>("pv").to_string();
-    let mode: String = row.get("budget_mode");
     let limit: Option<String> = row.get("budget");
     let block = json!({"blocked":!reasons.is_empty(),"reasons":reasons,"global_unknown_count":unknown,"expired_dispatch_count":expired});
     let budget = limit
         .as_ref()
-        .map(|n| json!({"mode":mode,"limit_usd":n,"period":{"kind":"calendar_month"}}));
+        .map(|n| json!({"limit_usd":n,"period":{"kind":"calendar_month"}}));
     let p = json!({"id":id,"kind":row.get::<String,_>("kind"),"display_name":row.get::<String,_>("display_name"),"email":row.get::<Option<String>,_>("email"),"management_owner_id":row.get::<Option<Uuid>,_>("owner_principal_id"),"version":row.get::<i64,_>("version").to_string(),"policy":{"id":scope,"version":version,"disabled":row.get::<Option<String>,_>("disabled_reason").is_some(),"grants":grants,"limits":{"budget":budget,"rpm":row.get::<Option<i64>,_>("rpm_limit"),"tpm":row.get::<Option<i64>,_>("tpm_limit"),"count_rpm":row.get::<Option<i64>,_>("count_rpm_limit")}},"inference_safety":{"paused":paused.is_some(),"version":row.get::<i64,_>("inference_safety_version").to_string(),"reason":paused,"paused_at":null,"trigger_request_id":row.get::<Option<Uuid>,_>("inference_pause_request_id")},"block_state":block,"effective_grants":effective});
     let paused_at: Option<String> = sqlx::query_scalar(&format!(
         "SELECT {} FROM gw_principals WHERE id=$1",
@@ -676,7 +668,6 @@ pub(crate) async fn principal(
         scope,
         None,
         &version,
-        &mode,
         limit.as_deref(),
         &p["block_state"],
         &now,
@@ -717,7 +708,6 @@ async fn balance(
     scope: Uuid,
     key: Option<Uuid>,
     version: &str,
-    mode: &str,
     limit: Option<&str>,
     block: &Value,
     now: &str,
@@ -725,7 +715,7 @@ async fn balance(
     extra: Vec<&str>,
 ) -> Result<Value, QueryError> {
     let sql = format!(
-        "WITH period AS(SELECT period_start AS start,period_end AS finish,timezone FROM {} b) SELECT {} AS start,{} AS finish,period.timezone,COALESCE(t.cost_usd,0)::numeric(38,12)::text AS cost,COALESCE(t.reserved_usd,0)::numeric(38,12)::text AS reserved,COALESCE(t.unknown_count,0)::text AS unknown,CASE WHEN $3::numeric IS NULL THEN NULL ELSE greatest($3::numeric-COALESCE(t.cost_usd,0)-CASE WHEN $4='reserved' THEN COALESCE(t.reserved_usd,0) ELSE 0 END,0)::numeric(38,12)::text END AS remaining FROM period LEFT JOIN gw_usage_totals t ON t.scope_id=$1 AND t.period_start=period.start",
+        "WITH period AS(SELECT period_start AS start,period_end AS finish,timezone FROM {} b) SELECT {} AS start,{} AS finish,period.timezone,COALESCE(t.cost_usd,0)::numeric(38,12)::text AS cost,COALESCE(t.unknown_count,0)::text AS unknown,CASE WHEN $3::numeric IS NULL THEN NULL ELSE greatest($3::numeric-COALESCE(t.cost_usd,0),0)::numeric(38,12)::text END AS remaining FROM period LEFT JOIN gw_usage_totals t ON t.scope_id=$1 AND t.period_start=period.start",
         super::settings::budget_period_sql("$2::timestamptz"),
         stamp_sql("period.start"),
         stamp_sql("period.finish")
@@ -734,7 +724,6 @@ async fn balance(
         .bind(scope)
         .bind(now)
         .bind(limit)
-        .bind(mode)
         .fetch_one(c)
         .await?;
     let unresolved = block["global_unknown_count"] != "0" || block["expired_dispatch_count"] != "0";
@@ -748,7 +737,7 @@ async fn balance(
         reasons.push(json!("budget_exhausted"));
     }
     Ok(
-        json!({"scope_id":scope,"scope_kind":if key.is_some(){"key"}else{"principal"},"key_id":key,"period_start":row.get::<String,_>("start"),"period_end":row.get::<String,_>("finish"),"timezone":row.get::<String,_>("timezone"),"policy_version":version,"config_digest":digest,"mode":mode,"limit_usd":limit,"settled_usd":row.get::<String,_>("cost"),"reserved_usd":row.get::<String,_>("reserved"),"scope_unknown_count":row.get::<String,_>("unknown"),"principal_unknown_count":block["global_unknown_count"],"balance_state":if unresolved{"unresolved"}else if limit.is_none(){"unlimited"}else{"limited"},"remaining_usd":if unresolved {None}else{remaining},"blocked":!reasons.is_empty(),"reasons":reasons,"as_of":now}),
+        json!({"scope_id":scope,"scope_kind":if key.is_some(){"key"}else{"principal"},"key_id":key,"period_start":row.get::<String,_>("start"),"period_end":row.get::<String,_>("finish"),"timezone":row.get::<String,_>("timezone"),"policy_version":version,"config_digest":digest,"limit_usd":limit,"settled_usd":row.get::<String,_>("cost"),"scope_unknown_count":row.get::<String,_>("unknown"),"principal_unknown_count":block["global_unknown_count"],"balance_state":if unresolved{"unresolved"}else if limit.is_none(){"unlimited"}else{"limited"},"remaining_usd":if unresolved {None}else{remaining},"blocked":!reasons.is_empty(),"reasons":reasons,"as_of":now}),
     )
 }
 pub(crate) async fn key_balance(
@@ -759,7 +748,7 @@ pub(crate) async fn key_balance(
     now: &str,
     digest: &str,
 ) -> Result<Value, QueryError> {
-    let row=sqlx::query("SELECT q.id,q.version,q.budget_mode,q.budget_limit_usd::text AS budget,q.period_timezone,k.revoked_at IS NOT NULL AS revoked,k.expires_at<=$3::timestamptz AS expired FROM gw_virtual_keys k JOIN gw_policies q ON q.key_id=k.id WHERE k.id=$1 AND k.principal_id=$2").bind(key).bind(id).bind(now).fetch_optional(&mut *c).await?.ok_or(QueryError::NotFound)?;
+    let row=sqlx::query("SELECT q.id,q.version,q.budget_limit_usd::text AS budget,q.period_timezone,k.revoked_at IS NOT NULL AS revoked,k.expires_at<=$3::timestamptz AS expired FROM gw_virtual_keys k JOIN gw_policies q ON q.key_id=k.id WHERE k.id=$1 AND k.principal_id=$2").bind(key).bind(id).bind(now).fetch_optional(&mut *c).await?.ok_or(QueryError::NotFound)?;
     let mut reasons = Vec::new();
     if row.get::<bool, _>("revoked") {
         reasons.push("key_revoked");
@@ -772,7 +761,6 @@ pub(crate) async fn key_balance(
         row.get("id"),
         Some(key),
         &row.get::<i64, _>("version").to_string(),
-        &row.get::<String, _>("budget_mode"),
         row.get::<Option<String>, _>("budget").as_deref(),
         &p["block_state"],
         now,
@@ -788,13 +776,8 @@ pub(crate) async fn apply_balance_ceiling(
     ceiling: &super::policy::PolicyLimits,
 ) -> Result<(), QueryError> {
     use super::policy::{BudgetLimit, BudgetPeriod, PolicyLimits};
-    let mode = balance["mode"]
-        .as_str()
-        .ok_or(QueryError::Invariant)?
-        .to_owned();
     let stored = PolicyLimits {
         budget: balance["limit_usd"].as_str().map(|s| BudgetLimit {
-            mode: mode.clone(),
             limit_usd: s.into(),
             period: BudgetPeriod {
                 kind: "calendar_month".into(),
@@ -804,13 +787,7 @@ pub(crate) async fn apply_balance_ceiling(
         ..Default::default()
     };
     let effective = stored.effective(ceiling);
-    let conflict = effective.as_ref().is_err()
-        || effective
-            .as_ref()
-            .ok()
-            .and_then(|l| l.budget.as_ref())
-            .is_some_and(|b| b.mode != mode);
-    if conflict {
+    if effective.is_err() {
         balance["balance_state"] = json!("unresolved");
         balance["remaining_usd"] = Value::Null;
         balance["blocked"] = json!(true);
@@ -820,7 +797,12 @@ pub(crate) async fn apply_balance_ceiling(
             .push(json!("configuration_conflict"));
     } else if let Some(budget) = effective.map_err(|_| QueryError::Invariant)?.budget {
         balance["limit_usd"] = json!(budget.limit_usd);
-        let remaining:String=sqlx::query_scalar("SELECT greatest($1::numeric-$2::numeric-CASE WHEN $4='reserved' THEN $3::numeric ELSE 0 END,0)::numeric(28,12)::text").bind(&budget.limit_usd).bind(balance["settled_usd"].as_str()).bind(balance["reserved_usd"].as_str()).bind(&mode).fetch_one(c).await?;
+        let remaining: String =
+            sqlx::query_scalar("SELECT greatest($1::numeric-$2::numeric,0)::numeric(28,12)::text")
+                .bind(&budget.limit_usd)
+                .bind(balance["settled_usd"].as_str())
+                .fetch_one(c)
+                .await?;
         if balance["balance_state"] != "unresolved" {
             balance["balance_state"] = json!("limited");
             balance["remaining_usd"] = json!(remaining);

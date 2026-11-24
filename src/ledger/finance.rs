@@ -18,7 +18,6 @@ pub enum LedgerError {
     AccessDenied,
     OwnerInactive,
     PolicyChanged,
-    UnsupportedStrictPolicy,
     Unsettled,
     InferencePaused,
     BudgetExhausted,
@@ -102,17 +101,7 @@ impl PricingSnapshot {
                 "explicit_categories_v1"
             }
             .into(),
-            billing_time_rule: profile
-                .billing_time_rule
-                .map_or(
-                    if provider == ProviderId::Deepseek {
-                        "deepseek_time_unresolved_v1"
-                    } else {
-                        "fixed_admission_v1"
-                    },
-                    |r| r.as_str(),
-                )
-                .into(),
+            billing_time_rule: "fixed_admission_v1".into(),
             rounding_version: "sum_half_up_12_v1".into(),
             currency: "USD".into(),
         }
@@ -204,10 +193,7 @@ impl PricingSnapshot {
             .contains(&self.included_token_rules.as_str())
             || !["explicit_categories_v1", "anthropic_5m_v1"]
                 .contains(&self.cache_tier_rules.as_str())
-            || !(self.billing_time_rule == "fixed_admission_v1"
-                || (self.provider == "deepseek"
-                    && self.api == "chat_completions"
-                    && self.billing_time_rule == "deepseek_time_unresolved_v1"))
+            || self.billing_time_rule != "fixed_admission_v1"
             || self.rounding_version != "sum_half_up_12_v1"
         {
             return Err(LedgerError::InvalidSnapshot);
@@ -332,7 +318,6 @@ pub(crate) fn policy_limits(p: &PgRow) -> Result<super::policy::PolicyLimits, Le
         budget: p
             .get::<Option<String>, _>("amount")
             .map(|limit_usd| BudgetLimit {
-                mode: p.get("budget_mode"),
                 limit_usd,
                 period: BudgetPeriod {
                     kind: p.get("period_kind"),
@@ -363,6 +348,30 @@ pub fn api_name(a: ApiKind) -> &'static str {
     }
 }
 
+/// Anthropic 시작 event(`message_start`)가 알린 입력 usage. 끊긴 요청을 정산할 때 입력 토큰으로 쓴다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartUsage {
+    pub actual_model: String,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+/// 최종 usage 없이 끝난 요청을 어떻게 정산할지. 게이트웨이가 끝난 까닭을 보고 정한다(결정 0005).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum NoUsage {
+    /// 사용량을 알 수 없다. 미정산으로 남기고 사용자의 과금 호출을 막는다.
+    #[default]
+    Unknown,
+    /// 첫 응답 전에 끊겼거나 Provider가 HTTP 오류로 답했다. 0원으로 정산한다.
+    NoResponse,
+    /// Anthropic 스트림이 시작 event 뒤에 끊겼다. 받을 때 기록한 정산 규칙으로 정산한다.
+    /// `received_output`은 받은 출력 내용을 센 토큰 수다. 세지 못했으면 None이고 `count_failure`에 까닭이 있다.
+    Cutoff {
+        start: StartUsage,
+        received_output: Option<u64>,
+        count_failure: Option<&'static str>,
+    },
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FinalUsage {
@@ -455,11 +464,9 @@ pub struct RequestSpec {
     pub api_version: Option<String>,
     pub approved_beta: Vec<String>,
     pub cost_bound: Option<Amount>,
-    pub input_bound_tokens: Option<u64>,
     pub deadline: crate::runtime::RequestDeadline,
     /// 이 요청이 고정한 회사 키의 DB id. 테스트 고정 키·이관 요청은 None이다.
     pub provider_credential_id: Option<Uuid>,
-    internal_count: bool,
 }
 impl RequestSpec {
     pub fn from_profile(
@@ -481,10 +488,6 @@ impl RequestSpec {
             approved_beta: Vec::new(),
             cost_bound: if profile.billing_class == BillingClass::GuaranteedFree {
                 Some(Amount::ZERO)
-            } else if profile.billing_time_rule
-                == Some(crate::config::BillingTimeRule::DeepseekTimeUnresolvedV1)
-            {
-                None
             } else {
                 let input_rate = profile
                     .rates
@@ -508,13 +511,7 @@ impl RequestSpec {
                     .ok()
                 })
             },
-            input_bound_tokens: match provider {
-                ProviderId::Anthropic => crate::providers::anthropic::verified_input_bound(profile),
-                ProviderId::Openai => crate::providers::openai::verified_input_bound(profile),
-                ProviderId::Deepseek => crate::providers::deepseek::verified_input_bound(profile),
-            },
             provider_credential_id: None,
-            internal_count: profile.internal_count,
             deadline: crate::runtime::RequestDeadline::new(
                 observed + Duration::from_secs(895),
                 observed + Duration::from_secs(900),
@@ -570,6 +567,23 @@ impl FinalObservation {
     }
     fn digest(&self) -> Vec<u8> {
         Sha256::digest(serde_json::to_vec(&json!({"outcome":self.outcome.name(),"usage":self.usage,"counted_input_tokens":self.counted_input_tokens,"reason":self.reason,"status":self.http_status,"provider_request_id":self.provider_request_id})).expect("유한 typed projection")).to_vec()
+    }
+    /// 같은 관측이라도 usage 없이 정산한 방법이 다르면 다른 마감이다.
+    fn digest_with(&self, settlement: &NoUsage) -> Vec<u8> {
+        let way = match settlement {
+            NoUsage::Unknown => return self.digest(),
+            NoUsage::NoResponse => json!({"kind":"no_response"}),
+            NoUsage::Cutoff {
+                start,
+                received_output,
+                count_failure,
+            } => {
+                json!({"kind":"cutoff","model":start.actual_model,"input":start.input_tokens,"cache_read":start.cache_read_tokens,"cache_write":start.cache_write_tokens,"received_output":received_output,"count_failure":count_failure})
+            }
+        };
+        let mut bytes = self.digest();
+        bytes.extend(serde_json::to_vec(&way).expect("유한 typed projection"));
+        Sha256::digest(bytes).to_vec()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -680,9 +694,7 @@ impl PgLedger {
         {
             return Err(LedgerError::InvalidSnapshot);
         }
-        if spec.cost_bound.is_none()
-            && spec.pricing.billing_time_rule != "deepseek_time_unresolved_v1"
-        {
+        if spec.cost_bound.is_none() {
             return Err(LedgerError::AmountOverflow);
         }
         let mut tx = self.database.begin_transaction().await?;
@@ -709,6 +721,20 @@ impl PgLedger {
             self.check_grant(policy, spec)?;
         }
         policies.sort_by_key(|p| p.get::<Uuid, _>("id"));
+        // 끊긴 요청의 정산 규칙은 받을 때 정해 실행 기록에 남긴다. 이번 단계에서는 Anthropic 스트림만 쓴다.
+        let cutoff_rule: Option<String> = if spec.provider == ProviderId::Anthropic
+            && spec.api == ApiKind::Messages
+            && spec.stream
+            && spec.billing_class != BillingClass::GuaranteedFree
+        {
+            sqlx::query_scalar(
+                "SELECT cutoff_rule FROM gw_settlement_rules WHERE provider='anthropic'",
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
         let provisional: String = sqlx::query_scalar("SELECT transaction_timestamp()::text")
             .fetch_one(&mut *tx)
             .await?;
@@ -726,24 +752,6 @@ impl PgLedger {
             }
             let effective = stored.effective(&ceiling)?;
             let scope: Uuid = policy.get("id");
-            if let Some(budget) = &effective.budget
-                && spec.billing_class != BillingClass::GuaranteedFree
-                && budget.mode != policy.get::<String, _>("budget_mode")
-            {
-                return Err(LedgerError::ConfigurationConflict);
-            }
-            if spec.billing_class != BillingClass::GuaranteedFree
-                && ((effective.tpm.is_some() && spec.api != ApiKind::CountTokens)
-                    || policy.get::<String, _>("budget_mode") == "reserved")
-                && ((policy.get::<String, _>("budget_mode") == "reserved"
-                    && spec.cost_bound.is_none())
-                    || spec.input_bound_tokens.is_none()
-                    || (spec.api != ApiKind::CountTokens
-                        && (spec.output_limit.is_none()
-                            || (spec.api == ApiKind::Messages && !spec.internal_count))))
-            {
-                return Err(LedgerError::UnsupportedStrictPolicy);
-            }
             // 예산 기간은 관리자가 정한 예산 시간대 하나로 정한다(정책마다 따로 두지 않는다).
             let period=sqlx::query(&format!("SELECT b.period_start::text AS start,b.period_end::text AS finish,b.timezone,to_timestamp(floor(extract(epoch FROM $1::timestamptz)/60)*60)::text AS rate FROM {} b", super::settings::budget_period_sql("$1::timestamptz")))
                 .bind(&provisional).fetch_one(&mut *tx).await?;
@@ -824,7 +832,7 @@ impl PgLedger {
                 .await?;
             dependencies.push(json!({"id":owner.to_string(),"version":version.to_string()}));
         }
-        let execution = json!({"schema_version":1,"profile_version":spec.profile_version,"billing_class":if spec.billing_class==BillingClass::GuaranteedFree {"guaranteed_free"}else{"chargeable"},"capability":api_name(spec.api),"stream":spec.stream,"output_limit":spec.output_limit,"input_bound_tokens":spec.input_bound_tokens,"output_bound_tokens":spec.output_limit,"cost_bound_usd":spec.cost_bound.map(|n|n.to_string()),"auth_dependency_versions":{"principals":dependencies,"target_inference_safety_version":principal.get::<i64,_>("inference_safety_version").to_string(),"key":key.map(|k|json!({"id":k.id.to_string(),"version":k.version.to_string()})),"policies":policies.iter().map(|p|json!({"id":p.get::<Uuid,_>("id").to_string(),"version":p.get::<i64,_>("version").to_string()})).collect::<Vec<_>>()},"api_version":spec.api_version,"approved_beta":spec.approved_beta});
+        let execution = json!({"schema_version":1,"profile_version":spec.profile_version,"billing_class":if spec.billing_class==BillingClass::GuaranteedFree {"guaranteed_free"}else{"chargeable"},"capability":api_name(spec.api),"stream":spec.stream,"output_limit":spec.output_limit,"input_bound_tokens":null,"output_bound_tokens":spec.output_limit,"cost_bound_usd":spec.cost_bound.map(|n|n.to_string()),"auth_dependency_versions":{"principals":dependencies,"target_inference_safety_version":principal.get::<i64,_>("inference_safety_version").to_string(),"key":key.map(|k|json!({"id":k.id.to_string(),"version":k.version.to_string()})),"policies":policies.iter().map(|p|json!({"id":p.get::<Uuid,_>("id").to_string(),"version":p.get::<i64,_>("version").to_string()})).collect::<Vec<_>>()},"api_version":spec.api_version,"approved_beta":spec.approved_beta,"cutoff_rule":cutoff_rule});
         let execution = read_execution_snapshot(execution)?;
         sqlx::query("INSERT INTO gw_requests(id,principal_id,key_id,parent_request_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest,provider_credential_id) VALUES($1,$2,$13,$14,$15,$3,$4,$5,$6::timestamptz,least($6::timestamptz+interval '60 seconds',$6::timestamptz+$11::bigint*interval '1 millisecond',coalesce((SELECT admit_expires_at FROM gw_requests WHERE id=$14),$6::timestamptz+interval '60 seconds')),least($6::timestamptz+$11::bigint*interval '1 millisecond',coalesce((SELECT transport_deadline FROM gw_requests WHERE id=$14),$6::timestamptz+$11::bigint*interval '1 millisecond')),least($6::timestamptz+$12::bigint*interval '1 millisecond',coalesce((SELECT execution_deadline FROM gw_requests WHERE id=$14),$6::timestamptz+$12::bigint*interval '1 millisecond')),$7,'admitted','pending',$8,$9,$10,$16)")
             .bind(spec.id).bind(human.id).bind(provider_name(spec.provider)).bind(&spec.pricing.requested_model).bind(api_name(spec.api)).bind(&anchor).bind(self.executor_id).bind(serde_json::to_value(&spec.pricing).map_err(|_|LedgerError::InvalidSnapshot)?).bind(execution).bind(self.auth_digest.as_slice()).bind(transport_ms as i64).bind(execution_ms as i64).bind(key.map(|k|k.id)).bind(parent).bind(if parent.is_some(){"internal_count"}else{"root"}).bind(spec.provider_credential_id).execute(&mut *tx).await?;
@@ -835,8 +843,8 @@ impl PgLedger {
                 .ok_or(LedgerError::InvariantViolation)?;
             let snapshot = json!({"scope_id":scope.to_string(),"version":policy.get::<i64,_>("version").to_string(),"grants":policy.get::<Value,_>("allow_rules"),"limits":stored});
             sqlx::query("UPDATE gw_rate_windows SET admitted_count=admitted_count+1 WHERE scope_id=$1 AND lane=$2 AND window_start=$3::timestamptz").bind(scope).bind(lane).bind(&rate).execute(&mut *tx).await?;
-            sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) VALUES($1,$2,$3,$4,$5::timestamptz,$6::timestamptz,$7,$8,$9::timestamptz,$9::timestamptz+interval '60 seconds',$10,(0),(0),0,0,'admitted')")
-                .bind(spec.id).bind(scope).bind(policy.get::<i64,_>("version")).bind(snapshot).bind(start).bind(end).bind(timezone).bind(lane).bind(rate).bind(policy.get::<String,_>("budget_mode")).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,state) VALUES($1,$2,$3,$4,$5::timestamptz,$6::timestamptz,$7,$8,$9::timestamptz,$9::timestamptz+interval '60 seconds','admitted')")
+                .bind(spec.id).bind(scope).bind(policy.get::<i64,_>("version")).bind(snapshot).bind(start).bind(end).bind(timezone).bind(lane).bind(rate).execute(&mut *tx).await?;
         }
         if spec
             .deadline
@@ -1024,7 +1032,7 @@ impl PgLedger {
             .bind(id)
             .fetch_one(&mut **tx)
             .await?;
-        let budgets=sqlx::query("SELECT b.*,b.remaining_reservation_usd::text AS remaining_reservation_usd_text,b.period_start::text AS start_text,b.rate_start::text AS rate_text,p.version AS current_version,p.budget_limit_usd::text AS budget_limit,t.cost_usd::text AS total_cost,t.reserved_usd::text AS total_reserved,t.input_tokens AS total_input_tokens,t.output_tokens AS total_output_tokens,t.settled_count AS total_settled_count,t.settled_unknown_tokens_count AS total_unknown_tokens_count,t.unknown_count AS total_unknown_count,w.reserved_tokens AS rate_reserved_tokens,w.settled_tokens AS rate_settled_tokens FROM gw_request_budgets b JOIN gw_policies p ON p.id=b.scope_id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN gw_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE b.request_id=$1 ORDER BY b.scope_id FOR UPDATE OF b").bind(id).fetch_all(&mut **tx).await?;
+        let budgets=sqlx::query("SELECT b.*,b.period_start::text AS start_text,b.rate_start::text AS rate_text,p.version AS current_version,p.budget_limit_usd::text AS budget_limit,t.cost_usd::text AS total_cost,t.input_tokens AS total_input_tokens,t.output_tokens AS total_output_tokens,t.settled_count AS total_settled_count,t.settled_unknown_tokens_count AS total_unknown_tokens_count,t.unknown_count AS total_unknown_count,w.settled_tokens AS rate_settled_tokens FROM gw_request_budgets b JOIN gw_policies p ON p.id=b.scope_id JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start JOIN gw_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE b.request_id=$1 ORDER BY b.scope_id FOR UPDATE OF b").bind(id).fetch_all(&mut **tx).await?;
         if budgets.is_empty() {
             return Err(LedgerError::InvalidSnapshot);
         }
@@ -1142,73 +1150,27 @@ impl PgLedger {
                     serde_json::from_value(b.get::<Value, _>("policy_snapshot")["limits"].clone())
                         .map_err(|_| LedgerError::InvalidSnapshot)?;
                 let limits = stored.effective(&self.ceiling)?;
-                let mode: String = b.get("budget_mode");
-                if let Some(budget) = &limits.budget
-                    && budget.mode != mode
-                {
-                    return Err(LedgerError::ConfigurationConflict);
-                }
-                let reservation = if mode == "reserved" {
-                    execution["cost_bound_usd"]
-                        .as_str()
-                        .ok_or(LedgerError::UnsupportedStrictPolicy)
-                        .and_then(parse_amount)?
-                } else {
-                    Amount::ZERO
-                };
-                let total = parse_amount(&b.get::<String, _>("total_cost"))?;
-                let reserved = parse_amount(&b.get::<String, _>("total_reserved"))?;
+                // 예산은 이번 기간의 확정 비용만 본다. 실행 중인 요청은 금액을 잡아 두지 않는다.
                 if let Some(budget) = &limits.budget {
                     let limit = parse_amount(&budget.limit_usd)?;
                     if limit == Amount::ZERO
-                        || (mode == "actual" && total >= limit)
-                        || (mode == "reserved"
-                            && total
-                                .checked_add(reserved)
-                                .and_then(|n| n.checked_add(reservation))
-                                .map_err(|_| LedgerError::AmountOverflow)?
-                                > limit)
+                        || parse_amount(&b.get::<String, _>("total_cost"))? >= limit
                     {
                         return Err(LedgerError::BudgetExhausted);
                     }
                 }
-                // count 결과 수는 생성 TPM이 아니다. count의 독립 청구량도 생성 창에 가산하지 않는다.
-                if r.get::<String, _>("api") == "messages"
-                    && (limits.tpm.is_some() || mode == "reserved")
+                // 분당 토큰 한도는 송신을 승인하는 지금 1분 칸에 정산된 토큰으로 판단한다.
+                // 받은 분의 칸이 아니다(분 경계에서 받고 다음 분에 승인할 수 있다). 같은 scope의 칸을 쓰는
+                // 정산은 모두 이 사용자 잠금을 먼저 잡으므로 잠그지 않고 읽어도 된다.
+                // count 결과 수는 생성 토큰이 아니다.
+                if r.get::<String, _>("api") != "count_tokens"
+                    && let Some(limit) = limits.tpm
                 {
-                    let verified:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gw_requests c JOIN gw_usage_events e ON e.request_id=c.id AND e.kind='final' WHERE c.parent_request_id=$1 AND c.principal_id=$2 AND c.key_id IS NOT DISTINCT FROM $3 AND c.requested_model=$4 AND c.phase='finished' AND c.outcome='completed' AND c.accounting_state='settled' AND e.normalized_usage->>'counted_input_tokens' IS NOT NULL AND (e.normalized_usage->>'counted_input_tokens')::bigint<=$5)").bind(id).bind(r.get::<Uuid,_>("principal_id")).bind(r.get::<Option<Uuid>,_>("key_id")).bind(r.get::<String,_>("requested_model")).bind(execution["input_bound_tokens"].as_u64().and_then(|n|i64::try_from(n).ok()).ok_or(LedgerError::UnsupportedStrictPolicy)?).fetch_one(&mut *tx).await?;
-                    if !verified {
-                        return Err(LedgerError::UnsupportedStrictPolicy);
+                    let used: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT settled_tokens FROM gw_rate_windows WHERE scope_id=$1 AND lane=$2 AND window_start=to_timestamp(floor(extract(epoch FROM $3::timestamptz)/60)*60)),0)").bind(b.get::<Uuid,_>("scope_id")).bind(b.get::<String,_>("rate_lane")).bind(r.get::<String,_>("db_now")).fetch_one(&mut *tx).await?;
+                    if used >= limit {
+                        return Err(LedgerError::RateLimited);
                     }
                 }
-                let tokens = if r.get::<String, _>("api") == "count_tokens" {
-                    0
-                } else if limits.tpm.is_some() {
-                    execution["input_bound_tokens"]
-                        .as_u64()
-                        .and_then(|n| n.checked_add(execution["output_bound_tokens"].as_u64()?))
-                        .and_then(|n| i64::try_from(n).ok())
-                        .ok_or(LedgerError::UnsupportedStrictPolicy)?
-                } else {
-                    0
-                };
-                let rate = b
-                    .get::<i64, _>("rate_reserved_tokens")
-                    .checked_add(b.get("rate_settled_tokens"))
-                    .and_then(|n| n.checked_add(tokens))
-                    .ok_or(LedgerError::AmountOverflow)?;
-                if limits.tpm.is_some_and(|limit| rate > limit)
-                    && r.get::<String, _>("api") != "count_tokens"
-                {
-                    return Err(LedgerError::RateLimited);
-                }
-                let scope: Uuid = b.get("scope_id");
-                let start: String = b.get("start_text");
-                let rate_start: String = b.get("rate_text");
-                let lane: String = b.get("rate_lane");
-                sqlx::query("UPDATE gw_usage_totals SET reserved_usd=(reserved_usd+($3::numeric)) WHERE scope_id=$1 AND period_start=$2::timestamptz").bind(scope).bind(start).bind(reservation.to_string()).execute(&mut *tx).await?;
-                sqlx::query("UPDATE gw_rate_windows SET reserved_tokens=reserved_tokens+$4 WHERE scope_id=$1 AND lane=$2 AND window_start=$3::timestamptz").bind(scope).bind(lane).bind(rate_start).bind(tokens).execute(&mut *tx).await?;
-                sqlx::query("UPDATE gw_request_budgets SET reservation_usd=($3::numeric),remaining_reservation_usd=($3::numeric),reserved_tokens=$4,remaining_reserved_tokens=$4 WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(reservation.to_string()).bind(tokens).execute(&mut *tx).await?;
             }
         }
         sqlx::query("UPDATE gw_request_budgets SET state='active' WHERE request_id=$1")
@@ -1254,7 +1216,7 @@ impl PgLedger {
                 http_status: None,
                 provider_request_id: None,
             };
-            self.finalize_locked(tx, p, r, budgets, id, &observation)
+            self.finalize_locked(tx, p, r, budgets, id, &observation, &NoUsage::Unknown)
                 .await
                 .map(Some)
         })
@@ -1267,13 +1229,23 @@ impl PgLedger {
         id: Uuid,
         observation: &FinalObservation,
     ) -> Result<Finalized, LedgerError> {
+        self.finalize_request_with(id, observation, &NoUsage::Unknown)
+            .await
+    }
+    /// 최종 usage가 없을 때의 정산 방법(`settlement`)을 함께 넘기는 마감. usage가 있으면 무시한다.
+    pub async fn finalize_request_with(
+        &self,
+        id: Uuid,
+        observation: &FinalObservation,
+        settlement: &NoUsage,
+    ) -> Result<Finalized, LedgerError> {
         let mut metric = crate::telemetry::Timer::start(
             crate::telemetry::Metric::Finalization,
             crate::telemetry::Metric::FinalizationMicros,
             crate::telemetry::Metric::FinalizationFailed,
         );
         let result = tokio::time::timeout(Duration::from_secs(3), async {
-            let result = self.finalize(id, observation).await;
+            let result = self.finalize(id, observation, settlement).await;
             // commit 결과가 불명이어도 다음 reaper/replay에서 같은 절대누계를 복원한다.
             let _ = self.observe_durable_alarms().await;
             result
@@ -1289,12 +1261,14 @@ impl PgLedger {
         &self,
         id: Uuid,
         observation: &FinalObservation,
+        settlement: &NoUsage,
     ) -> Result<Finalized, LedgerError> {
         let mut tx = self.database.begin_transaction().await?;
         let (p, r, budgets) = self.lock_request(&mut tx, id).await?;
-        self.finalize_locked(tx, p, r, budgets, id, observation)
+        self.finalize_locked(tx, p, r, budgets, id, observation, settlement)
             .await
     }
+    #[allow(clippy::too_many_arguments)]
     async fn finalize_locked(
         &self,
         mut tx: Transaction<'_, Postgres>,
@@ -1303,8 +1277,9 @@ impl PgLedger {
         budgets: Vec<PgRow>,
         id: Uuid,
         observation: &FinalObservation,
+        settlement: &NoUsage,
     ) -> Result<Finalized, LedgerError> {
-        let digest = observation.digest();
+        let digest = observation.digest_with(settlement);
         if r.get::<String, _>("phase") == "finished" {
             if r.get::<Option<Vec<u8>>, _>("result_digest").as_ref() == Some(&digest) {
                 return Ok(Finalized::Noop);
@@ -1354,10 +1329,55 @@ impl PgLedger {
             && r.get::<String, _>("provider") == "anthropic"
             && r.get::<String, _>("api") == "count_tokens";
         let expired = r.get::<Option<bool>, _>("lease_expired").unwrap_or(false);
+        // 최종 usage 없이 끝난 요청(결정 0005).
+        // - 시작 event 뒤에 끊긴 Anthropic 스트림은 받을 때 기록한 규칙으로 출력 토큰을 정한다.
+        //   입력 토큰은 시작 event가 알린 값이다. 출력은 요청의 max_tokens를 넘지 않는다.
+        // - 첫 응답 전에 끊겼거나 Provider가 HTTP 오류로 답한 요청은 0원이다.
+        // - 그 밖(처리 중 프로세스 중단, 알 수 없는 응답)은 지금처럼 미정산이다.
+        let usable = observation.usage.is_none() && !no_dispatch && !free && !expired;
+        let mut cutoff: Option<(FinalUsage, &'static str, Option<&'static str>)> = None;
+        if usable
+            && let NoUsage::Cutoff {
+                start,
+                received_output,
+                count_failure,
+            } = settlement
+            && let Some(limit) = execution["output_limit"].as_u64()
+        {
+            let way = match (execution["cutoff_rule"].as_str(), received_output) {
+                (Some("received"), Some(n)) => Some(((*n).min(limit), "cutoff_received", None)),
+                (Some("received"), None) => Some((
+                    limit,
+                    "cutoff_max_tokens",
+                    Some(count_failure.unwrap_or("cutoff_count_unavailable")),
+                )),
+                (Some("max_tokens"), _) => Some((limit, "cutoff_max_tokens", None)),
+                _ => None,
+            };
+            if let Some((output, source, why)) = way {
+                cutoff = Some((
+                    FinalUsage {
+                        actual_model: start.actual_model.clone(),
+                        input_tokens: start.input_tokens,
+                        output_tokens: output,
+                        cache_read_tokens: start.cache_read_tokens,
+                        cache_write_tokens: start.cache_write_tokens,
+                        reasoning_tokens: None,
+                    },
+                    source,
+                    why,
+                ));
+            }
+        }
+        let no_response = usable && cutoff.is_none() && *settlement == NoUsage::NoResponse;
+        let priced = observation
+            .usage
+            .as_ref()
+            .or(cutoff.as_ref().map(|(u, _, _)| u));
         let mut safety = None;
-        let mut amount = if no_dispatch || free {
+        let mut amount = if no_dispatch || free || no_response {
             Some(Amount::ZERO)
-        } else if let Some(usage) = &observation.usage {
+        } else if let Some(usage) = priced {
             let price = pricing.price(usage, false);
             safety = final_safety_violation_with_pricing(usage, &pricing, &price, &execution)?;
             price.ok()
@@ -1401,6 +1421,29 @@ impl PgLedger {
             selected["counted_input_tokens"] =
                 json!(observation.counted_input_tokens.map(|n| n.to_string()));
             ("provider", selected, pricing.provider_usage(u), tokens)
+        } else if let Some((u, source, why)) = &cutoff {
+            let tokens = pricing.tokens(u).ok();
+            if tokens.is_none() {
+                amount = None;
+                safety = Some("amount_overflow");
+            }
+            let mut selected = u.selected();
+            selected["source"] = json!(source);
+            selected["cutoff_rule"] = execution["cutoff_rule"].clone();
+            selected["cutoff_fallback_reason"] = json!(why);
+            (
+                *source,
+                selected,
+                json!({"input_tokens":u.input_tokens,"cache_read_input_tokens":u.cache_read_tokens,"cache_creation_input_tokens":u.cache_write_tokens}),
+                tokens,
+            )
+        } else if no_response {
+            (
+                "no_response",
+                json!({"source":"no_response","actual_model":null,"input_tokens":"0","output_tokens":"0","cache_read_tokens":"0","cache_write_tokens":"0","reasoning_tokens":null,"counted_input_tokens":null}),
+                json!({}),
+                Some((0, 0)),
+            )
         } else {
             (
                 "provider",
@@ -1409,37 +1452,34 @@ impl PgLedger {
                 None,
             )
         };
-        // 공통 순서로 잠근 원래 기간/window의 현재 합계에 적용할 수 있어야 정산한다.
+        // 공통 순서로 잠근 원래 기간의 현재 합계와 지금 1분 칸에 적용할 수 있어야 정산한다.
         // SQL bigint overflow를 일시 DB 장애로 재시도하거나 기존 합계를 clamp하지 않는다.
+        // 분당 토큰 한도는 요청이 정산된 1분 칸으로 판단한다. 받은 시각의 칸은 긴 요청이 끝날 때 이미 지나 있다.
+        let rate_tokens = r.get::<String, _>("api") != "count_tokens";
         if amount.is_some() {
             let (input, output) = tokens.unwrap_or((0, 0));
             let rate_increment = input
                 .checked_add(output)
                 .ok_or(LedgerError::InvariantViolation)?;
             for b in &budgets {
-                if parse_amount(&b.get::<String, _>("total_reserved"))?
-                    < parse_amount(&b.get::<String, _>("remaining_reservation_usd_text"))?
-                    || b.get::<i64, _>("rate_reserved_tokens")
-                        < b.get::<i64, _>("remaining_reserved_tokens")
-                {
-                    return Err(LedgerError::InvariantViolation);
-                }
+                // 0원 정산처럼 토큰이 없으면 1분 칸을 만들지 않는다.
+                let window_tokens = if rate_tokens && rate_increment > 0 {
+                    let scope: Uuid = b.get("scope_id");
+                    let lane: String = b.get("rate_lane");
+                    sqlx::query("INSERT INTO gw_rate_windows(scope_id,lane,window_start,window_end) VALUES($1,$2,to_timestamp(floor(extract(epoch FROM $3::timestamptz)/60)*60),to_timestamp(floor(extract(epoch FROM $3::timestamptz)/60)*60)+interval '60 seconds') ON CONFLICT DO NOTHING").bind(scope).bind(&lane).bind(r.get::<String,_>("db_now")).execute(&mut *tx).await?;
+                    sqlx::query_scalar::<_, i64>("SELECT settled_tokens FROM gw_rate_windows WHERE scope_id=$1 AND lane=$2 AND window_start=to_timestamp(floor(extract(epoch FROM $3::timestamptz)/60)*60) FOR UPDATE").bind(scope).bind(&lane).bind(r.get::<String,_>("db_now")).fetch_one(&mut *tx).await?
+                } else {
+                    0
+                };
                 if [
                     ("total_input_tokens", input),
                     ("total_output_tokens", output),
                     ("total_settled_count", 1),
                     ("total_unknown_tokens_count", i64::from(tokens.is_none())),
-                    (
-                        "rate_settled_tokens",
-                        if r.get::<String, _>("api") == "count_tokens" {
-                            0
-                        } else {
-                            rate_increment
-                        },
-                    ),
                 ]
                 .iter()
                 .any(|(field, increment)| b.get::<i64, _>(*field).checked_add(*increment).is_none())
+                    || (rate_tokens && window_tokens.checked_add(rate_increment).is_none())
                 {
                     amount = None;
                     safety = Some("amount_overflow");
@@ -1491,14 +1531,15 @@ impl PgLedger {
         for b in &budgets {
             let scope: Uuid = b.get("scope_id");
             let start: String = b.get("start_text");
-            let rate: String = b.get("rate_text");
             let lane: String = b.get("rate_lane");
             if let Some(cost) = amount {
                 let (input, output) = tokens.unwrap_or((0, 0));
-                sqlx::query("UPDATE gw_usage_totals SET cost_usd=(cost_usd+($3::numeric)),reserved_usd=(reserved_usd-(SELECT remaining_reservation_usd FROM gw_request_budgets WHERE request_id=$4 AND scope_id=$1)),settled_count=settled_count+1,input_tokens=input_tokens+$5,output_tokens=output_tokens+$6,settled_unknown_tokens_count=settled_unknown_tokens_count+$7,updated_at=clock_timestamp() WHERE scope_id=$1 AND period_start=$2::timestamptz")
-                    .bind(scope).bind(&start).bind(cost.to_string()).bind(id).bind(input).bind(output).bind(i64::from(tokens.is_none())).execute(&mut *tx).await?;
-                sqlx::query("UPDATE gw_rate_windows SET reserved_tokens=reserved_tokens-$4,settled_tokens=settled_tokens+$5,updated_at=clock_timestamp() WHERE scope_id=$1 AND lane=$2 AND window_start=$3::timestamptz").bind(scope).bind(lane).bind(rate).bind(b.get::<i64,_>("remaining_reserved_tokens")).bind(if r.get::<String,_>("api")=="count_tokens" {0}else{input.checked_add(output).ok_or(LedgerError::AmountOverflow)?}).execute(&mut *tx).await?;
-                sqlx::query("UPDATE gw_request_budgets SET state='settled',remaining_reservation_usd=(0),remaining_reserved_tokens=0,applied_cost_usd=($3::numeric),applied_input_tokens=$4,applied_output_tokens=$5 WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(cost.to_string()).bind(tokens.map(|t|t.0)).bind(tokens.map(|t|t.1)).execute(&mut *tx).await?;
+                sqlx::query("UPDATE gw_usage_totals SET cost_usd=(cost_usd+($3::numeric)),settled_count=settled_count+1,input_tokens=input_tokens+$4,output_tokens=output_tokens+$5,settled_unknown_tokens_count=settled_unknown_tokens_count+$6,updated_at=clock_timestamp() WHERE scope_id=$1 AND period_start=$2::timestamptz")
+                    .bind(scope).bind(&start).bind(cost.to_string()).bind(input).bind(output).bind(i64::from(tokens.is_none())).execute(&mut *tx).await?;
+                if rate_tokens && input.checked_add(output).is_some_and(|n| n > 0) {
+                    sqlx::query("UPDATE gw_rate_windows SET settled_tokens=settled_tokens+$4,updated_at=clock_timestamp() WHERE scope_id=$1 AND lane=$2 AND window_start=to_timestamp(floor(extract(epoch FROM $3::timestamptz)/60)*60)").bind(scope).bind(&lane).bind(r.get::<String,_>("db_now")).bind(input.checked_add(output).ok_or(LedgerError::AmountOverflow)?).execute(&mut *tx).await?;
+                }
+                sqlx::query("UPDATE gw_request_budgets SET state='settled',applied_cost_usd=($3::numeric),applied_input_tokens=$4,applied_output_tokens=$5 WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(cost.to_string()).bind(tokens.map(|t|t.0)).bind(tokens.map(|t|t.1)).execute(&mut *tx).await?;
             } else {
                 sqlx::query("UPDATE gw_usage_totals SET unknown_count=unknown_count+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND period_start=$2::timestamptz").bind(scope).bind(start).execute(&mut *tx).await?;
                 sqlx::query("UPDATE gw_request_budgets SET state='unknown' WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).execute(&mut *tx).await?;
@@ -1511,8 +1552,8 @@ impl PgLedger {
         } else {
             "partial"
         };
-        let resolution = json!({"pricing_version":pricing.pricing_version,"categories":pricing.rates.iter().filter_map(|rate|if source!="provider"{None}else{observation.usage.as_ref()}.and_then(|u|{let n=match rate.category.as_str(){"input"=>pricing.billable_input(u).ok()?,"output"=>u.output_tokens,"cache_read"=>u.cache_read_tokens,"cache_write"|"cache_write_5m"=>u.cache_write_tokens,_=>return None};Some(json!({"category":rate.category,"tokens":n.to_string(),"rate":rate.usd_per_million_tokens}))})).collect::<Vec<_>>(),"rounding_version":pricing.rounding_version,"cost_usd":amount.map(|n|n.to_string()),"unresolved_reason":if amount.is_none(){Some(reason)}else{None}});
-        sqlx::query("INSERT INTO gw_usage_events(request_id,kind,actual_model,provider_usage,normalized_usage,pricing_resolution,reason_code,content_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(kind).bind(if source=="provider"{observation.usage.as_ref().map(|u|u.actual_model.as_str())}else{None}).bind(provider_usage).bind(usage).bind(resolution).bind(reason).bind(&digest).execute(&mut *tx).await?;
+        let resolution = json!({"pricing_version":pricing.pricing_version,"categories":pricing.rates.iter().filter_map(|rate|if source=="provider"{observation.usage.as_ref()}else{cutoff.as_ref().map(|(u,_,_)|u)}.and_then(|u|{let n=match rate.category.as_str(){"input"=>pricing.billable_input(u).ok()?,"output"=>u.output_tokens,"cache_read"=>u.cache_read_tokens,"cache_write"|"cache_write_5m"=>u.cache_write_tokens,_=>return None};Some(json!({"category":rate.category,"tokens":n.to_string(),"rate":rate.usd_per_million_tokens}))})).collect::<Vec<_>>(),"rounding_version":pricing.rounding_version,"cost_usd":amount.map(|n|n.to_string()),"unresolved_reason":if amount.is_none(){Some(reason)}else{None}});
+        sqlx::query("INSERT INTO gw_usage_events(request_id,kind,actual_model,provider_usage,normalized_usage,pricing_resolution,reason_code,content_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(kind).bind(if source=="provider"{observation.usage.as_ref().map(|u|u.actual_model.as_str())}else{cutoff.as_ref().map(|(u,_,_)|u.actual_model.as_str())}).bind(provider_usage).bind(usage).bind(resolution).bind(reason).bind(&digest).execute(&mut *tx).await?;
         sqlx::query("UPDATE gw_requests SET phase='finished',outcome=$2,accounting_state=$3,cost_usd=($4::numeric),finished_at=$9::timestamptz,provider_request_id=$5,http_status=$6,reason_code=$7,result_digest=$8,version=version+1 WHERE id=$1")
             .bind(id).bind(outcome).bind(state).bind(amount.map(|n|n.to_string())).bind(&observation.provider_request_id).bind(observation.http_status.map(|n|n as i16)).bind(reason).bind(&digest).bind(r.get::<String,_>("db_now")).execute(&mut *tx).await?;
         if let Some(reason) = safety {
@@ -1557,6 +1598,21 @@ impl PgLedger {
         let after = json!({"paused":true,"version":(p.get::<i64,_>("inference_safety_version")+1).to_string(),"reason":reason,"trigger_request_id":id.to_string()});
         sqlx::query("INSERT INTO gw_audit_events(actor_kind,executor_id,request_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('system',$1,$2,$3,'inference_auto_pause','principal',$4,$5,$6)").bind(r.get::<Uuid,_>("executor_id")).bind(id).bind(self.auth_digest.as_slice()).bind(principal).bind(before).bind(after).execute(&mut **tx).await?;
         Ok(())
+    }
+    /// 끊긴 요청에 쓸 정산 규칙. 받을 때 실행 기록에 남긴 값이고, 규칙을 쓰지 않는 요청은 None이다.
+    /// 마감 직전에 읽으므로 일반 gate를 쓰지 않는다.
+    pub async fn cutoff_rule(&self, id: Uuid) -> Result<Option<String>, LedgerError> {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT execution_snapshot->>'cutoff_rule' FROM gw_requests WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(self.database.pool()),
+        )
+        .await
+        .map_err(|_| LedgerError::DatabaseUnavailable)?
+        .map_err(LedgerError::from)
     }
     pub async fn record_execution_stopped(&self, id: Uuid) -> Result<(), LedgerError> {
         tokio::time::timeout(Duration::from_secs(3),async {
@@ -1628,6 +1684,9 @@ struct ExecutionSnapshot {
     #[serde(deserialize_with = "required_nullable")]
     api_version: Option<String>,
     approved_beta: Vec<String>,
+    /// 끊긴 요청의 정산 규칙(`received` 또는 `max_tokens`). 규칙을 쓰지 않는 요청은 null이다.
+    #[serde(default)]
+    cutoff_rule: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1705,6 +1764,9 @@ pub(crate) fn read_execution_snapshot(value: Value) -> Result<Value, LedgerError
                 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         })
         || e.api_version.as_ref().is_some_and(|s| s != "2023-06-01")
+        || e.cutoff_rule
+            .as_ref()
+            .is_some_and(|s| !["received", "max_tokens"].contains(&s.as_str()))
     {
         return Err(LedgerError::InvalidSnapshot);
     }

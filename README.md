@@ -243,8 +243,7 @@ applies to every catalog model of that provider:
       model_prefixes: [claude-]      # which models a sync offers as new candidates
 ```
 
-A provider has either `profiles` or `catalog`, not both. Catalog models get no
-`input_bound_contract`, so `reserved` budgets and `tpm` limits cannot be used with them.
+A provider has either `profiles` or `catalog`, not both.
 
 `base_url` must be exactly `https://api.anthropic.com`, `https://api.openai.com` or
 `https://api.deepseek.com`. Outbound requests ignore proxy environment variables, do not follow
@@ -265,9 +264,6 @@ redirects and are never retried by the gateway.
 | `rates` | Price per category, see below. |
 | `billing_class` | `chargeable` (default) or `guaranteed_free`. A `guaranteed_free` profile is exempt from budgets and unknown-cost blocks. It is allowed only for Anthropic `count_tokens`, and all its rates must be zero. |
 | `count_billing` | Required on a chargeable `count_tokens` profile. The only value is `counted_input_tokens`, which bills the counted tokens at the `input` rate. |
-| `internal_count` | Anthropic `messages` only. If `true`, the gateway first counts the request's input tokens through a `count_tokens` profile for the same model, then dispatches. `reserved` budgets and `tpm` limits need this (see [Cost ledger](#cost-ledger)). |
-| `input_bound_contract` | Optional. The operator declares that `max_input_tokens` is a hard upper bound on billable input, so the gateway may rely on it for token-based limits: `{kind, context_tokens, input_categories}`. `kind` is `anthropic_context_v1` (categories `[input, cache_read, cache_write]`), `openai_responses_context_v1` (`[input]`), `openai_chat_context_v1` (`[messages]`) or `deepseek_chat_context_v1` (`[messages]`), and `context_tokens` must equal `max_input_tokens`. |
-| `billing_time_rule` | How the price is chosen in time. `fixed_admission_v1`: the profile's rates at admission time apply. DeepSeek profiles must set this field, because DeepSeek prices can depend on time of day. `deepseek_time_unresolved_v1` records every DeepSeek request as `unknown` for manual settlement. |
 | `chat_output_limit_field` | `openai_chat` only, and required: `max_tokens` or `max_completion_tokens`. `max_tokens` cannot be combined with `thinking`. |
 | `embedding_dimensions`, `embedding_encodings` | `embeddings` only, and required: `{default, max ≤ 4096}` and a subset of `[float, base64]`. Embedding profiles take no `features`. |
 
@@ -341,10 +337,9 @@ removed only by the explicit maintenance command. Per-month totals are kept, so 
 those months stay correct.
 
 `execution_ceiling` has the same shape as a policy's limits:
-`{budget: {mode: actual|reserved, limit_usd, period: {kind: calendar_month}}, rpm, tpm, count_rpm}`.
-For every principal and key, the effective limit is the smaller of the policy and the ceiling. If the
-ceiling's budget mode differs from a policy's, that policy's requests are rejected with
-`configuration_conflict`. The ceiling has no time zone. If you add `timezone` to it, startup fails.
+`{budget: {limit_usd, period: {kind: calendar_month}}, rpm, tpm, count_rpm}`.
+For every principal and key, the effective limit is the smaller of the policy and the ceiling.
+The ceiling has no time zone. If you add `timezone` to it, startup fails.
 See [Budget time zone](#budget-time-zone).
 
 A virtual key's own limits cannot be higher than this effective limit of its owner. `GET /api/me`
@@ -375,7 +370,8 @@ API (admin only; writes need `X-Gateway-Command-Id`, and cookie writes need `Ori
 
 | Method and path | Body | Result |
 |---|---|---|
-| `GET /api/admin/settings` | – | `budget_timezone`: the current time zone and period, the scheduled change (`pending`, or `null`) and `version` |
+| `GET /api/admin/settings` | – | `budget_timezone`: the current time zone and period, the scheduled change (`pending`, or `null`) and `version`. `cutoff_rule`: how cut-off Anthropic streams are settled (`received` or `max_tokens`) and `version` |
+| `PUT /api/admin/settings/cutoff-rule` | `{"provider": "anthropic", "cutoff_rule": "received" \| "max_tokens", "expected_version": "<n>"}` | `200`; `409 version_conflict` if another admin changed it since you read `version`. Requests admitted after the change use the new rule |
 | `PUT /api/admin/settings/budget-timezone` | `{"timezone": "<IANA name>", "expected_version": "<n>"}` | `200`; `409 version_conflict` if another admin changed it since you read `version`; `400` for an unknown time zone |
 
 When you upgrade to 0.9.0, the setting starts with the time zone that most budgets used before
@@ -463,30 +459,45 @@ Every inference request goes through the ledger in Postgres:
    (if any) and the execution ceiling: grants, rate windows (fixed 60 s), budget, pause state and
    outstanding unknowns. It also computes a worst-case cost bound:
    `max_input_tokens × (highest non-output rate) + requested output limit × output rate`.
-2. **Dispatch.** The request is forwarded once. Each budget has a mode:
-   - `actual`: paid calls are allowed while the settled spend for the current calendar month is
-     below the limit. Calls that are still running can push spend past the limit.
-   - `reserved`: the cost bound is held against the budget. The request is admitted only if
-     `settled + reserved + bound ≤ limit`.
+2. **Dispatch.** The request is forwarded once. A budget allows paid calls while the settled spend
+   for the current budget period is below the limit. Nothing is held for calls that are still
+   running, so they can push spend past the limit. `limits.per_principal` bounds how many calls one
+   principal can have running on each instance. A `tpm` limit counts the tokens of calls settled in
+   the current minute: a call's tokens are added to the minute in which it is settled, and once they
+   reach the limit, new calls are rejected with `rate_limited` until the next minute.
 3. **Settlement.** The gateway verifies the provider's final usage from the complete response or
    stream: the terminal event, the model name, and usage fields that match standard pricing. It then
    prices the usage with the profile's rates (fixed-point, 12 decimals). The result is recorded once.
-4. **Unknown.** If the final usage cannot be verified, the request's cost is recorded as `unknown`.
-   This happens when a stream is cut off, a usage field is unexpected or non-standard, the reported
-   model is not in `actual_models`, a price cannot be resolved, or the process stops mid-request.
-   Unknown costs are never estimated. While any of a principal's requests are `unknown`, that
-   principal's paid calls are rejected with `unsettled_usage_block`. An admin resolves each request
-   on *Admin → Requests*
-   (`PUT /api/admin/requests/{id}/settlement` with `decision: charged|no_charge`, `cost_usd` and
-   `reason`).
+4. **No final usage.** If the final usage cannot be verified, the request is settled by why it
+   ended (see decision [0005](docs/decisions/0005-gateway-prices-and-cut-off-requests.md)):
+   - **An Anthropic stream cut off after its start event**: the client disconnected, the gateway
+     shut down, the provider stopped sending, or the provider sent an error event. Input tokens are
+     the values in `message_start`. Output tokens follow the cut-off rule on *Admin → Settings*,
+     which a request keeps from the moment it is admitted:
+     - `received` (the default): the text, thinking and tool input received before the cut-off,
+       counted with Anthropic's free `count_tokens` endpoint. The content is kept in memory only, at
+       most 8 bytes per `max_tokens` token and 2 MiB, and a single piece of output larger than
+       6 KiB is not kept. If the content could not be kept, or the count fails, the request is
+       settled as `max_tokens`. Thinking arrives only as a summary, so this can be less than the
+       provider bills.
+     - `max_tokens`: the request's `max_tokens`.
+
+     Output never exceeds the request's `max_tokens`.
+   - **No response**: the provider answered with an HTTP error (even if its body could not be
+     read), a stream was cut off before its first event (for Anthropic, before `message_start`), or
+     a request that is not streamed was cut off before its response. The request is settled at
+     0 USD.
+   - **Otherwise `unknown`**: the process stopped during the request, the reported model is not in
+     `actual_models`, a usage field is unexpected or non-standard, a price cannot be resolved, or an
+     OpenAI or DeepSeek stream was cut off after it started. Unknown costs are never estimated.
+     While any of a principal's requests are `unknown`, that principal's paid calls are rejected
+     with `unsettled_usage_block`. An admin resolves each request on *Admin → Requests*
+     (`PUT /api/admin/requests/{id}/settlement` with `decision: charged|no_charge`, `cost_usd` and
+     `reason`).
 5. **Safety pause.** If the settled cost exceeds the cost bound computed at admission, the gateway
    pauses inference for that principal (`inference_paused`). An admin must release the pause
    explicitly (`/api/admin/principals/{id}/inference-pause/release`). Policy edits do not clear it.
 
-`reserved` budgets and `tpm` limits rely on a hard input bound. To use them with a model, its profile
-must declare `input_bound_contract`. An Anthropic `messages` profile also needs
-`internal_count: true` and a `count_tokens` profile for the same model. Otherwise these requests fail with `unsupported_strict_policy`.
-Budgets with `actual` mode and `rpm` limits work without these.
 
 ## Anthropic pass-through policy
 
@@ -562,7 +573,7 @@ It has no inline scripts and loads nothing from external CDNs.
 | Requests and manual settlement | `/dashboard/admin/requests` | admins |
 | Provider keys (register, replace, retire) | `/dashboard/admin/credentials` | admins |
 | Model & price catalog (sync, compare, approve) | `/dashboard/admin/models` | admins |
-| Settings (budget time zone) | `/dashboard/admin/settings` | admins |
+| Settings (budget time zone, cut-off rule) | `/dashboard/admin/settings` | admins |
 
 The JSON API behind it is under `/api/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
 routes). It is same-origin only, with no CORS. The UI is in Korean by default; a language switch in the header changes it to English (the choice is remembered in that browser only).

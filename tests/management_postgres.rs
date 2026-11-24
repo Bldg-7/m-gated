@@ -1664,7 +1664,7 @@ async fn admin_usage_cursor_is_actor_and_scope_bound_and_all_filters_are_bounded
     for (p, model) in [("openai", "same-history"), ("deepseek", "same-history")] {
         let history = Uuid::new_v4();
         sqlx::query("INSERT INTO gw_requests(id,principal_id,key_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest) SELECT $1,principal_id,key_id,'root',$3,$4,'chat_completions',admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,'admitted','pending',pricing_snapshot,execution_snapshot,auth_config_digest FROM gw_requests WHERE id=$2").bind(history).bind(pending.id).bind(p).bind(model).execute(db.store.pool()).await.unwrap();
-        sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) SELECT $1,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state FROM gw_request_budgets WHERE request_id=$2").bind(history).bind(pending.id).execute(db.store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,state) SELECT $1,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,state FROM gw_request_budgets WHERE request_id=$2").bind(history).bind(pending.id).execute(db.store.pool()).await.unwrap();
     }
     let usage = db
         .store
@@ -2696,7 +2696,7 @@ async fn metadata_pages_stop_at_bytes_before_row_limit_and_keep_resource_members
         let principal = owners[i / 32];
         sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection) VALUES($1,$2,decode(repeat('00',32),'hex'),'issue_key','key',$3,201,'{}')").bind(actor).bind(command).bind(id).execute(&mut *tx).await.unwrap();
         sqlx::query("INSERT INTO gw_virtual_keys(id,principal_id,secret_hash,hash_version,public_prefix,name,grant_snapshot,validity_preset,created_by,created_command_id) VALUES($1,$2,decode(repeat(replace($1::text,'-',''),2),'hex'),1,'public-id-only',$3,$4,'unlimited',$5,$6)").bind(id).bind(principal).bind("🧪".repeat(100)).bind(&grants).bind(actor).bind(command).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,$4,'actual','calendar_month','UTC',$5)").bind(Uuid::new_v4()).bind(principal).bind(id).bind(&grants).bind(actor).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,$4,'calendar_month','UTC',$5)").bind(Uuid::new_v4()).bind(principal).bind(id).bind(&grants).bind(actor).execute(&mut *tx).await.unwrap();
     }
     tx.commit().await.unwrap();
     let q = qctx(actor, &settings, &grants, true);
@@ -2731,7 +2731,7 @@ async fn metadata_pages_stop_at_bytes_before_row_limit_and_keep_resource_members
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_tpm() {
+async fn manual_settlement_keeps_original_period_other_unknown_and_adds_no_tokens() {
     let db = postgres::TestDb::new().await;
     let store = db.clock_store(None).await;
     let cfg = config();
@@ -2739,11 +2739,11 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(actor).execute(store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET budget_limit_usd=('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(actor).execute(store.pool()).await.unwrap();
     let ledger = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
-        v.limits=serde_json::from_value(json!({"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"tpm":10000})).unwrap();
+        v.limits=serde_json::from_value(json!({"budget":{"limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"tpm":10000})).unwrap();
     }
     let key = ledger
         .management_command(
@@ -2766,37 +2766,12 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
         .authenticate_key(key["key"].as_str().unwrap(), &settings)
         .await
         .unwrap();
-    let mut profile = cfg.providers()[0].profiles[0].clone();
-    profile.internal_count = true;
+    let profile = cfg.providers()[0].profiles[0].clone();
     let mut roots = Vec::new();
     for _ in 0..2 {
         let root = RequestSpec::from_profile(config::ProviderId::Anthropic, &profile, Some(16));
         ledger
             .admit_scoped(&auth.current, &root, auth.key, None)
-            .await
-            .unwrap();
-        let child = RequestSpec::from_profile(
-            config::ProviderId::Anthropic,
-            &cfg.providers()[0].profiles[1],
-            None,
-        );
-        ledger
-            .admit_scoped(&auth.current, &child, auth.key, Some(root.id))
-            .await
-            .unwrap();
-        let _p = ledger.authorize_dispatch(child.id).await.unwrap();
-        ledger
-            .finalize_request(
-                child.id,
-                &FinalObservation {
-                    outcome: FinalOutcome::Completed,
-                    usage: None,
-                    counted_input_tokens: Some(10),
-                    reason: "completed",
-                    http_status: Some(200),
-                    provider_request_id: None,
-                },
-            )
             .await
             .unwrap();
         let _p = ledger.authorize_dispatch(root.id).await.unwrap();
@@ -2843,19 +2818,15 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_conservative_
         )
         .await
         .unwrap();
-    let rows=sqlx::query("SELECT t.cost_usd::text AS cost,t.reserved_usd::text AS held,t.unknown_count,t.settled_unknown_tokens_count,t.period_start::text AS start,w.reserved_tokens,w.settled_tokens FROM gw_usage_totals t JOIN gw_rate_windows w ON w.scope_id=t.scope_id AND w.lane='inference' ORDER BY t.scope_id").fetch_all(store.pool()).await.unwrap();
+    // 관리자는 금액만 넣는다. 확인하지 못한 토큰은 어느 1분 칸에도 더하지 않는다.
+    let rows=sqlx::query("SELECT t.cost_usd::text AS cost,t.unknown_count,t.settled_unknown_tokens_count,t.period_start::text AS start,(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM gw_rate_windows w WHERE w.scope_id=t.scope_id) AS settled_tokens FROM gw_usage_totals t ORDER BY t.scope_id").fetch_all(store.pool()).await.unwrap();
     assert_eq!(rows.len(), 2);
     for row in rows {
         assert_eq!(row.get::<String, _>("cost"), "0.123456789012");
-        assert_eq!(
-            row.get::<String, _>("held"),
-            roots[1].cost_bound.unwrap().to_string()
-        );
         assert_eq!(row.get::<i64, _>("unknown_count"), 1);
         assert_eq!(row.get::<i64, _>("settled_unknown_tokens_count"), 1);
         assert!(row.get::<String, _>("start").starts_with("2025-03-01"));
-        assert_eq!(row.get::<i64, _>("reserved_tokens"), 4112);
-        assert_eq!(row.get::<i64, _>("settled_tokens"), 4112);
+        assert_eq!(row.get::<i64, _>("settled_tokens"), 0);
     }
     let detail = store
         .management_detail(
@@ -3101,7 +3072,7 @@ async fn issued_grants_do_not_expand_with_principal_policy_and_expired_key_is_40
     let mut tx = h.db.store.pool().begin().await.unwrap();
     sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection) VALUES($1,$2,decode(repeat('00',32),'hex'),'issue_key','key',$3,201,'{}')").bind(h.actor).bind(command).bind(expired.id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO gw_virtual_keys(id,principal_id,secret_hash,hash_version,public_prefix,name,grant_snapshot,validity_preset,expires_at,created_at,created_by,created_command_id) VALUES($1,$2,$3,1,'expired-id','expired',$4,'3_months',clock_timestamp()-interval '1 month',clock_timestamp()-interval '4 months',$2,$5)").bind(expired.id).bind(h.actor).bind(expired.hash().as_slice()).bind(grants()).bind(command).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,$4,'actual','calendar_month','UTC',$2)").bind(Uuid::new_v4()).bind(h.actor).bind(expired.id).bind(grants()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,key_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,$4,'calendar_month','UTC',$2)").bind(Uuid::new_v4()).bind(h.actor).bind(expired.id).bind(grants()).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
     let raw = expired.expose_once();
     let (s, _, _) = h
@@ -3144,7 +3115,7 @@ async fn requests_and_principals_pages_enforce_100_and_resource_cursor_expiry() 
     for _ in 0..100 {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO gw_requests(id,principal_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest) SELECT $1,principal_id,purpose,provider,requested_model,api,admitted_at,admit_expires_at,transport_deadline,execution_deadline,executor_id,phase,accounting_state,pricing_snapshot,execution_snapshot,auth_config_digest FROM gw_requests WHERE id=$2").bind(id).bind(spec.id).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) SELECT $1,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state FROM gw_request_budgets WHERE request_id=$2").bind(id).bind(spec.id).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,state) SELECT $1,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,state FROM gw_request_budgets WHERE request_id=$2").bind(id).bind(spec.id).execute(&mut *tx).await.unwrap();
     }
     tx.commit().await.unwrap();
     let q = qctx(actor, &settings, &g, true);
@@ -3294,21 +3265,20 @@ async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_bac
     let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
     let id = unknown(&db, &ledger, &cfg, actor).await;
     let scope = finance::current(db.store.pool(), actor).await.policy_id;
-    // 미정산 요청이 있는 동안 예산 모드는 바꿀 수 없다. 시간대는 정책 입력이 아니므로 넣으면 400이다.
+    // 예산에는 방식이 없으므로 미정산 요청이 있어도 한도는 바꾸고 scope는 그대로 둔다.
+    // 시간대는 정책 입력이 아니므로 넣으면 400이다.
     for (period, want_invalid) in [
-        (json!({"kind":"calendar_month"}), false),
         (
             json!({"kind":"calendar_month","timezone":"Asia/Seoul"}),
             true,
         ),
+        (json!({"kind":"calendar_month"}), false),
     ] {
         let mut p = policy(actor, "1", false, "이전 scope 유지");
         if let Command::Policy(_, p) = &mut p {
             p.limits.budget = Some(
-                serde_json::from_value(
-                    json!({"mode":"reserved","limit_usd":"1.000000000000","period":period}),
-                )
-                .unwrap(),
+                serde_json::from_value(json!({"limit_usd":"1.000000000000","period":period}))
+                    .unwrap(),
             );
         }
         let result = ledger
@@ -3329,11 +3299,21 @@ async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_bac
             assert!(matches!(result, Err(ManagementError::Invalid)));
             continue;
         }
-        assert!(matches!(result, Err(ManagementError::PolicyPeriod)));
+        assert!(result.is_ok());
     }
     assert_eq!(
         finance::current(db.store.pool(), actor).await.policy_id,
         scope
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT budget_limit_usd::text FROM gw_policies WHERE id=$1"
+        )
+        .bind(scope)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap(),
+        "1.000000000000"
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT accounting_state FROM gw_requests WHERE id=$1")
@@ -3719,7 +3699,7 @@ async fn resource_cursor_compares_typed_normalized_filters() {
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
+async fn management_budget_mode_and_timezone_are_400_without_retry_or_mutation() {
     let mut env = support::environment();
     env.insert(
         "ALLOWED_EMAILS".into(),
@@ -3730,7 +3710,7 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
         "alice@example.test,bob@example.test".into(),
     );
     let yaml = format!(
-        "{}execution_ceiling: {{budget: {{mode: actual, limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}}}\n",
+        "{}execution_ceiling: {{budget: {{limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}}}\n",
         support::YAML
     );
     let cfg = config::load(ConfigInputs {
@@ -3745,27 +3725,19 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
             .fetch_one(h.db.store.pool())
             .await
             .unwrap();
-    // 예산 모드가 상한과 다르면 409다. 시간대는 관리자 설정 하나로 정하므로 입력에 넣으면 400이다.
-    for (mode, period, want_status, want_code) in [
-        (
-            "reserved",
-            json!({"kind":"calendar_month"}),
-            409,
-            "configuration_conflict",
-        ),
-        (
-            "actual",
-            json!({"kind":"calendar_month","timezone":"Asia/Seoul"}),
-            400,
-            "invalid_request",
-        ),
+    // 예산에는 방식이 없다. 예전 mode 칸은 모르는 칸이라 400이다.
+    // 시간대는 관리자 설정 하나로 정하므로 입력에 넣으면 400이다.
+    for budget in [
+        json!({"mode":"reserved","limit_usd":"2.000000000000","period":{"kind":"calendar_month"}}),
+        json!({"mode":"actual","limit_usd":"2.000000000000","period":{"kind":"calendar_month"}}),
+        json!({"limit_usd":"2.000000000000","period":{"kind":"calendar_month","timezone":"Asia/Seoul"}}),
     ] {
-        let limits = json!({"budget":{"mode":mode,"limit_usd":"2.000000000000","period":period},"rpm":null,"tpm":null,"count_rpm":null});
+        let limits = json!({"budget":budget,"rpm":null,"tpm":null,"count_rpm":null});
         let mut input = key_input();
         input["limits"] = limits.clone();
         input["grants"] =
             json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]);
-        let policy = json!({"expected_version":"1","disabled":false,"grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":limits,"reason":"비호환 상한"});
+        let policy = json!({"expected_version":"1","disabled":false,"grants":[{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}],"limits":limits,"reason":"없는 칸"});
         for (method, path, input) in [
             ("POST", "/api/keys".to_owned(), input),
             (
@@ -3785,8 +3757,8 @@ async fn management_configuration_conflict_is_409_without_retry_or_mutation() {
                     &[],
                 )
                 .await;
-            assert_eq!(status, want_status);
-            assert_eq!(body["error"]["code"], want_code);
+            assert_eq!(status, 400, "{method} {path}");
+            assert_eq!(body["error"]["code"], "invalid_request");
             assert!(!headers.contains_key("retry-after"));
         }
     }
@@ -4137,13 +4109,16 @@ async fn late_token_only_violation_and_release_serialize_for_unknown_and_manual(
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn late_input_and_cache_token_only_bounds_use_original_snapshot_with_unresolved_cache_price()
-{
-    for (input, read, write, overflow) in [
-        (4097, 0, 0, false),
-        (4095, 2, 0, false),
-        (4095, 0, 2, false),
-        (i64::MAX as u64, 1, 0, true),
+async fn late_final_pauses_only_over_original_cost_bound_or_overflow_not_input_tokens() {
+    // 입력 상한 계약을 없앴으므로 실행 snapshot의 입력 상한은 비어 있다. 입력·cache token 수만으로는 멈추지 않는다.
+    // 늦은 final도 원래 snapshot의 비용 상한(0.004128 USD)과 overflow만 본다.
+    for (input, read, write, pause) in [
+        (4097, 0, 0, None),
+        (5000, 0, 0, Some("cost_bound_violation")),
+        // cache 요율이 없어 금액을 정하지 못하면 비교할 비용도 없다.
+        (4095, 2, 0, None),
+        (4095, 0, 2, None),
+        (i64::MAX as u64, 1, 0, Some("amount_overflow")),
     ] {
         let db = postgres::TestDb::new().await;
         let cfg = config();
@@ -4163,23 +4138,18 @@ async fn late_input_and_cache_token_only_bounds_use_original_snapshot_with_unres
             .finalize_request(id, &FinalObservation::completed(usage))
             .await
             .unwrap();
-        let state:(i64,Option<String>,bool,Option<String>)=sqlx::query_as("SELECT p.inference_safety_version,p.inference_pause_reason,r.safety_violation_recorded,r.cost_usd::text FROM gw_principals p JOIN gw_requests r ON p.id=r.principal_id WHERE r.id=$1").bind(id).fetch_one(db.store.pool()).await.unwrap();
+        let state:(i64,Option<String>,bool,Option<String>,Option<Value>)=sqlx::query_as("SELECT p.inference_safety_version,p.inference_pause_reason,r.safety_violation_recorded,r.cost_usd::text,r.execution_snapshot->'input_bound_tokens' FROM gw_principals p JOIN gw_requests r ON p.id=r.principal_id WHERE r.id=$1").bind(id).fetch_one(db.store.pool()).await.unwrap();
         db.close().await;
         assert_eq!(
             state,
             (
-                2,
-                Some(
-                    if overflow {
-                        "amount_overflow"
-                    } else {
-                        "cost_bound_violation"
-                    }
-                    .into()
-                ),
-                true,
-                None
-            )
+                if pause.is_some() { 2 } else { 1 },
+                pause.map(str::to_owned),
+                pause.is_some(),
+                None,
+                Some(Value::Null)
+            ),
+            "input={input} read={read} write={write}"
         );
     }
 }

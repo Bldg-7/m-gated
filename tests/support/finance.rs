@@ -5,7 +5,7 @@ pub async fn human(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example',$2,'alice@example.test','Alice')")
         .bind(id).bind(id.to_string()).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'actual','calendar_month','UTC',$2)")
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'calendar_month','UTC',$2)")
         .bind(Uuid::new_v4()).bind(id).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).execute(pool).await.unwrap();
     allow(pool, id).await;
     id
@@ -32,7 +32,7 @@ pub async fn expired_copy(pool: &PgPool, source: Uuid, phase: &str) -> Uuid {
         .bind(id).bind(source).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO gw_rate_windows(scope_id,lane,window_start,window_end,admitted_count) SELECT b.scope_id,b.rate_lane,to_timestamp(floor(extract(epoch FROM r.admitted_at)/60)*60),to_timestamp(floor(extract(epoch FROM r.admitted_at)/60)*60)+interval '60 seconds',1 FROM gw_request_budgets b JOIN gw_requests r ON r.id=$1 WHERE b.request_id=$2 ON CONFLICT DO NOTHING")
         .bind(id).bind(source).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,budget_mode,reservation_usd,remaining_reservation_usd,reserved_tokens,remaining_reserved_tokens,state) SELECT $1,b.scope_id,b.policy_version,b.policy_snapshot,date_trunc('month',r.admitted_at AT TIME ZONE b.timezone_snapshot) AT TIME ZONE b.timezone_snapshot,(date_trunc('month',r.admitted_at AT TIME ZONE b.timezone_snapshot)+interval '1 month') AT TIME ZONE b.timezone_snapshot,b.timezone_snapshot,b.rate_lane,to_timestamp(floor(extract(epoch FROM r.admitted_at)/60)*60),to_timestamp(floor(extract(epoch FROM r.admitted_at)/60)*60)+interval '60 seconds',b.budget_mode,b.reservation_usd,b.remaining_reservation_usd,b.reserved_tokens,b.remaining_reserved_tokens,CASE WHEN $3='dispatching' THEN 'active' ELSE 'admitted' END FROM gw_request_budgets b JOIN gw_requests r ON r.id=$1 WHERE b.request_id=$2")
+    sqlx::query("INSERT INTO gw_request_budgets(request_id,scope_id,policy_version,policy_snapshot,period_start,period_end,timezone_snapshot,rate_lane,rate_start,rate_end,state) SELECT $1,b.scope_id,b.policy_version,b.policy_snapshot,date_trunc('month',r.admitted_at AT TIME ZONE b.timezone_snapshot) AT TIME ZONE b.timezone_snapshot,(date_trunc('month',r.admitted_at AT TIME ZONE b.timezone_snapshot)+interval '1 month') AT TIME ZONE b.timezone_snapshot,b.timezone_snapshot,b.rate_lane,to_timestamp(floor(extract(epoch FROM r.admitted_at)/60)*60),to_timestamp(floor(extract(epoch FROM r.admitted_at)/60)*60)+interval '60 seconds',CASE WHEN $3='dispatching' THEN 'active' ELSE 'admitted' END FROM gw_request_budgets b JOIN gw_requests r ON r.id=$1 WHERE b.request_id=$2")
         .bind(id).bind(source).bind(phase).execute(pool).await.unwrap();
     id
 }
@@ -150,4 +150,55 @@ pub async fn virtual_key(
         .await
         .unwrap();
     issued.body.unwrap()["key"].as_str().unwrap().to_owned()
+}
+
+/// 요청 하나의 정산 결과: 회계 상태, 비용, 최종 usage의 정산 방식(source), 출력 토큰, 대체 사유.
+/// 최종 usage 없이 끝난 요청의 정산(결정 0005)을 확인할 때 쓴다. 최종 usage가 없으면 뒤의 셋은 None이다.
+#[allow(dead_code)]
+pub type Settlement = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+#[allow(dead_code)]
+pub async fn settlement(pool: &PgPool, id: Uuid) -> Settlement {
+    sqlx::query_as("SELECT r.accounting_state,r.cost_usd::text,e.normalized_usage->>'source',e.normalized_usage->>'output_tokens',e.normalized_usage->>'cutoff_fallback_reason' FROM gw_requests r LEFT JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' WHERE r.id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+/// 가장 늦게 받은 요청의 정산 결과.
+#[allow(dead_code)]
+pub async fn last_settlement(pool: &PgPool) -> Settlement {
+    let id: Uuid =
+        sqlx::query_scalar("SELECT id FROM gw_requests ORDER BY admitted_at DESC LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    settlement(pool, id).await
+}
+/// 첫 응답 전에 끊겼거나 Provider가 HTTP 오류로 답한 요청의 정산: 0원, 토큰 0, 정산 방식 `no_response`.
+#[allow(dead_code)]
+pub fn no_response() -> Settlement {
+    (
+        "settled".into(),
+        Some("0.000000000000".into()),
+        Some("no_response".into()),
+        Some("0".into()),
+        None,
+    )
+}
+/// 시작 event 뒤에 끊긴 Anthropic 스트림을 `received` 규칙(받은 출력만큼)으로 정산한 결과.
+#[allow(dead_code)]
+pub fn cutoff_received(cost: &str, output: u64) -> Settlement {
+    (
+        "settled".into(),
+        Some(cost.into()),
+        Some("cutoff_received".into()),
+        Some(output.to_string()),
+        None,
+    )
 }

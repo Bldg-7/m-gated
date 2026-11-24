@@ -931,6 +931,17 @@ impl AnthropicClient {
     }
     pub(super) async fn read_response(
         &self,
+        response: reqwest::Response,
+        options: SendOptions<'_>,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        let status = response.status();
+        super::transport::keep_error_status(
+            status,
+            self.read_response_body(response, options).await,
+        )
+    }
+    async fn read_response_body(
+        &self,
         mut response: reqwest::Response,
         options: SendOptions<'_>,
     ) -> Result<UpstreamResponse, UpstreamError> {
@@ -1370,28 +1381,6 @@ pub async fn count_projection(body: Bytes) -> Result<reqwest::Body, ApiError> {
     Ok(reqwest::Body::wrap_stream(futures_util::stream::iter(
         chunks.into_iter().map(Ok::<_, std::io::Error>),
     )))
-}
-
-/// native context 계약은 hidden/cache를 포함한 청구 입력 전체의 최악 상한이다.
-/// count 추정치는 이 상한을 줄이거나 만들어내지 않는다. 실제 모델 계약은 운영자가 profile로 선언한다.
-pub fn verified_input_bound(profile: &ModelProfile) -> Option<u64> {
-    let contract = profile.input_bound_contract.as_ref()?;
-    let categories = contract
-        .input_categories
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    if contract.kind != "anthropic_context_v1"
-        || contract.context_tokens != profile.max_input_tokens
-        || contract.context_tokens == 0
-        || contract.context_tokens > 1_000_000_000
-        || !matches!(profile.api, ApiKind::Messages | ApiKind::CountTokens)
-        || categories != BTreeSet::from(["input", "cache_read", "cache_write"])
-        || contract.input_categories.len() != 3
-    {
-        return None;
-    }
-    Some(contract.context_tokens)
 }
 
 #[cfg(test)]

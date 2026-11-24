@@ -18,30 +18,24 @@ use m_gated::{
 use sqlx::Row;
 use std::sync::Arc;
 fn configuration() -> config::ValidatedConfig {
-    configuration_options(false, "fixed_admission_v1", "")
+    configuration_options("")
 }
-fn configuration_options(
-    verified: bool,
-    time_rule: &str,
-    options: &str,
-) -> config::ValidatedConfig {
-    configuration_features(
-        verified,
-        time_rule,
-        options,
-        "client_tools, thinking, cache, json_schema",
-    )
+fn configuration_options(options: &str) -> config::ValidatedConfig {
+    configuration_features(options, "client_tools, thinking, cache, json_schema")
 }
-fn configuration_features(
-    verified: bool,
-    time_rule: &str,
-    options: &str,
-    features: &str,
-) -> config::ValidatedConfig {
-    let mut yaml=include_str!("support/config.yaml").replace("provider: anthropic","provider: deepseek").replace("https://api.anthropic.com","https://api.deepseek.com").replace("api: messages",&format!("api: deepseek_chat\n        billing_time_rule: {time_rule}\n        features: [{features}]")).replace("          input: '1.000000000000'","          input: '1.000000000000'\n          cache_read: '0.500000000000'");
-    if verified {
-        yaml=yaml.replace("        max_input_tokens: 4096","        input_bound_contract:\n          kind: deepseek_chat_context_v1\n          context_tokens: 4096\n          input_categories: [messages]\n        max_input_tokens: 4096");
-    }
+/// DeepSeek 프로필에는 입력 상한 계약도 시간대 가격 규칙도 없다. 받을 때의 카탈로그 가격으로 정산한다.
+fn configuration_features(options: &str, features: &str) -> config::ValidatedConfig {
+    let mut yaml = include_str!("support/config.yaml")
+        .replace("provider: anthropic", "provider: deepseek")
+        .replace("https://api.anthropic.com", "https://api.deepseek.com")
+        .replace(
+            "api: messages",
+            &format!("api: deepseek_chat\n        features: [{features}]"),
+        )
+        .replace(
+            "          input: '1.000000000000'",
+            "          input: '1.000000000000'\n          cache_read: '0.500000000000'",
+        );
     yaml = yaml.replace(
         "          - synthetic-text",
         "          - synthetic-text\n          - synthetic-deepseek-version",
@@ -357,11 +351,38 @@ fn native(stream: bool) -> String {
         base.to_string()
     }
 }
-async fn strict(h: &Harness) {
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1,tpm_limit=5000 WHERE key_id IS NULL")
+/// 사용자 정책에 예산과 분당 토큰 한도를 둔다. 입력 상한이 없는 프로필도 이 한도 아래에서 보낸다.
+async fn budget_and_tpm(h: &Harness) {
+    sqlx::query("UPDATE gw_policies SET budget_limit_usd=1,tpm_limit=5000 WHERE key_id IS NULL")
         .execute(h.db.store.pool())
         .await
         .unwrap();
+}
+/// Provider가 인증 오류·redirect·HTTP 오류로 답했거나 응답 전에 끊긴 요청은 0원으로 정산하고 막지 않는다(결정 0005).
+/// 다음 요청은 그대로 Provider에 보낸다.
+async fn no_response(h: &Harness) {
+    let s = state(h).await;
+    assert_eq!((s.0, s.1), (1, 0));
+    assert_eq!(
+        finance::last_settlement(h.db.store.pool()).await,
+        finance::no_response()
+    );
+    let stopped: bool =
+        sqlx::query_scalar("SELECT execution_stopped_at IS NOT NULL FROM gw_requests")
+            .fetch_one(h.db.store.pool())
+            .await
+            .unwrap();
+    assert!(stopped);
+    let n = h.provider.calls.lock().await.len();
+    let r = h.request(PATH, BODY).send().await.unwrap();
+    assert!(
+        r.headers()
+            .get("x-gateway-error-code")
+            .is_none_or(|v| v != "unsettled_usage_block")
+    );
+    r.bytes().await.unwrap();
+    h.runtime.wait_requests().await;
+    assert_eq!(h.provider.calls.lock().await.len(), n + 1);
 }
 async fn unknown(h: &Harness) {
     let s = state(h).await;
@@ -446,66 +467,81 @@ async fn deepseek_last_chunk_is_counted_once() {
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn deepseek_strict_context_reserves_and_settles_native_thinking() {
+async fn deepseek_budget_and_tpm_dispatch_without_input_bound_and_settle_native_thinking() {
     for stream in [false, true] {
-        let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-        strict(&h).await;
+        let h = Harness::new().await;
+        budget_and_tpm(&h).await;
         set(&h, &native(stream), stream).await;
         let (started, release) = h.provider.hold_response().await;
         let body = raw(stream, None).replacen('{', "{\"thinking\":{\"type\":\"enabled\"},", 1);
         let request = h.request(PATH, body).send();
         tokio::pin!(request);
         tokio::select! {r=&mut request=>panic!("unexpected early response {}",r.is_ok()),_=started=>{}}
-        let snapshot:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
-        assert_eq!(snapshot, ("0.004296000000".into(), 4196));
+        // 입력 상한이 없어도 예산·분당 토큰 한도 아래에서 보낸다. 비용 상한은 그대로 계산한다.
+        // 실행 중인 요청은 금액도 토큰도 잡아 두지 않으므로 이번 기간 장부와 분당 토큰 칸은 비어 있다.
+        let running:(String,Option<String>,String,String,i64)=sqlx::query_as("SELECT r.phase,r.execution_snapshot->>'input_bound_tokens',r.execution_snapshot->>'cost_bound_usd',t.cost_usd::text,(SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows) FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+        assert_eq!(
+            running,
+            (
+                "dispatching".into(),
+                None,
+                "0.004296000000".into(),
+                "0.000000000000".into(),
+                0
+            )
+        );
         release.send(()).unwrap();
         let r = request.await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.bytes().await.unwrap(), native(stream));
         assert_eq!(state(&h).await, (1, 0, "0.000120000000".into(), 100, 20));
-        let left:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT settled_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
-        assert_eq!(left, ("0.000000000000".into(), 120));
+        // 정산한 토큰은 정산한 1분 칸에 쌓인다. 칸이 바뀔 수 있으므로 이 주체의 칸 전체 합으로 본다.
+        let settled: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows",
+        )
+        .fetch_one(h.db.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(settled, 120);
         h.close().await;
     }
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn deepseek_unresolved_time_is_unknown_not_fixed_or_zero() {
+async fn deepseek_settles_at_catalog_price_and_never_blocks_the_principal() {
+    // DeepSeek도 받을 때의 카탈로그 가격으로 바로 정산한다. 없앤 시간대 규칙처럼 unknown으로 남겨 주체를 막지 않는다.
     for stream in [false, true] {
-        let h = Harness::with_config(configuration_options(
-            true,
-            "deepseek_time_unresolved_v1",
-            "",
-        ))
-        .await;
-        set(&h, &native(stream), stream).await;
-        let r = h.request(PATH, raw(stream, None)).send().await.unwrap();
-        assert_eq!(r.status(), 200);
-        assert_eq!(r.bytes().await.unwrap(), native(stream));
-        unknown(&h).await;
-        let row=sqlx::query("SELECT pricing_snapshot,execution_snapshot FROM gw_requests WHERE accounting_state='unknown'").fetch_one(h.db.store.pool()).await.unwrap();
-        let p: serde_json::Value = row.get("pricing_snapshot");
-        let e: serde_json::Value = row.get("execution_snapshot");
-        assert_eq!(p["billing_time_rule"], "deepseek_time_unresolved_v1");
-        assert!(e["cost_bound_usd"].is_null());
-        h.close().await;
-    }
-    for (verified, time) in [
-        (false, "fixed_admission_v1"),
-        (true, "deepseek_time_unresolved_v1"),
-    ] {
-        let h = Harness::with_config(configuration_options(verified, time, "")).await;
-        strict(&h).await;
-        let r = h.request(PATH, BODY).send().await.unwrap();
-        assert_eq!(r.status(), 400);
-        assert_eq!(
-            r.headers()["x-gateway-error-code"],
-            "unsupported_strict_policy"
-        );
-        r.bytes().await.unwrap();
-        assert_eq!(state(&h).await.0, 0);
-        assert!(h.provider.calls.lock().await.is_empty());
-        h.close().await;
+        for limited in [false, true] {
+            let h = Harness::new().await;
+            if limited {
+                budget_and_tpm(&h).await;
+            }
+            set(&h, &native(stream), stream).await;
+            for n in 1..=2i64 {
+                let r = h.request(PATH, raw(stream, None)).send().await.unwrap();
+                assert_eq!(r.status(), 200, "stream={stream} limited={limited} n={n}");
+                assert_eq!(r.bytes().await.unwrap(), native(stream));
+                assert_eq!(
+                    state(&h).await,
+                    (n, 0, format!("0.{:012}", n * 120_000_000), n * 100, n * 20)
+                );
+            }
+            let rows = sqlx::query("SELECT accounting_state,cost_usd::text AS cost,pricing_snapshot,execution_snapshot FROM gw_requests").fetch_all(h.db.store.pool()).await.unwrap();
+            let calls = h.provider.calls.lock().await.len();
+            h.close().await;
+            assert_eq!(calls, 2);
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.get::<String, _>("accounting_state"), "settled");
+                assert_eq!(row.get::<String, _>("cost"), "0.000120000000");
+                let p: serde_json::Value = row.get("pricing_snapshot");
+                let e: serde_json::Value = row.get("execution_snapshot");
+                assert_eq!(p["billing_time_rule"], "fixed_admission_v1");
+                // 비용 상한은 max_input_tokens×가장 비싼 입력 요율 + max_tokens×출력 요율이다.
+                assert_eq!(e["cost_bound_usd"], "0.004296000000");
+                assert!(e["input_bound_tokens"].is_null());
+            }
+        }
     }
 }
 #[tokio::test]
@@ -559,7 +595,7 @@ fn limits() -> serde_json::Value {
 }
 async fn key(h: &Harness, service: Option<uuid::Uuid>) -> (String, uuid::Uuid) {
     let mut input = finance::with_credentials(
-        serde_json::json!({"name":"합성 DeepSeek key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"actual","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":null,"count_rpm":null}}),
+        serde_json::json!({"name":"합성 DeepSeek key","validity":"3_months","grants":grants(),"limits":{"budget":{"limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":null,"count_rpm":null}}),
     );
     if let Some(service) = service {
         input["service_principal_id"] = service.to_string().into();
@@ -595,14 +631,15 @@ async fn deepseek_personal_and_service_keys_apply_both_scopes_owner_and_revoke()
         assert_eq!(r.status(), 200);
         r.bytes().await.unwrap();
         h.runtime.wait_requests().await;
+        // 사용자 scope와 키 scope가 같은 금액으로 함께 정산된다.
         let b = sqlx::query(
-        "SELECT count(*) AS n,min(remaining_reservation_usd)::text AS held FROM gw_request_budgets",
-    )
-    .fetch_one(h.db.store.pool())
-    .await
-    .unwrap();
+            "SELECT count(*) AS n,count(*) FILTER(WHERE state='settled' AND applied_cost_usd=0.00012) AS settled FROM gw_request_budgets",
+        )
+        .fetch_one(h.db.store.pool())
+        .await
+        .unwrap();
         assert_eq!(b.get::<i64, _>("n"), 2);
-        assert_eq!(b.get::<String, _>("held"), "0.000000000000");
+        assert_eq!(b.get::<i64, _>("settled"), 2);
         let(status,v)=api(&h,reqwest::Method::POST,"/api/admin/principals",Some(serde_json::json!({"display_name":"합성 DeepSeek service","management_owner_id":h.principal}))).await;
         assert_eq!(status, 201);
         let service: uuid::Uuid = v["target"]["id"].as_str().unwrap().parse().unwrap();
@@ -656,12 +693,13 @@ async fn deepseek_personal_and_service_keys_apply_both_scopes_owner_and_revoke()
     }
 }
 
-async fn reservation(h: &Harness) {
-    let r=sqlx::query("SELECT r.phase,b.reservation_usd::text AS amount,b.remaining_reservation_usd::text AS held,b.reserved_tokens FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) ORDER BY admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
+/// 마지막 요청이 보내는 중이다. 실행 중인 요청은 금액이나 토큰을 잡아 두지 않으므로 이번 기간 장부는 비어 있다.
+async fn dispatching(h: &Harness) {
+    let r=sqlx::query("SELECT r.phase,b.state,t.cost_usd::text AS cost,t.settled_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start ORDER BY r.admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(r.get::<String, _>("phase"), "dispatching");
-    assert_eq!(r.get::<String, _>("amount"), "0.004296000000");
-    assert_eq!(r.get::<String, _>("held"), "0.004296000000");
-    assert_eq!(r.get::<i64, _>("reserved_tokens"), 4196);
+    assert_eq!(r.get::<String, _>("state"), "active");
+    assert_eq!(r.get::<String, _>("cost"), "0.000000000000");
+    assert_eq!(r.get::<i64, _>("settled_count"), 0);
 }
 
 fn chat_start() -> String {
@@ -669,10 +707,10 @@ fn chat_start() -> String {
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn deepseek_full_queue_cancel_has_no_synthetic_terminal_and_holds_unknown_reservation() {
+async fn deepseek_full_queue_cancel_has_no_synthetic_terminal_and_stays_unknown() {
     use std::time::Duration;
-    let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-    strict(&h).await;
+    let h = Harness::new().await;
+    budget_and_tpm(&h).await;
     let (tx, stopped) = h.provider.stream().await;
     let socket = tokio::net::TcpStream::connect(h.base.trim_start_matches("http://"))
         .await
@@ -701,7 +739,7 @@ async fn deepseek_full_queue_cancel_has_no_synthetic_terminal_and_holds_unknown_
     tx.send(Bytes::from(chat_start())).await.unwrap();
     let response = r.await.unwrap();
     assert_eq!(response.status(), 200);
-    reservation(&h).await;
+    dispatching(&h).await;
     let producer = tokio::spawn(async move {
         for _ in 1..=256 {
             let wire = format!(
@@ -757,12 +795,10 @@ async fn deepseek_full_queue_cancel_has_no_synthetic_terminal_and_holds_unknown_
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn deepseek_absolute_transport_deadline_preserves_five_second_finalization_gap() {
     let cfg = configuration_options(
-        true,
-        "fixed_admission_v1",
         "\nlimits:\n  transport_timeout_ms: 1500\n  request_timeout_ms: 6500\n  body_timeout_ms: 1500\n  body_idle_timeout_ms: 1500\n",
     );
     let h = Harness::with_config(cfg).await;
-    strict(&h).await;
+    budget_and_tpm(&h).await;
     let (tx, stopped) = h.provider.stream().await;
     tx.send(Bytes::from(chat_start())).await.unwrap();
     let r = h
@@ -778,7 +814,7 @@ async fn deepseek_absolute_transport_deadline_preserves_five_second_finalization
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    reservation(&h).await;
+    dispatching(&h).await;
     assert!(r.bytes().await.is_err());
     tokio::time::timeout(std::time::Duration::from_secs(1), stopped)
         .await
@@ -790,6 +826,45 @@ async fn deepseek_absolute_transport_deadline_preserves_five_second_finalization
     assert!(row.get::<bool, _>("stopped"));
     assert_eq!(row.get::<i64, _>("gap"), 5);
     drop(tx);
+    h.close().await;
+}
+/// 끊긴 요청 규칙은 이번 단계에서 Anthropic만 쓴다(결정 0005 13번). 첫 chunk 뒤에 client가 끊은 DeepSeek
+/// 스트림은 규칙을 기록하지 않고 받은 출력도 세지 않는다. 미정산으로 남기고 사용자를 막는다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn deepseek_stream_cut_after_first_chunk_stays_unknown_and_blocks() {
+    let h = Harness::new().await;
+    budget_and_tpm(&h).await;
+    let first = chat_start();
+    let (tx, stopped) = h.provider.stream().await;
+    tx.send(Bytes::from(first.clone())).await.unwrap();
+    let mut r = h.request(PATH, raw(true, None)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let mut received = Vec::new();
+    while received.len() < first.len() {
+        received.extend_from_slice(&r.chunk().await.unwrap().unwrap());
+    }
+    assert_eq!(received, first.as_bytes());
+    drop(r);
+    tokio::time::timeout(std::time::Duration::from_secs(3), stopped)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(tx);
+    h.runtime.wait_requests().await;
+    let row: (Option<String>, String, String) = sqlx::query_as(
+        "SELECT execution_snapshot->>'cutoff_rule',outcome,reason_code FROM gw_requests",
+    )
+    .fetch_one(h.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(row, (None, "cancelled".into(), "client_cancelled".into()));
+    // 다음 요청은 송신하지 않는다(unknown이 확인). 받은 내용을 세는 count 요청도 없다.
+    unknown(&h).await;
+    let calls = h.provider.calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    assert!(calls.iter().all(|c| !c.path.ends_with("/count_tokens")));
+    drop(calls);
     h.close().await;
 }
 
@@ -810,11 +885,11 @@ async fn deepseek_uncertain_dispatch_original_id_expires_unknown_without_reissui
     for api in [ApiKind::DeepseekChat] {
         let db = postgres::TestDb::new().await;
         let principal = finance::human(db.store.pool()).await;
-        sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode='actual',budget_limit_usd=1,tpm_limit=NULL WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=1,tpm_limit=NULL WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
         let current = finance::current(db.store.pool(), principal).await;
         let proxy = pg_proxy::CommitProxy::new().await;
         let store = db.clock_store(Some(proxy.port)).await;
-        let cfg = configuration_options(true, "fixed_admission_v1", "");
+        let cfg = configuration();
         let profile = cfg.providers()[0]
             .profiles
             .iter()
@@ -875,9 +950,8 @@ async fn deepseek_uncertain_dispatch_original_id_expires_unknown_without_reissui
             Some(Finalized::Unknown)
         );
         assert_eq!(second.recover_expired(spec.id).await.unwrap(), None);
-        let row=sqlx::query("SELECT r.accounting_state,b.remaining_reservation_usd::text AS held,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
+        let row=sqlx::query("SELECT r.accounting_state,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
         assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
-        assert_eq!(row.get::<String, _>("held"), "0.000000000000");
         assert!(row.get::<String, _>("period").starts_with("2025-03-01"));
         assert_eq!(row.get::<i64, _>("unknown_count"), 1);
         assert!(provider.calls.lock().await.is_empty());
@@ -890,7 +964,7 @@ async fn deepseek_uncertain_dispatch_original_id_expires_unknown_without_reissui
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn deepseek_usage_and_terminal_negative_matrix_keeps_unknown_reservation() {
+async fn deepseek_usage_and_terminal_negative_matrix_stays_unknown_without_tokens() {
     for kind in [
         "missing_usage",
         "hit_miss",
@@ -904,8 +978,8 @@ async fn deepseek_usage_and_terminal_negative_matrix_keeps_unknown_reservation()
         "malformed",
         "early_tier",
     ] {
-        let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-        strict(&h).await;
+        let h = Harness::new().await;
+        budget_and_tpm(&h).await;
         let mut value: serde_json::Value = serde_json::from_str(&native(false)).unwrap();
         let stream = matches!(
             kind,
@@ -930,12 +1004,9 @@ async fn deepseek_usage_and_terminal_negative_matrix_keeps_unknown_reservation()
         assert!([200, 502].contains(&r.status().as_u16()));
         let _ = r.bytes().await;
         unknown(&h).await;
-        let row:(String,i64)=sqlx::query_as("SELECT remaining_reservation_usd::text,remaining_reserved_tokens FROM test_user_request_budgets WHERE state='unknown'").fetch_one(h.db.store.pool()).await.unwrap();
-        assert_eq!(
-            row,
-            ("0.004296000000".into(), 4196),
-            "unknown 예약 보존: {kind}"
-        );
+        // unknown 요청은 금액도 분당 토큰 칸도 채우지 않는다. 뒤이은 차단 요청은 0으로 정산된다.
+        let row:(i64,String,i64)=sqlx::query_as("SELECT count(*) FILTER(WHERE state='unknown')::bigint,(SELECT cost_usd::text FROM test_user_usage_totals),(SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows) FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+        assert_eq!(row, (1, "0.000000000000".into(), 0), "unknown 장부: {kind}");
         h.close().await;
     }
 }
@@ -1048,8 +1119,17 @@ async fn deepseek_company_auth_redirect_encoding_and_native_errors_never_retry()
                 assert!(!String::from_utf8_lossy(&bytes).contains("synthetic-"));
             }
         }
-        unknown(&h).await;
-        assert_eq!(h.provider.calls.lock().await.len(), 1);
+        // 해석하지 못한 응답(gzip)만 미정산이다. 인증 오류·redirect·연결 끊김·HTTP 오류는 0원으로 정산한다.
+        let blocked = kind == "encoding";
+        if blocked {
+            unknown(&h).await;
+        } else {
+            no_response(&h).await;
+        }
+        assert_eq!(
+            h.provider.calls.lock().await.len(),
+            if blocked { 1 } else { 2 }
+        );
         assert!(target.calls.lock().await.is_empty());
         h.close().await;
     }
@@ -1083,8 +1163,8 @@ async fn failed_unknown(h: &Harness) {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL and fixed SDK"]
 async fn deepseek_native_error_sdk_abort_preserves_failed_and_no_final_usage() {
     for named in [false, true] {
-        let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-        strict(&h).await;
+        let h = Harness::new().await;
+        budget_and_tpm(&h).await;
         let (tx, stopped) = h.provider.stream().await;
         tx.send(Bytes::from(error_wire(named, 50000, "\r\n")))
             .await
@@ -1110,9 +1190,8 @@ async fn deepseek_native_error_sdk_abort_preserves_failed_and_no_final_usage() {
 async fn deepseek_native_error_wire_and_size_shape_boundaries() {
     for (named, ending) in [(false, "\n"), (true, "\r\n"), (true, "\r")] {
         for size in [65535, 65536, 65537] {
-            let h =
-                Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-            strict(&h).await;
+            let h = Harness::new().await;
+            budget_and_tpm(&h).await;
             let empty = error_wire(named, 0, ending);
             let wire = error_wire(named, size - empty.len(), ending);
             assert_eq!(wire.len(), size);
@@ -1314,7 +1393,7 @@ async fn deepseek_unknown_spans_next_month_other_providers() {
         .execute(store.pool())
         .await
         .unwrap();
-    let cfg = configuration_options(true, "fixed_admission_v1", "");
+    let cfg = configuration();
     let current = finance::current(store.pool(), id).await;
     let ledger = PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
     let profile = cfg.providers()[0].profiles[0].clone();
@@ -1351,12 +1430,10 @@ async fn deepseek_unknown_spans_next_month_other_providers() {
         let mut provider_spec = RequestSpec::from_profile(provider, &p, Some(100));
         if provider == ProviderId::Openai {
             p.api = ApiKind::OpenaiChat;
-            p.billing_time_rule = None;
             provider_spec = RequestSpec::from_profile(provider, &p, Some(100));
         }
         if provider == ProviderId::Anthropic {
             p.api = ApiKind::Messages;
-            p.billing_time_rule = None;
             provider_spec = RequestSpec::from_profile(provider, &p, Some(100));
         }
         ledger
@@ -1426,8 +1503,8 @@ async fn deepseek_cookie_bad_credentials_and_other_methods_never_dispatch() {
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn deepseek_verified_alias_and_output_bound_violation_remain_independent() {
-    let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-    strict(&h).await;
+    let h = Harness::new().await;
+    budget_and_tpm(&h).await;
     let wire = native(false).replace("synthetic-text", "synthetic-deepseek-version");
     set(&h, &wire, false).await;
     let r = h.request(PATH, BODY).send().await.unwrap();
@@ -1556,14 +1633,8 @@ async fn deepseek_review_r1_effective_thinking_http_pg() {
         } else {
             "client_tools, cache, json_schema"
         };
-        let h = Harness::with_config(configuration_features(
-            true,
-            "fixed_admission_v1",
-            "",
-            features,
-        ))
-        .await;
-        strict(&h).await;
+        let h = Harness::with_config(configuration_features("", features)).await;
+        budget_and_tpm(&h).await;
         sqlx::query("UPDATE gw_policies SET tpm_limit=100000,rpm_limit=100 WHERE key_id IS NULL")
             .execute(h.db.store.pool())
             .await
@@ -1648,16 +1719,22 @@ async fn deepseek_review_r1_effective_thinking_http_pg() {
                 count * 20
             )
         );
-        let left:(String,i64,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows),(SELECT settled_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
-        assert_eq!(left, ("0.000000000000".into(), 0, count * 120));
+        // 정산한 토큰은 정산한 1분 칸에 쌓인다. 여러 칸에 걸칠 수 있으므로 합으로 본다.
+        let settled: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows",
+        )
+        .fetch_one(h.db.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(settled, count * 120);
         h.close().await;
     }
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn deepseek_review_r2_top_p_http_pg() {
-    let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-    strict(&h).await;
+    let h = Harness::new().await;
+    budget_and_tpm(&h).await;
     let wire = nonthinking_native(false);
     set(&h, &wire, false).await;
     let body = |value: &str| {
@@ -1690,8 +1767,14 @@ async fn deepseek_review_r2_top_p_http_pg() {
         assert_eq!(h.provider.calls.lock().await.last().unwrap().body, b);
     }
     assert_eq!(state(&h).await, (4, 0, "0.000480000000".into(), 400, 80));
-    let left:(String,i64,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows),(SELECT settled_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(left, ("0.000000000000".into(), 0, 480));
+    // 정산한 토큰은 정산한 1분 칸에 쌓인다. 여러 칸에 걸칠 수 있으므로 합으로 본다.
+    let settled: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows",
+    )
+    .fetch_one(h.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(settled, 480);
     h.close().await;
 }
 
@@ -1765,9 +1848,13 @@ fn feature_native(stream: bool, tool: bool, thinking: bool) -> String {
     wire.push_str("data: [DONE]\n\n");
     wire
 }
-async fn assert_held_feature(h: &Harness) {
-    let held:(String,i64)=sqlx::query_as("SELECT reserved_usd::text,(SELECT reserved_tokens FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(held, ("0.004296000000".into(), 4196));
+/// Provider 응답을 붙잡은 동안의 장부다. 실행 중인 요청은 금액이나 토큰을 잡아 두지 않는다.
+async fn assert_running_feature(h: &Harness) {
+    let running:(String,String,i64,i64)=sqlx::query_as("SELECT (SELECT phase FROM gw_requests),cost_usd::text,settled_count,(SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(
+        running,
+        ("dispatching".into(), "0.000000000000".into(), 0, 0)
+    );
 }
 async fn assert_settled_features(h: &Harness, count: i64) {
     assert_eq!(
@@ -1780,26 +1867,21 @@ async fn assert_settled_features(h: &Harness, count: i64) {
             count * 20
         )
     );
-    // 한 scope/lane도 정상 호출 사이에 분창이 바뀔 수 있다. 원래 budget 창 집합을 중복 없이 검사한다.
-    let windows: Vec<(i64, i64, i64)> = sqlx::query_as("WITH expected AS (SELECT scope_id,rate_lane,rate_start,sum(applied_input_tokens+applied_output_tokens)::bigint AS tokens FROM test_user_request_budgets GROUP BY scope_id,rate_lane,rate_start) SELECT e.tokens,w.settled_tokens,w.reserved_tokens FROM expected e JOIN test_user_rate_windows w ON w.scope_id=e.scope_id AND w.lane=e.rate_lane AND w.window_start=e.rate_start").fetch_all(h.db.store.pool()).await.unwrap();
-    let counts:(i64,i64)=sqlx::query_as("SELECT count(*)::bigint,(SELECT count(*) FROM (SELECT DISTINCT scope_id,rate_lane,rate_start FROM test_user_request_budgets) b)::bigint FROM test_user_rate_windows").fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(counts, (windows.len() as i64, windows.len() as i64));
+    // 한 scope/lane도 정상 호출 사이에 분창이 바뀔 수 있다. 토큰은 받은 칸이 아니라 정산한 칸(finished_at의 1분 칸)에 쌓인다.
+    // 칸마다 그 칸에서 정산한 요청의 토큰 합과 같아야 한다.
+    let windows: Vec<(i64, i64)> = sqlx::query_as("SELECT COALESCE((SELECT sum(b.applied_input_tokens+b.applied_output_tokens) FROM test_user_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE b.scope_id=w.scope_id AND b.rate_lane=w.lane AND b.state='settled' AND to_timestamp(floor(extract(epoch FROM r.finished_at)/60)*60)=w.window_start),0)::bigint,w.settled_tokens FROM test_user_rate_windows w").fetch_all(h.db.store.pool()).await.unwrap();
+    // 받은 수는 여전히 받은 칸에서 센다. 받은 칸이나 정산한 칸이 아닌 칸은 없다.
+    let counts:(i64,i64)=sqlx::query_as("SELECT COALESCE(sum(admitted_count),0)::bigint,count(*) FILTER(WHERE NOT EXISTS(SELECT 1 FROM test_user_request_budgets b JOIN gw_requests r ON r.id=b.request_id WHERE b.scope_id=w.scope_id AND b.rate_lane=w.lane AND (b.rate_start=w.window_start OR to_timestamp(floor(extract(epoch FROM r.finished_at)/60)*60)=w.window_start)))::bigint FROM test_user_rate_windows w").fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(counts, (count, 0));
     assert!(!windows.is_empty());
     let mut settled = 0;
-    for (expected, actual, reserved) in windows {
+    for (expected, actual) in windows {
         assert_eq!(actual, expected);
-        assert_eq!(reserved, 0);
         settled += actual;
     }
     assert_eq!(settled, count * 120);
-    let budget:(i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE reservation_usd=0.004296 AND reserved_tokens=4196 AND remaining_reservation_usd=0 AND remaining_reserved_tokens=0 AND applied_cost_usd=0.00012 AND state='settled')::bigint,(SELECT count(*) FROM gw_usage_events WHERE kind='final') FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE applied_cost_usd=0.00012 AND applied_input_tokens=100 AND applied_output_tokens=20 AND state='settled')::bigint,(SELECT count(*) FROM gw_usage_events WHERE kind='final') FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(budget, (count, count, count));
-    let reserved: String =
-        sqlx::query_scalar("SELECT reserved_usd::text FROM test_user_usage_totals")
-            .fetch_one(h.db.store.pool())
-            .await
-            .unwrap();
-    assert_eq!(reserved, "0.000000000000");
     let calls = h.provider.calls.lock().await;
     assert_eq!(calls.len(), count as usize);
     for call in calls.iter() {
@@ -1821,9 +1903,8 @@ async fn assert_settled_features(h: &Harness, count: i64) {
 async fn deepseek_review_r3_tool_json_outputs_wire_pg_and_followup() {
     for stream in [false, true] {
         for (tool, thinking) in [(true, false), (true, true), (false, false), (false, true)] {
-            let h =
-                Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-            strict(&h).await;
+            let h = Harness::new().await;
+            budget_and_tpm(&h).await;
             let wire = feature_native(stream, tool, thinking);
             set(&h, &wire, stream).await;
             let (started, release) = h.provider.hold_response().await;
@@ -1831,7 +1912,7 @@ async fn deepseek_review_r3_tool_json_outputs_wire_pg_and_followup() {
             let pending = h.request(PATH, body.clone()).send();
             tokio::pin!(pending);
             tokio::select! {r=&mut pending=>panic!("feature dispatch 전 응답 {}",r.is_ok()),_=started=>{}}
-            assert_held_feature(&h).await;
+            assert_running_feature(&h).await;
             release.send(()).unwrap();
             let r = pending.await.unwrap();
             assert_eq!(r.status(), 200);
@@ -1890,8 +1971,8 @@ async fn deepseek_review_r3_fixed_sdk_tool_arguments_json_and_tool_result_follow
         ("json_plain", false, false, false),
         ("json_stream", true, false, false),
     ] {
-        let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-        strict(&h).await;
+        let h = Harness::new().await;
+        budget_and_tpm(&h).await;
         // 첫 응답만 channel로 보내고 두 번째 tool-result 회차는 정상 후속 응답을 쓴다.
         let follow = if thinking {
             native(false)
@@ -1910,7 +1991,7 @@ async fn deepseek_review_r3_fixed_sdk_tool_arguments_json_and_tool_result_follow
             let pending = sdk(&h, kind, 200, "completed", &token);
             tokio::pin!(pending);
             tokio::select! { _=&mut pending=>panic!("SDK feature dispatch 전 종료"),_=started=>{} }
-            assert_held_feature(&h).await;
+            assert_running_feature(&h).await;
             release.send(()).unwrap();
             let wire = feature_native(stream, tool, thinking);
             let send = async {
@@ -2002,15 +2083,13 @@ async fn s9_sdk_error_matrix_measures_company_auth_and_zero_refresh_retry() {
 async fn s9_upstream_idle_timeout_is_504_before_headers_and_incomplete_after_headers() {
     let cfg = || {
         configuration_options(
-            true,
-            "fixed_admission_v1",
             "\nlimits:\n  transport_timeout_ms: 130000\n  request_timeout_ms: 135000\n",
         )
     };
     let h0 = Harness::with_config(cfg()).await;
     let h1 = Harness::with_config(cfg()).await;
-    strict(&h0).await;
-    strict(&h1).await;
+    budget_and_tpm(&h0).await;
+    budget_and_tpm(&h1).await;
     let (started, release) = h0.provider.hold_response().await;
     let (stream, stopped) = h1.provider.stream().await;
     let first = chat_start();
@@ -2076,21 +2155,23 @@ async fn s9_upstream_idle_timeout_is_504_before_headers_and_incomplete_after_hea
     .await
     .unwrap();
     assert!(began.elapsed() >= std::time::Duration::from_secs(119));
-    for h in [&h0, &h1] {
+    for (h, headers) in [(&h0, false), (&h1, true)] {
         assert_eq!(h.provider.calls.lock().await.len(), 1);
-        let held:(String,String,String,i64,i64)=sqlx::query_as("SELECT r.phase,b.reservation_usd::text,b.remaining_reservation_usd::text,b.reserved_tokens,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").fetch_one(h.db.store.pool()).await.unwrap();
-        assert_eq!(
-            held,
-            (
-                "finished".into(),
-                "0.004296000000".into(),
-                "0.004296000000".into(),
-                4196,
-                4196
-            )
-        );
+        let finished:(String,String)=sqlx::query_as("SELECT r.phase,b.state FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").fetch_one(h.db.store.pool()).await.unwrap();
         let state:(i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE accounting_state='unknown' AND cost_usd IS NULL)::bigint FROM gw_requests").fetch_one(h.db.store.pool()).await.unwrap();
-        assert_eq!(state, (1, 1));
+        if headers {
+            // 첫 event 뒤에 끊긴 DeepSeek 스트림은 사용량을 알 수 없어 미정산이다.
+            assert_eq!(finished, ("finished".into(), "unknown".into()));
+            assert_eq!(state, (1, 1));
+        } else {
+            // 응답 헤더 전에 기한으로 끊긴 비스트림 요청은 0원으로 정산한다(결정 0005).
+            assert_eq!(finished, ("finished".into(), "settled".into()));
+            assert_eq!(state, (1, 0));
+            assert_eq!(
+                finance::last_settlement(h.db.store.pool()).await,
+                finance::no_response()
+            );
+        }
         let resources = h.runtime.request_resources();
         assert_eq!(
             (
@@ -2103,7 +2184,7 @@ async fn s9_upstream_idle_timeout_is_504_before_headers_and_incomplete_after_hea
         assert_eq!(h.runtime.available_inference(), 16);
     }
     eprintln!(
-        "S9_UPSTREAM_IDLE_OK elapsed_ms={} h0_status=504 h1_status=200 provider_calls=2 unknown=2",
+        "S9_UPSTREAM_IDLE_OK elapsed_ms={} h0_status=504 h1_status=200 provider_calls=2 unknown=1",
         began.elapsed().as_millis()
     );
     h0.close().await;
@@ -2118,9 +2199,8 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
         (format!("event: {}\n", "x".repeat(129)), "stream_limit"),
     ] {
         for mode in ["h0", "h1", "sdk"] {
-            let h =
-                Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-            strict(&h).await;
+            let h = Harness::new().await;
+            budget_and_tpm(&h).await;
             let body = raw(true, None);
             let prefix = chat_start();
             let (tx, stopped) = h.provider.stream().await;
@@ -2170,15 +2250,24 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
             .fetch_one(h.db.store.pool())
             .await
             .unwrap();
-            assert_eq!(
-                row,
-                ("finished".into(), code.into(), "unknown".into(), true)
-            );
-            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
-            assert_eq!(
-                held,
-                ("0.004296000000".into(), "0.004296000000".into(), 4196, 4196)
-            );
+            let budget:(String,i64)=sqlx::query_as("SELECT state,(SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows) FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
+            if code == "stream_limit" && mode != "h1" {
+                // 첫 event 전에 크기 한도로 끊긴 스트림은 0원으로 정산한다(결정 0005). 토큰은 쌓지 않는다.
+                assert_eq!((row.0.as_str(), row.1.as_str()), ("finished", code));
+                assert_eq!(
+                    finance::last_settlement(h.db.store.pool()).await,
+                    finance::no_response()
+                );
+                assert_eq!(budget, ("settled".into(), 0));
+            } else {
+                // 문법 오류, 그리고 첫 event 뒤의 DeepSeek 끊김은 사용량을 알 수 없어 미정산이다.
+                assert_eq!(
+                    row,
+                    ("finished".into(), code.into(), "unknown".into(), true)
+                );
+                // unknown 요청은 분당 토큰 칸을 채우지 않는다.
+                assert_eq!(budget, ("unknown".into(), 0));
+            }
             assert_eq!(h.provider.calls.lock().await.len(), 1);
             assert_eq!(h.runtime.available_inference(), 16);
             assert_eq!(h.runtime.request_resources().body_bytes, 0);
@@ -2189,9 +2278,9 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_reservation() {
-    let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-    strict(&h).await;
+async fn s9_verified_terminal_before_stream_limit_settles_once() {
+    let h = Harness::new().await;
+    budget_and_tpm(&h).await;
 
     let body = raw(true, None);
     let native = native(true);
@@ -2242,12 +2331,10 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
             Some("0.000120000000".into())
         )
     );
-    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(
-        budget,
-        ("0.000000000000".into(), 0, 0, "0.000120000000".into(), 1)
-    );
-    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(i64,String,i64)=sqlx::query_as("SELECT t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(budget, (0, "0.000120000000".into(), 1));
+    // 정산한 토큰은 정산한 1분 칸에 쌓인다. 이 scope의 칸 전체 합으로 본다.
+    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(final_state, ("failed".into(), "provider".into(), 120));
     h.provider
         .set(
@@ -2272,19 +2359,15 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
-    let h = Harness::with_config(configuration_options(
-        true,
-        "deepseek_time_unresolved_v1",
-        "",
-    ))
-    .await;
+    let h = Harness::new().await;
     sqlx::query("UPDATE gw_policies SET tpm_limit=100000 WHERE key_id IS NULL")
         .execute(h.db.store.pool())
         .await
         .unwrap();
 
     let body = raw(true, None);
-    let native = native(true);
+    // 가격표에 없는 실제 모델의 완전한 usage는 값을 매길 수 없다. stream limit 뒤에도 정산으로 올리지 않는다.
+    let native = native(true).replace("synthetic-text", "synthetic-unpriced");
     let (tx, stopped) = h.provider.stream().await;
     tx.send(Bytes::from(native.clone())).await.unwrap();
     let mut r = h.request(PATH, body.clone()).send().await.unwrap();
@@ -2309,18 +2392,9 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
     stopped.await.unwrap();
     drop(tx);
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(
-        row,
-        (
-            "stream_limit".into(),
-            "unknown".into(),
-            true,
-            "0.000000000000".into(),
-            4196,
-            1
-        )
-    );
+    // unknown 요청은 분당 토큰 칸을 채우지 않는다.
+    let row:(String,String,bool,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,t.unknown_count,(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(row, ("stream_limit".into(), "unknown".into(), true, 1, 0));
     let blocked = h.request(PATH, body).send().await.unwrap();
     assert_eq!(blocked.status(), 403);
     assert_eq!(
@@ -2336,11 +2410,13 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
 
 #[path = "support/s9_finality.rs"]
 mod s9_finality;
+/// 이 Provider에는 끊긴 요청 규칙이 없다. 첫 event 뒤에 끊긴 스트림은 미정산으로 남기고 막는다(결정 0005).
+const S9_CUTOFF: Option<(&str, i64)> = None;
 async fn s9_finality_fixture(
     _incomplete: bool,
 ) -> (Harness, &'static str, String, String, String, &'static str) {
-    let h = Harness::with_config(configuration_options(true, "fixed_admission_v1", "")).await;
-    strict(&h).await;
+    let h = Harness::new().await;
+    budget_and_tpm(&h).await;
     (
         h,
         PATH,
@@ -2357,36 +2433,47 @@ fn s9_native_error_tail(length: usize) -> String {
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s9_deepseek_feature_accounting_checks_each_original_rate_window() {
-    let h = Harness::with_clock(configuration_options(true, "fixed_admission_v1", "")).await;
-    strict(&h).await;
+async fn s9_deepseek_feature_tokens_count_in_the_settlement_minute() {
+    let h = Harness::with_clock(configuration()).await;
+    budget_and_tpm(&h).await;
     sqlx::query("UPDATE gw_fixture_clock SET observed='2025-03-15T12:00:00Z'")
         .execute(h.database.pool())
         .await
         .unwrap();
-    for step in [0, 1] {
-        if step == 1 {
-            sqlx::query("UPDATE gw_fixture_clock SET observed=observed+interval '60 seconds'")
-                .execute(h.database.pool())
-                .await
-                .unwrap();
-        }
-        set(&h, &native(false), false).await;
-        let r = h.request(PATH, raw(false, None)).send().await.unwrap();
-        assert_eq!(r.status(), 200);
-        let _ = r.bytes().await.unwrap();
-        h.runtime.wait_requests().await;
-    }
-    let windows:(i64,i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(DISTINCT scope_id)::bigint,count(DISTINCT lane)::bigint,count(DISTINCT window_start)::bigint FROM test_user_rate_windows").fetch_one(h.database.pool()).await.unwrap();
-    assert_eq!(windows, (2, 1, 1, 2));
-    // 원래 helper의 단일행 가정을 두 정상 분창으로 직접 반증한다.
+    // 첫 요청은 12:00에 받는다. Provider 응답을 붙잡은 동안 시계를 12:01로 옮겨 그 분에 정산되게 한다.
+    set(&h, &native(false), false).await;
+    let (started, release) = h.provider.hold_response().await;
+    let pending = h.request(PATH, raw(false, None)).send();
+    tokio::pin!(pending);
+    tokio::select! {r=&mut pending=>panic!("dispatch 전 응답 {}",r.is_ok()),_=started=>{}}
+    sqlx::query("UPDATE gw_fixture_clock SET observed=observed+interval '60 seconds'")
+        .execute(h.database.pool())
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let r = pending.await.unwrap();
+    assert_eq!(r.status(), 200);
+    let _ = r.bytes().await.unwrap();
+    h.runtime.wait_requests().await;
+    // 두 번째 요청은 12:01에 받고 그 분에 정산한다.
+    let r = h.request(PATH, raw(false, None)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let _ = r.bytes().await.unwrap();
+    h.runtime.wait_requests().await;
+    // 받은 수는 받은 분 칸에, 토큰은 정산한 분 칸에 쌓인다. 첫 요청의 토큰은 받은 12:00 칸에 남지 않는다.
+    let windows: Vec<(String, i64, i64)> = sqlx::query_as("SELECT to_char(window_start AT TIME ZONE 'UTC','HH24:MI'),admitted_count,settled_tokens FROM test_user_rate_windows ORDER BY window_start").fetch_all(h.database.pool()).await.unwrap();
+    // 공용 helper도 두 분 칸에 걸친 정산을 정산한 분 기준으로 검사한다.
     use futures_util::FutureExt;
     let result = std::panic::AssertUnwindSafe(assert_settled_features(&h, 2))
         .catch_unwind()
         .await;
     h.close().await;
+    assert_eq!(
+        windows,
+        vec![("12:00".into(), 1, 0), ("12:01".into(), 1, 240)]
+    );
     assert!(
         result.is_ok(),
-        "합법적인 두 원래 rate 창의 feature 정산 검사가 실패했다"
+        "두 분 칸에 걸친 feature 정산 검사가 실패했다"
     );
 }

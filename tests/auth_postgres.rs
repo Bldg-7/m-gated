@@ -516,7 +516,7 @@ async fn principal_policy_constraints_and_migration_are_real_sql() {
     let service = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','service',$2)").bind(service).bind(id).execute(db.store.pool()).await.unwrap();
     let scope = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','actual','calendar_month','UTC',$2)").bind(scope).bind(id).execute(db.store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','calendar_month','UTC',$2)").bind(scope).bind(id).execute(db.store.pool()).await.unwrap();
     for assignment in [
         "allow_rules='{}'",
         "rpm_limit=0",
@@ -538,7 +538,7 @@ async fn principal_policy_constraints_and_migration_are_real_sql() {
         .fetch_one(db.store.pool())
         .await
         .unwrap();
-    assert_eq!(count, 13);
+    assert_eq!(count, 16);
     sqlx::query("UPDATE gw_schema_migrations SET checksum=decode(repeat('00',32),'hex')")
         .execute(db.store.pool())
         .await

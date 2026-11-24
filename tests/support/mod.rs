@@ -29,10 +29,6 @@ providers:
         fixture_version: text-v1
         actual_models:
           - synthetic-text
-        input_bound_contract:
-          kind: anthropic_context_v1
-          context_tokens: 4096
-          input_categories: [input, cache_read, cache_write]
         max_input_tokens: 4096
         max_output_tokens: 1024
         max_body_bytes: 8388608

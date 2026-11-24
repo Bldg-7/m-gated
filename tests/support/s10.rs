@@ -383,7 +383,7 @@ async fn owner_before_service_nowait_skip_rolls_back_all_candidate_locks() {
     let service = uuid::Uuid::from_u128(2);
     sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example','owner','alice@example.test','Owner')").bind(owner).execute(db.store.pool()).await.unwrap();
     sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','Service',$2)").bind(service).bind(owner).execute(db.store.pool()).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'actual','calendar_month','UTC',$4)").bind(uuid::Uuid::new_v4()).bind(service).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).bind(owner).execute(db.store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'calendar_month','UTC',$4)").bind(uuid::Uuid::new_v4()).bind(service).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).bind(owner).execute(db.store.pool()).await.unwrap();
     let ledger = Arc::new(PgLedger::new(
         db.store.clone(),
         AccessSettings::from_config(&configuration()),
@@ -569,11 +569,11 @@ async fn retention_preserves_manual_null_tokens_in_both_scopes_and_latest_event_
         .unwrap();
     let totals=sqlx::query("SELECT cost_usd::text AS cost,carried_cost_usd::text AS carried,settled_count,carried_settled_count,settled_unknown_tokens_count,carried_settled_unknown_tokens_count,input_tokens,output_tokens,detail_deleted_through IS NOT NULL AS deleted FROM gw_usage_totals ORDER BY scope_id").fetch_all(database.pool()).await.unwrap();
     let key_and_issue:i64=sqlx::query_scalar("SELECT count(*) FROM gw_virtual_keys k JOIN gw_commands c ON c.actor_principal_id=k.created_by AND c.command_id=k.created_command_id WHERE k.id=$1").bind(key.id).fetch_one(database.pool()).await.unwrap();
-    let before_restart = handoff_filtered_http(&cfg, database.clone(), principal).await;
+    let before_restart = filtered_usage_http(&cfg, database.clone(), principal).await;
     database.pool().close().await;
     db.store.pool().close().await;
     let restarted = db.store_via_proxy(64603).await;
-    let after_restart = handoff_filtered_http(&cfg, restarted.clone(), principal).await;
+    let after_restart = filtered_usage_http(&cfg, restarted.clone(), principal).await;
     let monthly = usage_http(
         &cfg,
         restarted.clone(),
@@ -746,975 +746,7 @@ async fn retention_protects_entire_safety_family_then_deletes_child_before_root(
     assert_eq!(total.get::<i64, _>("output_tokens"), 20);
 }
 
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn handoff_import_is_atomic_idempotent_and_rollback_keeps_unknown_reservation_and_safety() {
-    use m_gated::ledger::commands::CommandContext;
-    let db = postgres::TestDb::new().await;
-    let database = db.clock_store(None).await;
-    sqlx::query("UPDATE gw_fixture_clock SET observed='2025-07-01T00:00:00Z'")
-        .execute(database.pool())
-        .await
-        .unwrap();
-    let cfg = configuration_from_yaml(&configuration_yaml_for_s10());
-    let settings = AccessSettings::from_config(&cfg);
-    let actor = finance::human(database.pool()).await;
-    let target = finance::human(database.pool()).await;
-    let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
-    let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
-    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":5000,"count_rpm":null});
-    let ctx = CommandContext {
-        actor,
-        command_id: uuid::Uuid::new_v4(),
-        method: "MAINTENANCE",
-        path: "handoff",
-        settings: &settings,
-        grants: &grants,
-        digest: [1; 32],
-        ceiling: cfg.execution_ceiling(),
-        execution_running: false,
-    };
-    let source = uuid::Uuid::new_v4();
-    let scope = uuid::Uuid::new_v4();
-    let fence = serde_json::json!({"action":"fence","target_id":target,"expected_version":"1","source_id":source,"grants":[],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}});
-    ledger
-        .handoff(&ctx, serde_json::from_value(fence).unwrap())
-        .await
-        .unwrap();
-    let baseline = serde_json::json!({"action":"import","target_id":target,"expected_version":"2","source_id":source,"source_ref":"synthetic-old-ledger-v1","previous_writer_fenced_ref":"synthetic-old-ingress-blocked","previous_executors_stopped_ref":"synthetic-old-process-joined","cutoff":"2025-04-01T00:00:00Z","bundle":{
-      "identity":{"kind":"human","issuer":"https://issuer.example","subject":target.to_string(),"owner_principal_id":null},"original_disabled":false,"source_principal_version":"17",
-      "safety":{"inference_paused_at":null,"inference_pause_reason":null,"inference_pause_request_id":null,"inference_safety_version":"4"},
-      "keys":[],"scopes":[{"id":scope,"key_id":null,"version":"7","grants":grants,"limits":limits,"budget_mode":"reserved","period_kind":"calendar_month","period_timezone":"UTC","created_at":"2025-03-01T00:00:00Z","updated_at":"2025-03-01T00:00:00Z"}],
-      "periods":[{"scope_id":scope,"period_start":"2025-03-01T00:00:00Z","period_end":"2025-04-01T00:00:00Z","timezone_snapshot":"UTC","cost_usd":"3.000000000000","reserved_usd":"0.000000000000","carried_cost_usd":"3.000000000000","unknown_count":"0","settled_count":"3","input_tokens":"10","output_tokens":"20","carried_settled_count":"3","carried_input_tokens":"10","carried_output_tokens":"20","settled_unknown_tokens_count":"1","carried_settled_unknown_tokens_count":"1","detail_deleted_through":null}],"windows":[],"requests":[],"budgets":[],"events":[]}});
-    // source bundle 밖의 기존 actor scope를 참조한 rate 행은 target 이전으로 위장해 쓸 수 없다.
-    let unrelated_target = finance::human(database.pool()).await;
-    let unrelated_source = uuid::Uuid::new_v4();
-    let unrelated_scope = uuid::Uuid::new_v4();
-    ledger.handoff(&CommandContext{command_id:uuid::Uuid::new_v4(),..ctx},serde_json::from_value(serde_json::json!({"action":"fence","target_id":unrelated_target,"expected_version":"1","source_id":unrelated_source,"grants":[],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}})).unwrap()).await.unwrap();
-    let actor_scope: uuid::Uuid =
-        sqlx::query_scalar("SELECT id FROM gw_policies WHERE principal_id=$1 AND key_id IS NULL")
-            .bind(actor)
-            .fetch_one(database.pool())
-            .await
-            .unwrap();
-    let mut foreign = baseline.clone();
-    foreign["target_id"] = serde_json::json!(unrelated_target);
-    foreign["source_id"] = serde_json::json!(unrelated_source);
-    foreign["bundle"]["identity"]["subject"] = serde_json::json!(unrelated_target.to_string());
-    foreign["bundle"]["scopes"][0]["id"] = serde_json::json!(unrelated_scope);
-    foreign["bundle"]["periods"][0]["scope_id"] = serde_json::json!(unrelated_scope);
-    foreign["bundle"]["windows"] = serde_json::json!([{"scope_id":actor_scope,"lane":"inference","window_start":"2025-03-01T00:00:00Z","window_end":"2025-03-01T00:01:00Z","admitted_count":"50","reserved_tokens":"0","settled_tokens":"0"}]);
-    let foreign_rejected = ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(foreign).unwrap(),
-        )
-        .await
-        .is_err();
-    let foreign_written: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM gw_rate_windows WHERE scope_id=$1")
-            .bind(actor_scope)
-            .fetch_one(database.pool())
-            .await
-            .unwrap();
-    let import_ctx = CommandContext {
-        command_id: uuid::Uuid::new_v4(),
-        ..ctx
-    };
-    let mut wrong = baseline.clone();
-    wrong["bundle"]["identity"]["subject"] = serde_json::json!("different-sub-same-email");
-    let refused = ledger
-        .handoff(&import_ctx, serde_json::from_value(wrong).unwrap())
-        .await
-        .is_err();
-    sqlx::raw_sql("CREATE FUNCTION gw_fixture_fail_handoff_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.operation='handoff' THEN RAISE EXCEPTION 'synthetic handoff audit fault'; END IF; RETURN NEW; END $$; CREATE TRIGGER gw_fixture_fail_handoff_audit BEFORE INSERT ON gw_audit_events FOR EACH ROW EXECUTE FUNCTION gw_fixture_fail_handoff_audit()").execute(database.pool()).await.unwrap();
-    let rolled_back = ledger
-        .handoff(
-            &import_ctx,
-            serde_json::from_value(baseline.clone()).unwrap(),
-        )
-        .await
-        .is_err();
-    let before:i64=sqlx::query_scalar("SELECT count(*) FROM gw_usage_totals t JOIN gw_policies p ON p.id=t.scope_id WHERE p.principal_id=$1").bind(target).fetch_one(database.pool()).await.unwrap();
-    sqlx::query("DROP TRIGGER gw_fixture_fail_handoff_audit ON gw_audit_events")
-        .execute(database.pool())
-        .await
-        .unwrap();
-    let imported = ledger
-        .handoff(
-            &import_ctx,
-            serde_json::from_value(baseline.clone()).unwrap(),
-        )
-        .await
-        .unwrap();
-    let available_baseline: Vec<i64> =
-        sqlx::query_scalar("SELECT total FROM gw_alarm_totals ORDER BY code")
-            .fetch_all(database.pool())
-            .await
-            .unwrap();
-    assert_eq!(
-        available_baseline,
-        vec![0, 0],
-        "carried 금액/삭제된 상세/안전 version4만으로 과거 경보를 추정하지 않는다"
-    );
-    let replay = ledger
-        .handoff(
-            &import_ctx,
-            serde_json::from_value(baseline.clone()).unwrap(),
-        )
-        .await
-        .unwrap();
-    let new_ctx = CommandContext {
-        command_id: uuid::Uuid::new_v4(),
-        ..import_ctx
-    };
-    let mut repeated = baseline.clone();
-    repeated["expected_version"] = serde_json::json!("999");
-    let noop = ledger
-        .handoff(&new_ctx, serde_json::from_value(repeated).unwrap())
-        .await
-        .unwrap();
-    let activate = serde_json::json!({"action":"activate","target_id":target,"expected_version":"18","source_id":source,"previous_executors_stopped_ref":"synthetic-old-process-joined"});
-    let active = ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(activate).unwrap(),
-        )
-        .await
-        .unwrap();
-    let current = finance::current(database.pool(), target).await;
-    let request = s4::strict_specification();
-    ledger.admit_request(&current, &request).await.unwrap();
-    s4::complete_count(&ledger, &current, &request).await;
-    ledger.authorize_dispatch(request.id).await.unwrap();
-    ledger
-        .finalize_request(
-            request.id,
-            &FinalObservation {
-                outcome: m_gated::ledger::finance::FinalOutcome::Failed,
-                usage: None,
-                counted_input_tokens: None,
-                reason: "upstream_transport_error",
-                http_status: None,
-                provider_request_id: None,
-            },
-        )
-        .await
-        .unwrap();
-    let mut late = observation();
-    late.usage.as_mut().unwrap().input_tokens = 5000;
-    ledger.finalize_request(request.id, &late).await.unwrap();
-    let policy_version: String =
-        sqlx::query_scalar("SELECT version::text FROM gw_policies WHERE id=$1")
-            .bind(scope)
-            .fetch_one(database.pool())
-            .await
-            .unwrap();
-    let fence = serde_json::json!({"action":"fence","target_id":target,"expected_version":policy_version,"source_id":source,"grants":grants,"limits":limits});
-    ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(fence).unwrap(),
-        )
-        .await
-        .unwrap();
-    let current_version: String =
-        sqlx::query_scalar("SELECT version::text FROM gw_principals WHERE id=$1")
-            .bind(target)
-            .fetch_one(database.pool())
-            .await
-            .unwrap();
-    let mut rollback = serde_json::json!({"action":"rollback","target_id":target,"expected_version":current_version,"source_id":source,"new_executors_stopped_ref":"synthetic-new-process-joined","legacy_represents_all_state":false,"legacy_all_credentials_blocked":false});
-    let not_proven = ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(rollback.clone()).unwrap(),
-        )
-        .await
-        .is_err();
-    rollback["legacy_all_credentials_blocked"] = serde_json::json!(true);
-    let rollback_result = ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(rollback).unwrap(),
-        )
-        .await
-        .unwrap();
-    let held=sqlx::query("SELECT r.accounting_state,r.cost_usd IS NULL AS unresolved,b.remaining_reservation_usd::text AS reserved,b.remaining_reserved_tokens,p.inference_pause_request_id,p.inference_safety_version,p.disabled_at IS NOT NULL AS blocked,(SELECT cost_usd::text FROM gw_usage_totals WHERE scope_id=$2 AND period_start='2025-03-01T00:00:00Z') AS baseline FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(request.id).bind(scope).fetch_one(database.pool()).await.unwrap();
-    database.pool().close().await;
-    db.close().await;
-    assert!(
-        foreign_rejected && foreign_written == 0,
-        "source 밖의 기존 scope 쓰기를 허용하면 안 된다"
-    );
-    assert!(refused && rolled_back && before == 0);
-    assert_eq!(imported["state"], "imported");
-    assert_eq!(replay["ack"]["replayed"], true);
-    assert_eq!(noop["ack"]["effect"], "noop");
-    assert_eq!(active["state"], "active");
-    assert!(not_proven);
-    assert_eq!(rollback_result["state"], "rollback_blocked");
-    assert!(held.get::<bool, _>("unresolved") && held.get::<bool, _>("blocked"));
-    assert_eq!(held.get::<String, _>("accounting_state"), "unknown");
-    assert_eq!(held.get::<String, _>("reserved"), "0.004296000000");
-    assert_eq!(held.get::<i64, _>("remaining_reserved_tokens"), 4196);
-    assert_eq!(
-        held.get::<Option<uuid::Uuid>, _>("inference_pause_request_id"),
-        Some(request.id)
-    );
-    assert_eq!(held.get::<i64, _>("inference_safety_version"), 5);
-    assert_eq!(held.get::<String, _>("baseline"), "3.000000000000");
-}
-
-async fn handoff_fixture_rows(
-    pool: &sqlx::PgPool,
-    table: &str,
-    filter: &str,
-    principal: uuid::Uuid,
-    remove: &[&str],
-    strings: &[&str],
-) -> Vec<serde_json::Value> {
-    let mut projection = "to_jsonb(t)".to_owned();
-    for key in remove {
-        projection += &format!("-'{key}'");
-    }
-    if !strings.is_empty() {
-        projection += "||jsonb_build_object(";
-        projection += &strings
-            .iter()
-            .map(|k| format!("'{k}',t.{k}::text"))
-            .collect::<Vec<_>>()
-            .join(",");
-        projection += ")";
-    }
-    sqlx::query_scalar(&format!(
-        "SELECT {projection} FROM {table} t WHERE {filter} LIMIT 401"
-    ))
-    .bind(principal)
-    .fetch_all(pool)
-    .await
-    .unwrap()
-}
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn handoff_imports_real_source_unknown_key_reservations_and_never_inherits_old_secret() {
-    handoff_unknown_key_fixture(None, false).await;
-}
-
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL; isolated process telemetry counters"]
-async fn telemetry_handoff_import_baseline_is_atomic_once_through_ack_loss_and_reassembly() {
-    for lose_ack in [false, true] {
-        handoff_unknown_key_fixture(Some(lose_ack), false).await;
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL; isolated process telemetry counters"]
-async fn telemetry_handoff_retained_settlement_and_released_safety_keep_baseline_not_active_gauges()
-{
-    handoff_unknown_key_fixture(Some(false), true).await;
-}
-
-async fn handoff_unknown_key_fixture(alarm_fault: Option<bool>, historical: bool) {
-    use m_gated::ledger::{
-        commands::CommandContext,
-        finance::KeyScope,
-        management::{Command, IssueKey},
-    };
-    let old = postgres::TestDb::new().await;
-    let old_clock = old.clock_store(None).await;
-    let new = postgres::TestDb::new().await;
-    let new_clock = new.clock_store(None).await;
-    sqlx::query("UPDATE gw_fixture_clock SET observed='2027-01-01T00:00:00Z'")
-        .execute(new_clock.pool())
-        .await
-        .unwrap();
-    let cfg = configuration_from_yaml(&configuration_yaml_for_s10());
-    let settings = AccessSettings::from_config(&cfg);
-    let old_user = finance::human(old_clock.pool()).await;
-    let old_admin = finance::human(old_clock.pool()).await;
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=10,tpm_limit=5000 WHERE principal_id=$1 AND key_id IS NULL").bind(old_user).execute(old_clock.pool()).await.unwrap();
-    let old_ledger = PgLedger::new(old_clock.clone(), settings.clone(), [1; 32]);
-    let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
-    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":5000,"count_rpm":null});
-    let old_ctx = CommandContext {
-        actor: old_user,
-        command_id: uuid::Uuid::new_v4(),
-        method: "POST",
-        path: "/api/keys",
-        settings: &settings,
-        grants: &grants,
-        digest: [1; 32],
-        ceiling: cfg.execution_ceiling(),
-        execution_running: false,
-    };
-    let key_input:IssueKey=serde_json::from_value(finance::with_credentials(serde_json::json!({"name":"이전 키","validity":"unlimited","grants":grants,"limits":limits}))).unwrap();
-    let issued = old_ledger
-        .management_command(&old_ctx, Command::Issue(key_input))
-        .await
-        .unwrap()
-        .body
-        .unwrap();
-    let old_secret = issued["key"].as_str().unwrap().to_owned();
-    let key = KeyScope {
-        id: issued["metadata"]["id"].as_str().unwrap().parse().unwrap(),
-        version: 1,
-    };
-    let current = finance::current(old_clock.pool(), old_user).await;
-    let request = s4::strict_specification();
-    old_ledger
-        .admit_scoped(&current, &request, Some(key), None)
-        .await
-        .unwrap();
-    let count_cfg = configuration();
-    let child = RequestSpec::from_profile(
-        ProviderId::Anthropic,
-        &count_cfg.providers()[0].profiles[1],
-        None,
-    );
-    old_ledger
-        .admit_scoped(&current, &child, Some(key), Some(request.id))
-        .await
-        .unwrap();
-    old_ledger.authorize_dispatch(child.id).await.unwrap();
-    old_ledger
-        .finalize_request(
-            child.id,
-            &FinalObservation {
-                outcome: m_gated::ledger::finance::FinalOutcome::Completed,
-                usage: None,
-                counted_input_tokens: Some(321),
-                reason: "completed",
-                http_status: Some(200),
-                provider_request_id: None,
-            },
-        )
-        .await
-        .unwrap();
-    old_ledger.authorize_dispatch(request.id).await.unwrap();
-    old_ledger
-        .finalize_request(
-            request.id,
-            &FinalObservation {
-                outcome: m_gated::ledger::finance::FinalOutcome::Failed,
-                usage: None,
-                counted_input_tokens: None,
-                reason: "upstream_transport_error",
-                http_status: None,
-                provider_request_id: None,
-            },
-        )
-        .await
-        .unwrap();
-    let mut late = observation();
-    late.usage.as_mut().unwrap().input_tokens = 5000;
-    old_ledger
-        .finalize_request(request.id, &late)
-        .await
-        .unwrap();
-    if historical {
-        use m_gated::ledger::management::{ReleaseSafety, Settlement};
-        let admin_ctx = CommandContext {
-            actor: old_admin,
-            ..old_ctx
-        };
-        let version: String =
-            sqlx::query_scalar("SELECT version::text FROM gw_requests WHERE id=$1")
-                .bind(request.id)
-                .fetch_one(old_clock.pool())
-                .await
-                .unwrap();
-        old_ledger
-            .management_command(
-                &CommandContext {
-                    command_id: uuid::Uuid::new_v4(),
-                    method: "PUT",
-                    path: "/api/admin/requests/settlement",
-                    ..admin_ctx
-                },
-                Command::Settle(
-                    request.id,
-                    Settlement {
-                        expected_version: version,
-                        decision: "charged".into(),
-                        cost_usd: "0.001000000000".into(),
-                        reason: "합성 이전 수동 처리".into(),
-                        execution_stopped_confirmed: Some(true),
-                    },
-                ),
-            )
-            .await
-            .unwrap();
-        old_ledger
-            .management_command(
-                &CommandContext {
-                    command_id: uuid::Uuid::new_v4(),
-                    method: "POST",
-                    path: "/api/admin/principals/inference-pause/release",
-                    ..admin_ctx
-                },
-                Command::Release(
-                    old_user,
-                    ReleaseSafety {
-                        expected_version: "2".into(),
-                        reason: "합성 이전 명시 해제".into(),
-                    },
-                ),
-            )
-            .await
-            .unwrap();
-    }
-    let source = uuid::Uuid::new_v4();
-    let old_fence = serde_json::json!({"action":"fence","target_id":old_user,"expected_version":"1","source_id":source,"grants":grants,"limits":limits});
-    old_ledger
-        .handoff(
-            &CommandContext {
-                actor: old_admin,
-                command_id: uuid::Uuid::new_v4(),
-                method: "MAINTENANCE",
-                path: "handoff",
-                ..old_ctx
-            },
-            serde_json::from_value(old_fence).unwrap(),
-        )
-        .await
-        .unwrap();
-    let target = uuid::Uuid::new_v4();
-    let actor = finance::human(new_clock.pool()).await;
-    sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example',$2,'alice@example.test','Mapped source identity')").bind(target).bind(old_user.to_string()).execute(new_clock.pool()).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','actual','calendar_month','UTC',$2)").bind(uuid::Uuid::new_v4()).bind(target).execute(new_clock.pool()).await.unwrap();
-    let ledger = PgLedger::new(new_clock.clone(), settings.clone(), [2; 32]);
-    let ctx = CommandContext {
-        actor,
-        command_id: uuid::Uuid::new_v4(),
-        method: "MAINTENANCE",
-        path: "handoff",
-        ..old_ctx
-    };
-    ledger.handoff(&ctx,serde_json::from_value(serde_json::json!({"action":"fence","target_id":target,"expected_version":"1","source_id":source,"grants":[],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}})).unwrap()).await.unwrap();
-    let p = "t.principal_id=$1";
-    let b = "t.request_id IN(SELECT id FROM gw_requests WHERE principal_id=$1)";
-    let s = "t.scope_id IN(SELECT id FROM gw_policies WHERE principal_id=$1)";
-    let keys:Vec<serde_json::Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',id,'public_prefix',public_prefix,'name',name,'grant_snapshot',grant_snapshot,'validity_preset',validity_preset,'expires_at',expires_at,'revoked_at',revoked_at,'created_at',created_at,'version',version::text,'original_created_by',created_by,'original_created_command_id',created_command_id) FROM gw_virtual_keys WHERE principal_id=$1 LIMIT 33").bind(old_user).fetch_all(old_clock.pool()).await.unwrap();
-    let scopes:Vec<serde_json::Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',id,'key_id',key_id,'version',version::text,'grants',allow_rules,'budget_mode',budget_mode,'period_kind',period_kind,'period_timezone',period_timezone,'limits',jsonb_build_object('budget',CASE WHEN budget_limit_usd IS NULL THEN NULL ELSE jsonb_build_object('mode',budget_mode,'limit_usd',budget_limit_usd::text,'period',jsonb_build_object('kind',period_kind,'timezone',period_timezone)) END,'rpm',rpm_limit,'tpm',tpm_limit,'count_rpm',count_rpm_limit),'created_at',created_at,'updated_at',updated_at) FROM gw_policies WHERE principal_id=$1 LIMIT 34").bind(old_user).fetch_all(old_clock.pool()).await.unwrap();
-    let periods = handoff_fixture_rows(
-        old_clock.pool(),
-        "gw_usage_totals",
-        s,
-        old_user,
-        &["updated_at"],
-        &[
-            "cost_usd",
-            "reserved_usd",
-            "carried_cost_usd",
-            "unknown_count",
-            "settled_count",
-            "input_tokens",
-            "output_tokens",
-            "carried_settled_count",
-            "carried_input_tokens",
-            "carried_output_tokens",
-            "settled_unknown_tokens_count",
-            "carried_settled_unknown_tokens_count",
-        ],
-    )
-    .await;
-    let windows = handoff_fixture_rows(
-        old_clock.pool(),
-        "gw_rate_windows",
-        s,
-        old_user,
-        &["updated_at"],
-        &["admitted_count", "reserved_tokens", "settled_tokens"],
-    )
-    .await;
-    let requests = handoff_fixture_rows(
-        old_clock.pool(),
-        "gw_requests",
-        p,
-        old_user,
-        &["principal_id", "phase"],
-        &["cost_usd", "version"],
-    )
-    .await;
-    let budgets = handoff_fixture_rows(
-        old_clock.pool(),
-        "gw_request_budgets",
-        b,
-        old_user,
-        &[],
-        &[
-            "policy_version",
-            "reservation_usd",
-            "remaining_reservation_usd",
-            "reserved_tokens",
-            "remaining_reserved_tokens",
-            "applied_cost_usd",
-            "applied_input_tokens",
-            "applied_output_tokens",
-        ],
-    )
-    .await;
-    let events = handoff_fixture_rows(
-        old_clock.pool(),
-        "gw_usage_events",
-        b,
-        old_user,
-        &["id"],
-        &[],
-    )
-    .await;
-    let safety:serde_json::Value=sqlx::query_scalar("SELECT jsonb_build_object('inference_paused_at',inference_paused_at,'inference_pause_reason',inference_pause_reason,'inference_pause_request_id',inference_pause_request_id,'inference_safety_version',inference_safety_version::text) FROM gw_principals WHERE id=$1").bind(old_user).fetch_one(old_clock.pool()).await.unwrap();
-    let cutoff: String = sqlx::query_scalar(
-        "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
-    )
-    .fetch_one(old.store.pool())
-    .await
-    .unwrap();
-    let input = serde_json::json!({"action":"import","target_id":target,"expected_version":"2","source_id":source,"source_ref":"synthetic-two-ledgers","previous_writer_fenced_ref":"actual-old-ledger-fence","previous_executors_stopped_ref":"synthetic-old-joined","cutoff":cutoff,"bundle":{"identity":{"kind":"human","issuer":"https://issuer.example","subject":old_user.to_string(),"owner_principal_id":null},"original_disabled":false,"original_disabled_reason":null,"original_security_fence_ref":null,"source_principal_version":"2","safety":safety,"keys":keys,"scopes":scopes,"periods":periods,"windows":windows,"requests":requests,"budgets":budgets,"events":events}});
-    let typed: m_gated::ledger::handoff::Handoff = serde_json::from_value(input.clone()).unwrap();
-    let m_gated::ledger::handoff::Handoff::Import(parsed) = typed else {
-        unreachable!()
-    };
-    let full_validation = parsed.validate();
-    let full_valid = full_validation.is_ok();
-    let import_ctx = CommandContext {
-        command_id: uuid::Uuid::new_v4(),
-        ..ctx
-    };
-    let alarm_totals = |pool: sqlx::PgPool| async move {
-        sqlx::query_scalar::<_, i64>("SELECT total FROM gw_alarm_totals ORDER BY code")
-            .fetch_all(&pool)
-            .await
-            .unwrap()
-    };
-    if alarm_fault.is_some() {
-        assert_eq!(alarm_totals(new_clock.pool().clone()).await, vec![0, 0]);
-        // 감사 실패와 고정 경보 행 갱신 실패 모두 금융/receipt와 함께 rollback한다.
-        for table in ["gw_audit_events", "gw_alarm_totals"] {
-            let event = if table == "gw_alarm_totals" {
-                "UPDATE"
-            } else {
-                "INSERT"
-            };
-            sqlx::raw_sql(&format!("CREATE FUNCTION gw_fixture_import_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic import failure'; END $$; CREATE TRIGGER gw_fixture_import_failure BEFORE {event} ON {table} FOR EACH ROW EXECUTE FUNCTION gw_fixture_import_failure()"))
-                .execute(new_clock.pool()).await.unwrap();
-            assert!(
-                ledger
-                    .handoff(&import_ctx, serde_json::from_value(input.clone()).unwrap())
-                    .await
-                    .is_err()
-            );
-            let mut barrier = new_clock.pool().begin().await.unwrap();
-            sqlx::query("SELECT id FROM gw_principals WHERE id=$1 FOR UPDATE")
-                .bind(target)
-                .execute(&mut *barrier)
-                .await
-                .unwrap();
-            barrier.rollback().await.unwrap();
-            let unchanged: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM gw_requests WHERE principal_id=$1) AND NOT EXISTS(SELECT 1 FROM gw_virtual_keys WHERE principal_id=$1) AND NOT EXISTS(SELECT 1 FROM gw_handoffs WHERE principal_id=$1) AND NOT EXISTS(SELECT 1 FROM gw_commands WHERE actor_principal_id=$2 AND command_id=$3) AND NOT EXISTS(SELECT 1 FROM gw_audit_events WHERE actor_principal_id=$2 AND command_id=$3) AND NOT EXISTS(SELECT 1 FROM gw_alarm_totals WHERE total<>0) AND EXISTS(SELECT 1 FROM gw_principals WHERE id=$1 AND version=2 AND inference_pause_reason IS NULL AND inference_safety_version=1)").bind(target).bind(actor).bind(import_ctx.command_id).fetch_one(new_clock.pool()).await.unwrap();
-            assert!(
-                unchanged,
-                "import 실패는 금융/보호/receipt/command/alarm 전체 rollback"
-            );
-            sqlx::raw_sql(&format!("DROP TRIGGER gw_fixture_import_failure ON {table}; DROP FUNCTION gw_fixture_import_failure()"))
-                .execute(new_clock.pool()).await.unwrap();
-        }
-    }
-    let imported = if alarm_fault == Some(true) {
-        use std::sync::atomic::Ordering;
-        let proxy = pg_proxy::CommitProxy::new().await;
-        let faulty = new.clock_store(Some(proxy.port)).await;
-        let faulty_ledger = PgLedger::new(faulty.clone(), settings.clone(), [2; 32]);
-        proxy.armed.store(true, Ordering::SeqCst);
-        let lost = faulty_ledger
-            .handoff(&import_ctx, serde_json::from_value(input.clone()).unwrap())
-            .await;
-        tokio::time::timeout(Duration::from_secs(2), proxy.committed.notified())
-            .await
-            .unwrap();
-        assert!(lost.is_err(), "실제 COMMIT 성공 후 ACK만 유실");
-        faulty.pool().close().await;
-        drop(faulty_ledger);
-        drop(proxy);
-        // 정상 pool의 replay는 새 금융 효과가 아니며 최초 command 결과를 반환한다.
-        let replay = ledger
-            .handoff(&import_ctx, serde_json::from_value(input.clone()).unwrap())
-            .await;
-        assert_eq!(replay.as_ref().unwrap()["ack"]["replayed"], true);
-        replay
-    } else {
-        ledger
-            .handoff(&import_ctx, serde_json::from_value(input.clone()).unwrap())
-            .await
-    };
-    if alarm_fault.is_some() {
-        assert!(imported.is_ok(), "baseline 검증 전 실제 import 성공 전제");
-        let preserved: bool = if historical {
-            sqlx::query_scalar("SELECT r.accounting_state='settled' AND r.cost_usd=0.001 AND r.safety_violation_recorded AND p.inference_pause_request_id IS NULL AND p.inference_safety_version=3 AND (SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind IN ('settlement','late_final'))=2 AND (SELECT count(*) FROM gw_request_budgets WHERE request_id=r.id AND remaining_reservation_usd=0 AND remaining_reserved_tokens=0)=2 AND EXISTS(SELECT 1 FROM gw_handoffs WHERE principal_id=p.id) FROM gw_requests r JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(request.id).fetch_one(new_clock.pool()).await.unwrap()
-        } else {
-            sqlx::query_scalar("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND r.safety_violation_recorded AND p.inference_pause_request_id=r.id AND p.inference_safety_version=2 AND (SELECT count(*) FROM gw_request_budgets WHERE request_id=r.id AND remaining_reservation_usd=0.004296 AND remaining_reserved_tokens=4196)=2 AND EXISTS(SELECT 1 FROM gw_handoffs WHERE principal_id=p.id) FROM gw_requests r JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(request.id).fetch_one(new_clock.pool()).await.unwrap()
-        };
-        assert!(
-            preserved,
-            "baseline 전 unknown/두 scope 예약/안전 원인/receipt 실제 보존 전제"
-        );
-        assert_eq!(
-            alarm_totals(new_clock.pool().clone()).await,
-            vec![1, 1],
-            "scope2개인 unknown request/안전 원인은 각각 한번만 import"
-        );
-        let replay = ledger
-            .handoff(&import_ctx, serde_json::from_value(input.clone()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(replay["ack"]["replayed"], true);
-        let noop = ledger
-            .handoff(
-                &CommandContext {
-                    command_id: uuid::Uuid::new_v4(),
-                    ..ctx
-                },
-                serde_json::from_value(input.clone()).unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(noop["ack"]["effect"], "noop");
-        let mut conflict = input.clone();
-        conflict["source_ref"] = serde_json::json!("different-source-digest");
-        assert!(matches!(
-            ledger
-                .handoff(
-                    &CommandContext {
-                        command_id: uuid::Uuid::new_v4(),
-                        ..ctx
-                    },
-                    serde_json::from_value(conflict).unwrap()
-                )
-                .await,
-            Err(m_gated::ledger::management::ManagementError::CommandConflict)
-        ));
-        let rebuilt_store = new.store_via_proxy(64603).await;
-        let rebuilt = PgLedger::new(rebuilt_store.clone(), settings.clone(), [2; 32]);
-        let runtime = m_gated::runtime::Runtime::new(cfg.limits().clone()).unwrap();
-        for _ in 0..2 {
-            rebuilt.recovery_tick(&runtime).await.unwrap();
-        }
-        use std::{
-            io::Read,
-            os::{fd::OwnedFd, unix::net::UnixStream},
-        };
-        let (writer, mut reader) = UnixStream::pair().unwrap();
-        m_gated::telemetry::Collector::from_fd(OwnedFd::from(writer))
-            .unwrap()
-            .publish();
-        let mut bytes = Vec::new();
-        let mut byte = [0];
-        while reader.read_exact(&mut byte).is_ok() {
-            bytes.push(byte[0]);
-            if byte[0] == b'\n' {
-                break;
-            }
-        }
-        let collector: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(collector["telemetry"]["alarm_new_unknown_total"], 1);
-        assert_eq!(collector["telemetry"]["alarm_pricing_bound_total"], 1);
-        assert_eq!(
-            collector["telemetry"]["unknown_requests"],
-            if historical { 0 } else { 1 }
-        );
-        assert_eq!(alarm_totals(rebuilt_store.pool().clone()).await, vec![1, 1]);
-        let audits: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM gw_audit_events WHERE command_id=$1")
-                .bind(import_ctx.command_id)
-                .fetch_one(rebuilt_store.pool())
-                .await
-                .unwrap();
-        assert_eq!(audits, 1);
-        assert_eq!(
-            rebuilt.authorize_dispatch(request.id).await.err(),
-            Some(LedgerError::Conflict)
-        );
-        rebuilt_store.pool().close().await;
-    }
-    let import_error = match imported.as_ref().err() {
-        None => "none",
-        Some(m_gated::ledger::management::ManagementError::Invalid) => "invalid",
-        Some(m_gated::ledger::management::ManagementError::Invariant) => "invariant",
-        Some(m_gated::ledger::management::ManagementError::Database) => "database",
-        Some(m_gated::ledger::management::ManagementError::Forbidden) => "forbidden",
-        Some(m_gated::ledger::management::ManagementError::SecurityFence) => "fence",
-        Some(m_gated::ledger::management::ManagementError::Query(_)) => "query",
-        Some(_) => "other",
-    };
-    let old_key_rejected = new_clock
-        .authenticate_key(&old_secret, &settings)
-        .await
-        .is_err();
-    let row=sqlx::query("SELECT r.accounting_state,r.cost_usd IS NULL AS unknown,p.inference_pause_request_id,p.inference_safety_version,(SELECT count(*) FROM gw_request_budgets WHERE request_id=r.id AND remaining_reservation_usd=0.004296 AND remaining_reserved_tokens=4196)::bigint AS held,(SELECT count(*) FROM gw_virtual_keys WHERE principal_id=p.id AND revoked_at IS NOT NULL)::bigint AS revoked FROM gw_requests r JOIN gw_principals p ON p.id=r.principal_id WHERE r.id=$1").bind(request.id).fetch_optional(new_clock.pool()).await.unwrap();
-    old_clock.pool().close().await;
-    new_clock.pool().close().await;
-    old.close().await;
-    new.close().await;
-    assert!(full_valid, "typed source 검증: {full_validation:?}");
-    assert!(
-        imported.is_ok(),
-        "정본 source의 보존된 금융 metadata는 import돼야 한다: {import_error}"
-    );
-    let row = row.unwrap();
-    assert!(old_key_rejected);
-    assert_eq!(row.get::<bool, _>("unknown"), !historical);
-    assert_eq!(
-        row.get::<String, _>("accounting_state"),
-        if historical { "settled" } else { "unknown" }
-    );
-    assert_eq!(row.get::<i64, _>("held"), if historical { 0 } else { 2 });
-    assert_eq!(row.get::<i64, _>("revoked"), 1);
-    assert_eq!(
-        row.get::<i64, _>("inference_safety_version"),
-        if historical { 3 } else { 2 }
-    );
-    assert_eq!(
-        row.get::<Option<uuid::Uuid>, _>("inference_pause_request_id"),
-        if historical { None } else { Some(request.id) }
-    );
-}
-
-// 제품과 독립된 이전 입력 fixture. 인증값·대화 본문은 내보내지 않는다.
-async fn export_handoff_fixture(pool: &sqlx::PgPool, principal: uuid::Uuid) -> serde_json::Value {
-    let p = "t.principal_id=$1";
-    let s = "t.scope_id IN(SELECT id FROM gw_policies WHERE principal_id=$1)";
-    let b = "t.request_id IN(SELECT id FROM gw_requests WHERE principal_id=$1)";
-    let scopes:Vec<serde_json::Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',id,'key_id',key_id,'version',version::text,'grants',allow_rules,'budget_mode',budget_mode,'period_kind',period_kind,'period_timezone',period_timezone,'limits',jsonb_build_object('budget',CASE WHEN budget_limit_usd IS NULL THEN NULL ELSE jsonb_build_object('mode',budget_mode,'limit_usd',budget_limit_usd::text,'period',jsonb_build_object('kind',period_kind,'timezone',period_timezone)) END,'rpm',rpm_limit,'tpm',tpm_limit,'count_rpm',count_rpm_limit),'created_at',created_at,'updated_at',updated_at) FROM gw_policies WHERE principal_id=$1 LIMIT 34").bind(principal).fetch_all(pool).await.unwrap();
-    let periods = handoff_fixture_rows(
-        pool,
-        "gw_usage_totals",
-        s,
-        principal,
-        &["updated_at"],
-        &[
-            "cost_usd",
-            "reserved_usd",
-            "carried_cost_usd",
-            "unknown_count",
-            "settled_count",
-            "input_tokens",
-            "output_tokens",
-            "carried_settled_count",
-            "carried_input_tokens",
-            "carried_output_tokens",
-            "settled_unknown_tokens_count",
-            "carried_settled_unknown_tokens_count",
-        ],
-    )
-    .await;
-    let windows = handoff_fixture_rows(
-        pool,
-        "gw_rate_windows",
-        s,
-        principal,
-        &["updated_at"],
-        &["admitted_count", "reserved_tokens", "settled_tokens"],
-    )
-    .await;
-    let requests = handoff_fixture_rows(
-        pool,
-        "gw_requests",
-        p,
-        principal,
-        &["principal_id", "phase"],
-        &["cost_usd", "version"],
-    )
-    .await;
-    let budgets = handoff_fixture_rows(
-        pool,
-        "gw_request_budgets",
-        b,
-        principal,
-        &[],
-        &[
-            "policy_version",
-            "reservation_usd",
-            "remaining_reservation_usd",
-            "reserved_tokens",
-            "remaining_reserved_tokens",
-            "applied_cost_usd",
-            "applied_input_tokens",
-            "applied_output_tokens",
-        ],
-    )
-    .await;
-    let events = handoff_fixture_rows(pool, "gw_usage_events", b, principal, &["id"], &[]).await;
-    serde_json::json!({"identity":{"kind":"human","issuer":"https://issuer.example","subject":principal.to_string(),"owner_principal_id":null},"original_disabled":false,"original_disabled_reason":null,"original_security_fence_ref":null,"source_principal_version":"1","safety":{"inference_paused_at":null,"inference_pause_reason":null,"inference_pause_request_id":null,"inference_safety_version":"1"},"keys":[],"scopes":scopes,"periods":periods,"windows":windows,"requests":requests,"budgets":budgets,"events":events})
-}
-
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn handoff_preserves_budgetless_non_utc_scope_after_real_policy_removal() {
-    handoff_detail_fixture(true, false, false).await;
-}
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn handoff_full_detail_without_carried_keeps_null_boundary_and_filtered_usage() {
-    handoff_detail_fixture(false, false, false).await;
-}
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn handoff_carried_only_including_zero_cost_keeps_conservative_boundary_and_http409() {
-    for zero in [false, true] {
-        handoff_detail_fixture(false, true, zero).await;
-    }
-}
-async fn handoff_detail_fixture(remove_budget: bool, carried: bool, zero: bool) {
-    use m_gated::ledger::{commands::CommandContext, management::Command};
-    let old = postgres::TestDb::new().await;
-    let old_clock = old.clock_store(None).await;
-    sqlx::query("UPDATE gw_fixture_clock SET observed='2025-03-15T00:00:00Z'")
-        .execute(old_clock.pool())
-        .await
-        .unwrap();
-    let new = postgres::TestDb::new().await;
-    let cfg = configuration_from_yaml(&configuration_yaml_for_s10());
-    let settings = AccessSettings::from_config(&cfg);
-    let owner = finance::human(old_clock.pool()).await;
-    let admin = finance::human(old_clock.pool()).await;
-    let old_ledger = PgLedger::new(old_clock.clone(), settings.clone(), [1; 32]);
-    let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
-    let limits = serde_json::json!({"budget":{"mode":"reserved","limit_usd":"10.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":null,"count_rpm":null});
-    let ctx = CommandContext {
-        actor: admin,
-        command_id: uuid::Uuid::new_v4(),
-        method: "PUT",
-        path: "policy",
-        settings: &settings,
-        grants: &grants,
-        digest: [1; 32],
-        ceiling: cfg.execution_ceiling(),
-        execution_running: false,
-    };
-    old_ledger.management_command(&ctx,Command::Policy(owner,serde_json::from_value(serde_json::json!({"expected_version":"1","disabled":false,"grants":grants,"limits":limits,"reason":"원래 기간 설정"})).unwrap())).await.unwrap();
-    // 0.9.0 이전에 정책마다 시간대를 두던 정책을 흉내 낸다. 이 값은 이전(handoff)에서 그대로 옮겨져야 한다.
-    if remove_budget {
-        sqlx::query("UPDATE gw_policies SET period_timezone='Asia/Seoul' WHERE principal_id=$1 AND key_id IS NULL")
-            .bind(owner)
-            .execute(old_clock.pool())
-            .await
-            .unwrap();
-    }
-    let current = finance::current(old_clock.pool(), owner).await;
-    let spec = s4::strict_specification();
-    old_ledger.admit_request(&current, &spec).await.unwrap();
-    s4::complete_count(&old_ledger, &current, &spec).await;
-    old_ledger.authorize_dispatch(spec.id).await.unwrap();
-    let mut final_usage = observation();
-    if zero {
-        let usage = final_usage.usage.as_mut().unwrap();
-        usage.input_tokens = 0;
-        usage.output_tokens = 0;
-    }
-    old_ledger
-        .finalize_request(spec.id, &final_usage)
-        .await
-        .unwrap();
-    if remove_budget {
-        old_ledger.management_command(&CommandContext{command_id:uuid::Uuid::new_v4(),..ctx},Command::Policy(owner,serde_json::from_value(serde_json::json!({"expected_version":"2","disabled":false,"grants":grants,"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null},"reason":"한도 제거 원래 기간 보존"})).unwrap())).await.unwrap();
-    }
-    let mut bundle = export_handoff_fixture(old_clock.pool(), owner).await;
-    if carried {
-        for period in bundle["periods"].as_array_mut().unwrap() {
-            for (source, target) in [
-                ("cost_usd", "carried_cost_usd"),
-                ("settled_count", "carried_settled_count"),
-                ("input_tokens", "carried_input_tokens"),
-                ("output_tokens", "carried_output_tokens"),
-                (
-                    "settled_unknown_tokens_count",
-                    "carried_settled_unknown_tokens_count",
-                ),
-            ] {
-                period[target] = period[source].clone();
-            }
-        }
-        for detail in ["windows", "requests", "budgets", "events"] {
-            bundle[detail] = serde_json::json!([]);
-        }
-    }
-    let target = uuid::Uuid::new_v4();
-    let actor = finance::human(new.store.pool()).await;
-    sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example',$2,'alice@example.test','Mapped source')").bind(target).bind(owner.to_string()).execute(new.store.pool()).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','actual','calendar_month','UTC',$2)").bind(uuid::Uuid::new_v4()).bind(target).execute(new.store.pool()).await.unwrap();
-    let ledger = PgLedger::new(new.store.clone(), settings.clone(), [2; 32]);
-    let ctx = CommandContext {
-        actor,
-        command_id: uuid::Uuid::new_v4(),
-        method: "MAINTENANCE",
-        path: "handoff",
-        ..ctx
-    };
-    let source = uuid::Uuid::new_v4();
-    ledger.handoff(&ctx,serde_json::from_value(serde_json::json!({"action":"fence","target_id":target,"expected_version":"1","source_id":source,"grants":[],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}})).unwrap()).await.unwrap();
-    let cutoff: String = sqlx::query_scalar(
-        "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
-    )
-    .fetch_one(old.store.pool())
-    .await
-    .unwrap();
-    let imported=ledger.handoff(&CommandContext{command_id:uuid::Uuid::new_v4(),..ctx},serde_json::from_value(serde_json::json!({"action":"import","target_id":target,"expected_version":"2","source_id":source,"source_ref":"real-source-policy-removal","previous_writer_fenced_ref":"synthetic-fence","previous_executors_stopped_ref":"source-process-joined","cutoff":cutoff,"bundle":bundle})).unwrap()).await;
-    let row=sqlx::query("SELECT p.budget_mode,p.budget_limit_usd IS NULL AS unlimited,p.period_kind,p.period_timezone,t.period_start::text,t.period_end::text,t.cost_usd::text,t.detail_deleted_through IS NULL AS full_detail FROM gw_policies p JOIN gw_usage_totals t ON t.scope_id=p.id WHERE p.principal_id=$1").bind(target).fetch_optional(new.store.pool()).await.unwrap();
-    let filtered = handoff_filtered_http(&cfg, new.store.clone(), target).await;
-    old_clock.pool().close().await;
-    old.close().await;
-    new.close().await;
-    assert!(imported.is_ok(), "정상 원래 scope 이전 거부: {imported:?}");
-    if carried {
-        assert_eq!(filtered.0, 409, "이월 상세 필터 HTTP: {}", filtered.1);
-        assert_eq!(filtered.1["error"]["code"], "usage_detail_unavailable");
-        assert!(filtered.1.get("settled_usd").is_none());
-    } else {
-        assert_eq!(filtered.0, 200, "온전한 상세 필터 HTTP: {}", filtered.1);
-        assert_eq!(filtered.1["aggregation"], "detail");
-        assert_eq!(filtered.1["settled_usd"], "0.000140000000");
-    }
-    let row = row.unwrap();
-    assert_eq!(row.get::<String, _>("budget_mode"), "reserved");
-    assert_eq!(row.get::<bool, _>("unlimited"), remove_budget);
-    assert_eq!(row.get::<String, _>("period_kind"), "calendar_month");
-    assert_eq!(
-        row.get::<String, _>("period_timezone"),
-        if remove_budget { "Asia/Seoul" } else { "UTC" }
-    );
-    assert_eq!(
-        row.get::<String, _>("cost_usd"),
-        if zero {
-            "0.000000000000"
-        } else {
-            "0.000140000000"
-        }
-    );
-    assert_eq!(
-        row.get::<bool, _>("full_detail"),
-        !carried,
-        "원시 상세가 온전한 기간의 삭제 경계를 만들면 안 된다"
-    );
-}
-
-async fn handoff_filtered_http(
+async fn filtered_usage_http(
     cfg: &config::ValidatedConfig,
     store: Arc<m_gated::ledger::PgIdentityStore>,
     target: uuid::Uuid,
@@ -1848,6 +880,29 @@ async fn telemetry_actual_sql_jwks_provider_success_unknown_and_company_key_are_
     let failed_status = failed.status();
     let _ = failed.bytes().await.unwrap();
     h.runtime.wait_requests().await;
+    // 회사 키 인증 오류는 0원으로 정산하고 막지 않는다(결정 0005). 미정산 계측은 해석하지 못한
+    // 응답(gzip)으로 만든다.
+    h.provider
+        .set(
+            StatusCode::OK,
+            HeaderMap::from_iter([
+                (
+                    "content-type".parse().unwrap(),
+                    "application/json".parse().unwrap(),
+                ),
+                ("content-encoding".parse().unwrap(), "gzip".parse().unwrap()),
+            ]),
+            Bytes::from_static(b"synthetic-company-key-conversation-sentinel"),
+        )
+        .await;
+    let unreadable = h
+        .request("/anthropic/v1/messages", BODY)
+        .send()
+        .await
+        .unwrap();
+    let unreadable_status = unreadable.status();
+    let _ = unreadable.bytes().await.unwrap();
+    h.runtime.wait_requests().await;
     let ledger = PgLedger::new(
         h.database.clone(),
         AccessSettings::from_config(&configuration()),
@@ -1868,6 +923,7 @@ async fn telemetry_actual_sql_jwks_provider_success_unknown_and_company_key_are_
     assert_eq!(good_status, 200);
     assert_eq!(stream_status, 200);
     assert_eq!(failed_status, 502);
+    assert_eq!(unreadable_status, 502);
     assert_eq!(telemetry::get(Metric::InputBytes), 0);
     assert_eq!(sql_unknown, 1);
     assert!(unknown >= 1 && blocked >= 1);
@@ -1892,7 +948,7 @@ async fn telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_dupli
     let db = postgres::TestDb::new().await;
     let user = finance::human(db.store.pool()).await;
     sqlx::query(
-        "UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL",
+        "UPDATE gw_policies SET budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL",
     )
     .bind(user)
     .execute(db.store.pool())
@@ -1904,9 +960,9 @@ async fn telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_dupli
         AccessSettings::from_config(&configuration()),
         [1; 32],
     );
-    let request = s4::strict_specification();
+    // 비용 상한은 입력 상한 계약 없이도 profile의 최대 입력과 요청의 max_tokens로 계산한다.
+    let request = specification();
     ledger.admit_request(&current, &request).await.unwrap();
-    s4::complete_count(&ledger, &current, &request).await;
     ledger.authorize_dispatch(request.id).await.unwrap();
     let before = telemetry::get(Metric::AlarmBound);
     let mut final_usage = observation();
@@ -1971,7 +1027,7 @@ async fn two_migrators_serialize_and_actual_advisory30s_total120s_fail_closed() 
     let clean = db.store.migrate().await.is_ok();
     db.close().await;
     assert!(timed_out && elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(35));
-    assert!(one.is_ok() && two.is_ok() && count == 13);
+    assert!(one.is_ok() && two.is_ok() && count == 16);
     assert!(
         reached
             && total_timeout.is_err()
@@ -1997,7 +1053,7 @@ async fn owner_before_service_two_reapers_and_real_dispatch_cross_without_revers
         let service = uuid::Uuid::from_u128(2);
         sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example','owner','alice@example.test','Owner')").bind(owner).execute(db.store.pool()).await.unwrap();
         sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','Service',$2)").bind(service).bind(owner).execute(db.store.pool()).await.unwrap();
-        sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'actual','calendar_month','UTC',$4)").bind(uuid::Uuid::new_v4()).bind(service).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).bind(owner).execute(db.store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'calendar_month','UTC',$4)").bind(uuid::Uuid::new_v4()).bind(service).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).bind(owner).execute(db.store.pool()).await.unwrap();
         let cfg = configuration();
         let ledger = PgLedger::new(db.store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
         let current = finance::current(db.store.pool(), service).await;
@@ -2254,7 +1310,7 @@ async fn retention_all_finite_presets_expire_at_utc_calendar_month_end_including
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn retention_hundred_request_page_preserves_family_totals_and_remaining_references() {
+async fn retention_page_preserves_totals_and_remaining_references() {
     use m_gated::{
         config::{DurationPreset, Retention},
         ledger::{commands::CommandContext, retention::RetentionDelete},
@@ -2271,9 +1327,8 @@ async fn retention_hundred_request_page_preserves_family_totals_and_remaining_re
     let current = finance::current(database.pool(), actor).await;
     let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
     for _ in 0..51 {
-        let root = s4::strict_specification();
+        let root = specification();
         ledger.admit_request(&current, &root).await.unwrap();
-        s4::complete_count(&ledger, &current, &root).await;
         ledger
             .finalize_request(
                 root.id,
@@ -2314,7 +1369,7 @@ async fn retention_hundred_request_page_preserves_family_totals_and_remaining_re
         limit: 50,
         deletion_approved: true,
         approval_ref: "synthetic-approval-local".into(),
-        reason: "가족 100행 배치".into(),
+        reason: "50행 배치".into(),
     };
     let policy = Retention {
         ledger: Some(DurationPreset::ThreeMonths),
@@ -2352,12 +1407,13 @@ async fn retention_hundred_request_page_preserves_family_totals_and_remaining_re
     let totals=sqlx::query("SELECT settled_count,carried_settled_count,cost_usd::text,settled_unknown_tokens_count FROM gw_usage_totals").fetch_one(database.pool()).await.unwrap();
     database.pool().close().await;
     db.close().await;
-    assert_eq!(first["result"]["deleted_requests"], 100);
-    assert_eq!(remaining, 2);
+    // 한 쪽에 요청 50개까지 지운다. 남은 요청이 가리키는 1분 칸은 지우지 않는다.
+    assert_eq!(first["result"]["deleted_requests"], 50);
+    assert_eq!(remaining, 1);
     assert!(protected_window > 0);
-    assert_eq!(second["result"]["deleted_requests"], 2);
-    assert_eq!(totals.get::<i64, _>("settled_count"), 102);
-    assert_eq!(totals.get::<i64, _>("carried_settled_count"), 102);
+    assert_eq!(second["result"]["deleted_requests"], 1);
+    assert_eq!(totals.get::<i64, _>("settled_count"), 51);
+    assert_eq!(totals.get::<i64, _>("carried_settled_count"), 51);
     assert_eq!(totals.get::<String, _>("cost_usd"), "0.000000000000");
     assert_eq!(totals.get::<i64, _>("settled_unknown_tokens_count"), 0);
 }
@@ -2467,13 +1523,18 @@ async fn telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_rea
     for bound in [false, true] {
         let db = postgres::TestDb::new().await;
         let user = finance::human(db.store.pool()).await;
-        sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL").bind(user).execute(db.store.pool()).await.unwrap();
+        sqlx::query(
+            "UPDATE gw_policies SET budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL",
+        )
+        .bind(user)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
         let current = finance::current(db.store.pool(), user).await;
         let cfg = configuration();
         let healthy = PgLedger::new(db.store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
-        let request = s4::strict_specification();
+        let request = specification();
         healthy.admit_request(&current, &request).await.unwrap();
-        s4::complete_count(&healthy, &current, &request).await;
         healthy.authorize_dispatch(request.id).await.unwrap();
         let proxy = pg_proxy::CommitProxy::new().await;
         let faulty = db.store_via_proxy(proxy.port).await;
@@ -2571,143 +1632,6 @@ async fn telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_rea
         assert_eq!(row.get::<i64, _>("finals"), i64::from(bound));
         assert_eq!(runtime.active_requests(), 0);
     }
-}
-
-#[tokio::test]
-#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn service_handoff_checks_mapped_owner_and_keeps_unknown_on_activation_and_owner_change() {
-    use m_gated::ledger::{commands::CommandContext, management::ManagementError};
-    let old = postgres::TestDb::new().await;
-    let new = postgres::TestDb::new().await;
-    let cfg = configuration_from_yaml(&configuration_yaml_for_s10());
-    let settings = AccessSettings::from_config(&cfg);
-    let owner = finance::human(old.store.pool()).await;
-    let service = uuid::Uuid::from_u128(u128::MAX - 1);
-    let scope = uuid::Uuid::new_v4();
-    let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}]);
-    sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','Source service',$2)").bind(service).bind(owner).execute(old.store.pool()).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'reserved',10,'calendar_month','UTC',$4)").bind(scope).bind(service).bind(&grants).bind(owner).execute(old.store.pool()).await.unwrap();
-    let ledger = PgLedger::new(old.store.clone(), settings.clone(), [1; 32]);
-    let spec = s4::strict_specification();
-    let current = finance::current(old.store.pool(), service).await;
-    ledger.admit_request(&current, &spec).await.unwrap();
-    s4::complete_count(&ledger, &current, &spec).await;
-    ledger.authorize_dispatch(spec.id).await.unwrap();
-    ledger
-        .finalize_request(
-            spec.id,
-            &FinalObservation {
-                usage: None,
-                ..observation()
-            },
-        )
-        .await
-        .unwrap();
-    let mut bundle = export_handoff_fixture(old.store.pool(), service).await;
-    let actor = finance::human(new.store.pool()).await;
-    let mapped_owner = finance::human(new.store.pool()).await;
-    let other_owner = finance::human(new.store.pool()).await;
-    bundle["identity"] = serde_json::json!({"kind":"service","issuer":null,"subject":null,"owner_principal_id":mapped_owner});
-    sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','Mapped service',$2)").bind(service).bind(mapped_owner).execute(new.store.pool()).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,period_kind,period_timezone,updated_by) VALUES($1,$2,'[]','actual','calendar_month','UTC',$3)").bind(uuid::Uuid::new_v4()).bind(service).bind(actor).execute(new.store.pool()).await.unwrap();
-    let ledger = PgLedger::new(new.store.clone(), settings.clone(), [2; 32]);
-    let source = uuid::Uuid::new_v4();
-    let ctx = CommandContext {
-        actor,
-        command_id: uuid::Uuid::new_v4(),
-        method: "MAINTENANCE",
-        path: "handoff",
-        settings: &settings,
-        grants: &grants,
-        digest: [2; 32],
-        ceiling: cfg.execution_ceiling(),
-        execution_running: false,
-    };
-    ledger.handoff(&ctx,serde_json::from_value(serde_json::json!({"action":"fence","target_id":service,"expected_version":"1","source_id":source,"grants":[],"limits":{"budget":null,"rpm":null,"tpm":null,"count_rpm":null}})).unwrap()).await.unwrap();
-    let cutoff: String = sqlx::query_scalar(
-        "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
-    )
-    .fetch_one(old.store.pool())
-    .await
-    .unwrap();
-    let input = serde_json::json!({"action":"import","target_id":service,"expected_version":"2","source_id":source,"source_ref":"actual-service-source","previous_writer_fenced_ref":"synthetic-service-fence","previous_executors_stopped_ref":"synthetic-service-joined","cutoff":cutoff,"bundle":bundle});
-    let mut wrong = input.clone();
-    wrong["bundle"]["identity"]["owner_principal_id"] = serde_json::json!(other_owner);
-    let mismatch = ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(wrong).unwrap(),
-        )
-        .await;
-    assert!(
-        matches!(mismatch, Err(ManagementError::Forbidden)),
-        "명시 owner 불일치 경계: {}",
-        match mismatch {
-            Err(ManagementError::Invalid) => "invalid",
-            Err(ManagementError::Database) => "database",
-            Err(ManagementError::Invariant) => "invariant",
-            Err(ManagementError::Forbidden) => "forbidden",
-            Ok(_) => "ok",
-            _ => "other",
-        }
-    );
-    ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(input).unwrap(),
-        )
-        .await
-        .unwrap();
-    sqlx::query("UPDATE gw_principals SET disabled_at=clock_timestamp(),disabled_reason='fixture' WHERE id=$1").bind(mapped_owner).execute(new.store.pool()).await.unwrap();
-    let activation = serde_json::json!({"action":"activate","target_id":service,"expected_version":"3","source_id":source,"previous_executors_stopped_ref":"synthetic-service-joined"});
-    assert!(
-        ledger
-            .handoff(
-                &CommandContext {
-                    command_id: uuid::Uuid::new_v4(),
-                    ..ctx
-                },
-                serde_json::from_value(activation.clone()).unwrap()
-            )
-            .await
-            .is_err()
-    );
-    let still_fenced:bool=sqlx::query_scalar("SELECT disabled_at IS NOT NULL AND security_fence_ref IS NOT NULL FROM gw_principals WHERE id=$1").bind(service).fetch_one(new.store.pool()).await.unwrap();
-    assert!(still_fenced);
-    sqlx::query("UPDATE gw_principals SET disabled_at=NULL,disabled_reason=NULL WHERE id=$1")
-        .bind(mapped_owner)
-        .execute(new.store.pool())
-        .await
-        .unwrap();
-    ledger
-        .handoff(
-            &CommandContext {
-                command_id: uuid::Uuid::new_v4(),
-                ..ctx
-            },
-            serde_json::from_value(activation).unwrap(),
-        )
-        .await
-        .unwrap();
-    sqlx::query("UPDATE gw_principals SET owner_principal_id=$2,version=version+1 WHERE id=$1")
-        .bind(service)
-        .bind(other_owner)
-        .execute(new.store.pool())
-        .await
-        .unwrap();
-    let held:bool=sqlx::query_scalar("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND b.remaining_reservation_usd>0 AND t.unknown_count=1 AND t.reserved_usd=b.remaining_reservation_usd FROM gw_requests r JOIN gw_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN gw_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE r.id=$1").bind(spec.id).fetch_one(new.store.pool()).await.unwrap();
-    assert!(held);
-    let owner_unknown:i64=sqlx::query_scalar("SELECT count(*) FROM gw_requests WHERE principal_id=ANY($1) AND accounting_state='unknown'").bind(vec![mapped_owner,other_owner]).fetch_one(new.store.pool()).await.unwrap();
-    assert_eq!(owner_unknown, 0);
-    assert!(ledger.authorize_dispatch(spec.id).await.is_err());
-    old.close().await;
-    new.close().await;
 }
 
 #[tokio::test]

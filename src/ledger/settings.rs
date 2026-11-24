@@ -1,4 +1,4 @@
-//! 관리자가 게이트웨이 전체에 한 번 정하는 설정. 지금은 예산 기간의 시간대 하나다.
+//! 관리자가 게이트웨이 전체에 한 번 정하는 설정. 예산 기간의 시간대와 끊긴 요청의 정산 규칙이다.
 //!
 //! - 예산(사용자 정책·가상 키)의 월 기간은 모두 이 시간대의 달력 한 달이다.
 //! - 바꾸면 지금 기간은 이전 시간대로 끝까지 세고, 다음 기간부터 새 시간대를 쓴다. 바뀐 직후의 기간 하나만
@@ -72,6 +72,20 @@ pub async fn budget_timezone_view(c: &mut PgConnection) -> Result<Value, sqlx::E
     }))
 }
 
+/// 끊긴 요청의 정산 규칙(결정 0005). 이번 단계에서는 Anthropic 규칙만 쓴다.
+pub async fn cutoff_rule_view(c: &mut PgConnection) -> Result<Value, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT cutoff_rule,version FROM gw_settlement_rules WHERE provider='anthropic'",
+    )
+    .fetch_one(&mut *c)
+    .await?;
+    Ok(json!({
+        "provider": "anthropic",
+        "cutoff_rule": row.get::<String, _>("cutoff_rule"),
+        "version": row.get::<i64, _>("version").to_string(),
+    }))
+}
+
 impl PgIdentityStore {
     pub async fn settings_view(&self, ctx: &CommandContext<'_>) -> Result<Value, ManagementError> {
         let _gate = self
@@ -83,11 +97,92 @@ impl PgIdentityStore {
             let mut tx = self.begin_transaction().await?;
             management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
             let view = budget_timezone_view(&mut tx).await?;
+            let cutoff = cutoff_rule_view(&mut tx).await?;
             tx.commit().await?;
-            Ok(json!({ "budget_timezone": view }))
+            Ok(json!({ "budget_timezone": view, "cutoff_rule": cutoff }))
         })
         .await
         .map_err(|_| ManagementError::Database)?
+    }
+
+    /// 끊긴 요청의 정산 규칙을 바꾼다. 바꾼 뒤에 받는 요청부터 적용한다.
+    pub async fn set_cutoff_rule(
+        &self,
+        ctx: &CommandContext<'_>,
+        provider: &str,
+        rule: &str,
+        expected: i64,
+    ) -> Result<CommandResult, ManagementError> {
+        if provider != "anthropic" || !["received", "max_tokens"].contains(&rule) {
+            return Err(ManagementError::Invalid);
+        }
+        let input =
+            json!({"provider":provider,"cutoff_rule":rule,"expected_version":expected.to_string()});
+        let digest = management::input_digest(ctx.method, ctx.path, &input);
+        let _gate = self
+            .gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ManagementError::Database)?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut tx = self.begin_transaction().await?;
+            management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
+            if let Some(result) = super::credentials::replay_on(&mut tx, ctx, &digest).await? {
+                return Ok(result);
+            }
+            let row = sqlx::query(
+                "SELECT cutoff_rule,version FROM gw_settlement_rules WHERE provider=$1 FOR UPDATE",
+            )
+            .bind(provider)
+            .fetch_one(&mut *tx)
+            .await?;
+            let version: i64 = row.get("version");
+            if version != expected {
+                return Err(ManagementError::Version(version));
+            }
+            let before = cutoff_rule_view(&mut tx).await?;
+            let changed = row.get::<String, _>("cutoff_rule") != rule;
+            if changed {
+                sqlx::query("UPDATE gw_settlement_rules SET cutoff_rule=$2,version=version+1,updated_by=$3,updated_at=clock_timestamp() WHERE provider=$1")
+                    .bind(provider)
+                    .bind(rule)
+                    .bind(ctx.actor)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let after = cutoff_rule_view(&mut tx).await?;
+            let result_version = version + i64::from(changed);
+            let mut ack = json!({"command_id":ctx.command_id,"operation":"set_settlement_rule","target":{"kind":"settings","id":Uuid::nil()},"result_version":result_version.to_string(),"effect":if changed{"changed"}else{"noop"},"cutoff_rule":after});
+            sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_version,result_projection,created_at) VALUES($1,$2,$3,'set_settlement_rule','settings',$4,200,$5,$6,clock_timestamp())")
+                .bind(ctx.actor)
+                .bind(ctx.command_id)
+                .bind(digest.as_slice())
+                .bind(Uuid::nil())
+                .bind(result_version)
+                .bind(&ack)
+                .execute(&mut *tx)
+                .await?;
+            if changed {
+                sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'set_settlement_rule','settings',$4,$5,$6)")
+                    .bind(ctx.actor)
+                    .bind(ctx.command_id)
+                    .bind(ctx.digest.as_slice())
+                    .bind(Uuid::nil())
+                    .bind(&before)
+                    .bind(&after)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            ack["replayed"] = json!(false);
+            Ok(CommandResult {
+                status: 200,
+                body: Some(ack),
+                replayed: false,
+            })
+        })
+        .await
+        .map_err(|_| ManagementError::Busy)?
     }
 
     /// 예산 시간대를 바꾼다. 다음 예산 기간부터 적용한다.

@@ -165,7 +165,7 @@ test('user_without_an_authorized_provider_key_sees_the_reason_and_no_issue_form'
 
 test('key_limits_show_the_admin_maximum_and_cannot_go_over_it', async () => {
   history.replaceState(null, '', '/dashboard/keys/new');
-  const limited = { ...me, key_limit_maximum: { budget: { mode: 'actual', limit_usd: '20.000000000000', period: { kind: 'calendar_month' } }, rpm: 60, tpm: null, count_rpm: 30 } };
+  const limited = { ...me, key_limit_maximum: { budget: { limit_usd: '20.000000000000', period: { kind: 'calendar_month' } }, rpm: 60, tpm: null, count_rpm: 30 } };
   const fetcher = stub(limited); render(<App />);
   const form = await screen.findByRole('form', { name: '가상 키 발급' });
   // 분당 한도 세 칸은 「고급 옵션」 안에 접혀 있고, 빈 칸에는 관리자가 정한 최대값이 보인다.

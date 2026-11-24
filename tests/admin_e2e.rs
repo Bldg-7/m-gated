@@ -177,7 +177,7 @@ async fn administrator_browser_commands_queries_and_current_authority() {
     let service = Uuid::new_v4();
     let policy = Uuid::new_v4();
     sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','CAS 서비스',$2)").bind(service).bind(humans[0].id).execute(db.store.pool()).await.unwrap();
-    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_mode,budget_limit_usd,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'actual',100,'calendar_month','UTC',$4)").bind(policy).bind(service).bind(json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}])).bind(humans[0].id).execute(db.store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,budget_limit_usd,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,100,'calendar_month','UTC',$4)").bind(policy).bind(service).bind(json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}])).bind(humans[0].id).execute(db.store.pool()).await.unwrap();
     // Provider 키 인가는 필수다. 브라우저 시험의 사람과 서비스 계정에 시험 고정 Provider 키를 인가한다.
     for principal in humans.iter().map(|h| h.id).chain([service]) {
         finance::allow(db.store.pool(), principal).await;

@@ -110,7 +110,7 @@ test('admin_direct_user_route_never_fetches_administrator_resources', async () =
 test('policy_form_turns_checkboxes_and_limit_fields_into_the_server_policy', async () => {
   history.replaceState(null, '', '/dashboard/admin/principals/detail?principal_id=service1');
   const ceiling = [{ provider: 'anthropic', model: 'claude-opus-5-5', capabilities: ['messages', 'count_tokens'] }, { provider: 'anthropic', model: 'claude-haiku-5-5', capabilities: ['messages'] }];
-  const current = { ...principal, policy: { ...principal.policy, grants: [{ provider: 'anthropic', model: 'claude-old-1', capabilities: ['messages'] }], limits: { budget: { mode: 'actual', limit_usd: '100.500000000000', period: { kind: 'calendar_month' } }, rpm: 5, tpm: null, count_rpm: null } } };
+  const current = { ...principal, policy: { ...principal.policy, grants: [{ provider: 'anthropic', model: 'claude-old-1', capabilities: ['messages'] }], limits: { budget: { limit_usd: '100.500000000000', period: { kind: 'calendar_month' } }, rpm: 5, tpm: null, count_rpm: null } } };
   const writes: Record<string, unknown>[] = [];
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -150,7 +150,7 @@ test('policy_form_turns_checkboxes_and_limit_fields_into_the_server_policy', asy
   fireEvent.submit(screen.getByRole('form', { name: '정책 편집' }));
   fireEvent.click(screen.getByRole('button', { name: '명령 실행' }));
   await screen.findByText(/서버 재조회 완료/);
-  expect(writes[0]).toEqual({ expected_version: '13', disabled: false, reason: '모델 추가', grants: [{ provider: 'anthropic', model: 'claude-opus-5-5', capabilities: ['messages', 'count_tokens'] }], limits: { budget: { mode: 'actual', limit_usd: '20.000000000000', period: { kind: 'calendar_month' } }, rpm: null, tpm: 50000, count_rpm: null } });
+  expect(writes[0]).toEqual({ expected_version: '13', disabled: false, reason: '모델 추가', grants: [{ provider: 'anthropic', model: 'claude-opus-5-5', capabilities: ['messages', 'count_tokens'] }], limits: { budget: { limit_usd: '20.000000000000', period: { kind: 'calendar_month' } }, rpm: null, tpm: 50000, count_rpm: null } });
 });
 
 test('policy_form_rejects_a_malformed_budget_without_sending', async () => {
@@ -165,7 +165,6 @@ test('policy_form_rejects_a_malformed_budget_without_sending', async () => {
   }));
   render(<App />);
   expect((await screen.findByRole('group', { name: '사용할 수 있는 모델·API' })).textContent).toContain('고를 수 있는 모델이 없습니다');
-  pickOption(screen.getByLabelText('월 예산 방식'), '예약 기반');
   fireEvent.change(screen.getByLabelText('월 예산 (USD)'), { target: { value: '1.5.0' } });
   fireEvent.change(screen.getByLabelText('정책 변경 사유'), { target: { value: 'x' } });
   fireEvent.submit(screen.getByRole('form', { name: '정책 편집' }));

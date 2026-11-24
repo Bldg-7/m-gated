@@ -22,6 +22,9 @@ const FIELDS: &[&str] = &[
     "content_block.type",
     "delta.type",
 ];
+/// 끊긴 요청의 `received` 정산에 쓰는 출력 내용. 메모리에만 두고 저장하지 않는다.
+/// 회계 metadata가 아니므로 한 조각이 decoder 상한을 넘어도 스트림을 끊지 않고 내용만 버린다.
+const CONTENT: &[&str] = &["delta.text", "delta.thinking", "delta.partial_json"];
 #[derive(Default)]
 pub struct AnthropicStream {
     started: bool,
@@ -159,6 +162,18 @@ impl AnthropicStream {
         }
         Ok(())
     }
+    /// `message_start`를 받은 뒤의 입력 usage. 끊긴 요청은 이 값을 입력 토큰으로 쓴다.
+    pub fn start_usage(&self) -> Option<crate::ledger::finance::StartUsage> {
+        if !self.started {
+            return None;
+        }
+        Some(crate::ledger::finance::StartUsage {
+            actual_model: self.model.clone()?,
+            input_tokens: self.input?,
+            cache_read_tokens: self.cache_read,
+            cache_write_tokens: self.cache_write,
+        })
+    }
     pub fn finish(&self) -> Result<FinalUsage, UpstreamError> {
         if !self.stopped {
             return Err(UpstreamError::Protocol);
@@ -290,7 +305,8 @@ impl AnthropicClient {
             .map(str::to_owned);
         let (queue, body) = byte_queue(control.clone());
         let mut delivery = Some((head, headers, body));
-        let mut parser = SseDecoder::with_string_shapes(FIELDS, &["error.type", "error.message"]);
+        let mut parser = SseDecoder::with_string_shapes(FIELDS, &["error.type", "error.message"])
+            .with_content(CONTENT);
         parser.reserve_retained(super::transport::StreamProgress::RETAINED_BYTES);
         let mut reducer = AnthropicStream::default();
         let mut native_error = false;
@@ -365,9 +381,36 @@ impl AnthropicClient {
                             } else {
                                 let terminal = event.values.get("type").and_then(Scalar::text)
                                     == Some("message_stop");
+                                // 받은 출력 내용은 event를 넘기기 전에 꺼내 둔다.
+                                // 상한을 넘어 버린 조각(StringShape)은 None으로 남겨 내용이 너무 컸다고 기록한다.
+                                let deltas: Vec<Option<String>> =
+                                    if event.values.get("type").and_then(Scalar::text)
+                                        == Some("content_block_delta")
+                                    {
+                                        CONTENT
+                                            .iter()
+                                            .filter_map(|key| match event.values.get(*key) {
+                                                Some(Scalar::String(s)) => Some(Some(s.clone())),
+                                                Some(Scalar::StringShape) => Some(None),
+                                                _ => None,
+                                            })
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    };
                                 reducer
                                     .event(event)
                                     .inspect_err(|_| progress.invalidate())?;
+                                progress.started = true;
+                                if progress.start.is_none() {
+                                    progress.start = reducer.start_usage();
+                                }
+                                for delta in &deltas {
+                                    match delta {
+                                        Some(text) => progress.received.push(text),
+                                        None => progress.received.drop_content(),
+                                    }
+                                }
                                 terminal_boundary_pending = terminal && parser.boundary_after_cr();
                                 if terminal
                                     && (!terminal_boundary_pending || parser.optional_lf_fits())
@@ -381,7 +424,9 @@ impl AnthropicClient {
                         head(status, headers, body);
                     }
                     control.observe_parser(
-                        parser.retained_peak() + super::transport::StreamProgress::RETAINED_BYTES,
+                        parser.retained_peak()
+                            + super::transport::StreamProgress::RETAINED_BYTES
+                            + progress.received.len(),
                         chunk.len(),
                     );
                     if error_cr_boundary.is_some() {

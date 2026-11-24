@@ -7,7 +7,6 @@ async fn each_gateway_error_has_native_envelope_and_dispatch_headers() {
         (400, "invalid_request", false),
         (400, "unsupported_option", false),
         (400, "unsupported_model", false),
-        (400, "unsupported_strict_policy", false),
         (401, "invalid_credentials", false),
         (403, "auth_source_forbidden", false),
         (403, "access_denied", false),

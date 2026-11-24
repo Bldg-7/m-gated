@@ -22,7 +22,6 @@ struct Envelope {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     RetentionDelete(RetentionDelete),
-    Handoff(Box<crate::ledger::handoff::Handoff>),
     /// 등록 전에 실제 Provider 확인을 거친다. 키는 stdin envelope로만 받는다.
     AddProviderCredential {
         provider: String,
@@ -133,10 +132,6 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
     match envelope.command {
         Command::RetentionDelete(input) => ledger
             .retention_delete(&ctx, config.retention(), &input)
-            .await
-            .map_err(|_| StartupError::RuntimeFailure),
-        Command::Handoff(input) => ledger
-            .handoff(&ctx, *input)
             .await
             .map_err(|_| StartupError::RuntimeFailure),
         Command::AddProviderCredential {

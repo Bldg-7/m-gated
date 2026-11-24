@@ -692,19 +692,10 @@ fn only_declared_provider_api_profiles_are_configurable_and_free_count_is_explic
             .replace("provider: anthropic", &format!("provider: {provider}"))
             .replace("https://api.anthropic.com", origin)
             .replace("api: messages", &format!("api: {api}"));
-        if provider != "anthropic" {
-            yaml=yaml.replace("        input_bound_contract:\n          kind: anthropic_context_v1\n          context_tokens: 4096\n          input_categories: [input, cache_read, cache_write]\n","");
-        }
         if no_output {
             yaml = yaml
                 .replace("        max_output_tokens: 1024\n", "")
                 .replace("          output: '2.000000000000'\n", "");
-        }
-        if api == "deepseek_chat" {
-            yaml = yaml.replace(
-                "api: deepseek_chat",
-                "api: deepseek_chat\n        billing_time_rule: fixed_admission_v1",
-            );
         }
         if api == "deepseek_chat" {
             yaml = yaml.replace(
@@ -902,73 +893,78 @@ fn execution_ceiling_is_strict_and_changes_access_digest() {
         "execution_ceiling: {rpm: 0}",
         "execution_ceiling: {tpm: 1000000001}",
         "execution_ceiling: {unexpected: 1}",
-        "execution_ceiling: {budget: {mode: actual, limit_usd: '1.000000000000', period: {kind: calendar_month, timezone: UTC}}}",
-        "execution_ceiling: {budget: {mode: actual, limit_usd: '0.0000000000001', period: {kind: calendar_month}}}",
+        "execution_ceiling: {budget: {limit_usd: '1.000000000000', period: {kind: calendar_month, timezone: UTC}}}",
+        "execution_ceiling: {budget: {limit_usd: '0.0000000000001', period: {kind: calendar_month}}}",
     ] {
         assert!(load(&format!("{}{suffix}\n", support::YAML)).is_err());
     }
-    let valid=load(&format!("{}execution_ceiling: {{budget: {{mode: reserved, limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}, rpm: 2, tpm: 4096, count_rpm: 3}}\n",support::YAML)).unwrap();
+    let valid=load(&format!("{}execution_ceiling: {{budget: {{limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}, rpm: 2, tpm: 4096, count_rpm: 3}}\n",support::YAML)).unwrap();
     assert_ne!(auth_config_digest(&original), auth_config_digest(&valid));
     assert_eq!(valid.execution_ceiling().rpm, Some(2));
-    let without=load(&support::YAML.replace("        input_bound_contract:\n          kind: anthropic_context_v1\n          context_tokens: 4096\n          input_categories: [input, cache_read, cache_write]\n","")).unwrap();
-    assert_ne!(auth_config_digest(&original), auth_config_digest(&without));
-    reject(
-        &support::YAML.replace("context_tokens: 4096", "context_tokens: 4095"),
-        StartupError::InvalidProfile,
-    );
-    reject(
-        &support::YAML.replace(
-            "input_categories: [input, cache_read, cache_write]",
-            "input_categories: [input]",
-        ),
-        StartupError::InvalidProfile,
-    );
-    reject(
-        &support::YAML.replace(
-            "api: messages",
-            "api: messages\n        internal_count: true",
-        ),
-        StartupError::InvalidProfile,
+    assert_eq!(
+        valid.execution_ceiling().budget.as_ref().unwrap().limit_usd,
+        "1.000000000000"
     );
 }
 
 #[test]
-fn responses_context_contract_is_api_specific_and_typed() {
-    let yaml = support::YAML
+fn removed_reservation_settings_fail_at_startup() {
+    // 결정 0005로 예약, 예산 방식, 입력 상한 계약, 내부 count, 시간대 가격 규칙을 없앴다.
+    // 이 칸이 남은 설정은 조용히 무시하지 않고 시작을 막는다.
+    let deepseek = support::YAML
+        .replace("provider: anthropic", "provider: deepseek")
+        .replace("https://api.anthropic.com", "https://api.deepseek.com")
+        .replace("api: messages", "api: deepseek_chat")
+        .replace(
+            "          input: '1.000000000000'",
+            "          input: '1.000000000000'\n          cache_read: '0.500000000000'",
+        );
+    let responses = support::YAML
         .replace("provider: anthropic", "provider: openai")
         .replace("https://api.anthropic.com", "https://api.openai.com")
-        .replace("api: messages", "api: responses")
-        .replace("anthropic_context_v1", "openai_responses_context_v1")
-        .replace("[input, cache_read, cache_write]", "[input]");
-    let environment = support::environment();
-    let result = config::load(ConfigInputs {
-        yaml: &yaml,
-        file_environment: None,
-        environment: &environment,
-    });
-    assert!(
-        result.is_ok(),
-        "검증된 Responses native context 계약을 거부했다"
-    );
-    for bad in [
-        yaml.replace("[input]", "[input, cache_read]"),
-        yaml.replace("context_tokens: 4096", "context_tokens: 4095"),
-        yaml.replace("openai_responses_context_v1", "anthropic_context_v1"),
+        .replace("api: messages", "api: responses");
+    for (base, api) in [
+        (support::YAML.to_owned(), "messages"),
+        (responses, "responses"),
+        (deepseek, "deepseek_chat"),
     ] {
-        assert!(
-            config::load(ConfigInputs {
-                yaml: &bad,
-                file_environment: None,
-                environment: &environment
-            })
-            .is_err()
+        load(&base).unwrap();
+        for field in [
+            "internal_count: true",
+            "internal_count: false",
+            "input_bound_contract: {kind: anthropic_context_v1, context_tokens: 4096, input_categories: [input, cache_read, cache_write]}",
+            "input_bound_contract: {kind: openai_responses_context_v1, context_tokens: 4096, input_categories: [input]}",
+            "input_bound_contract: {kind: deepseek_chat_context_v1, context_tokens: 4096, input_categories: [messages]}",
+            "billing_time_rule: fixed_admission_v1",
+            "billing_time_rule: deepseek_time_unresolved_v1",
+        ] {
+            let yaml = base.replace(
+                &format!("api: {api}"),
+                &format!("api: {api}\n        {field}"),
+            );
+            assert_eq!(
+                load(&yaml).unwrap_err(),
+                StartupError::ConfigSyntax,
+                "{api}: {field}"
+            );
+        }
+    }
+    for mode in ["actual", "reserved"] {
+        reject(
+            &format!(
+                "{}execution_ceiling: {{budget: {{mode: {mode}, limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}}}\n",
+                support::YAML
+            ),
+            StartupError::ConfigSyntax,
         );
     }
 }
 
 #[test]
 fn chat_and_embeddings_profiles_require_api_specific_output_dimensions_and_encodings() {
-    let base = support::YAML.replace("provider: anthropic", "provider: openai").replace("https://api.anthropic.com", "https://api.openai.com").replace("        input_bound_contract:\n          kind: anthropic_context_v1\n          context_tokens: 4096\n          input_categories: [input, cache_read, cache_write]\n", "");
+    let base = support::YAML
+        .replace("provider: anthropic", "provider: openai")
+        .replace("https://api.anthropic.com", "https://api.openai.com");
     let env = support::environment();
     let valid = |yaml: &str| {
         config::load(ConfigInputs {
@@ -1023,7 +1019,7 @@ fn chat_and_embeddings_profiles_require_api_specific_output_dimensions_and_encod
 }
 
 #[test]
-fn deepseek_requires_explicit_time_and_own_context_contract() {
+fn deepseek_profile_needs_no_time_rule_or_context_contract() {
     let base = include_str!("support/config.yaml")
         .replace("provider: anthropic", "provider: deepseek")
         .replace("https://api.anthropic.com", "https://api.deepseek.com")
@@ -1040,29 +1036,31 @@ fn deepseek_requires_explicit_time_and_own_context_contract() {
             environment: &env,
         })
     };
-    assert!(load(&base).is_err());
+    // DeepSeek도 다른 Provider처럼 받을 때의 가격으로 정산한다. 시간대 규칙 칸은 없다.
+    assert!(load(&base).is_ok());
     for time in ["fixed_admission_v1", "deepseek_time_unresolved_v1"] {
-        let yaml=base.replace("api: deepseek_chat",&format!("api: deepseek_chat\n        billing_time_rule: {time}\n        input_bound_contract:\n          kind: deepseek_chat_context_v1\n          context_tokens: 4096\n          input_categories: [messages]"));
-        assert!(load(&yaml).is_ok());
-        assert!(load(&yaml.replace("deepseek_chat_context_v1", "openai_chat_context_v1")).is_err());
-        assert!(load(&yaml.replace("billing_time_rule:", "unknown_billing_rule:")).is_err());
-        assert!(load(&yaml.replace(time, "unverified_utc_schedule")).is_err());
+        let yaml = base.replace(
+            "api: deepseek_chat",
+            &format!("api: deepseek_chat\n        billing_time_rule: {time}"),
+        );
+        assert_eq!(load(&yaml).unwrap_err(), StartupError::ConfigSyntax);
     }
-    let other = include_str!("support/config.yaml").replace(
-        "api: messages",
-        "api: messages\n        billing_time_rule: deepseek_time_unresolved_v1",
+    // 이미지 입력은 DeepSeek profile에 둘 수 없다.
+    assert_eq!(
+        load(&base.replace(
+            "api: deepseek_chat",
+            "api: deepseek_chat\n        features: [inline_png]"
+        ))
+        .unwrap_err(),
+        StartupError::InvalidProfile
     );
-    assert!(load(&other).is_err());
 }
 #[test]
 fn deepseek_price_categories_are_not_anthropic_rates() {
     let base = include_str!("support/config.yaml")
         .replace("provider: anthropic", "provider: deepseek")
         .replace("https://api.anthropic.com", "https://api.deepseek.com")
-        .replace(
-            "api: messages",
-            "api: deepseek_chat\n        billing_time_rule: fixed_admission_v1",
-        );
+        .replace("api: messages", "api: deepseek_chat");
     let env = support::environment();
     assert!(
         config::load(ConfigInputs {

@@ -20,6 +20,8 @@ export type MockState = {
   catalog: { version: number; approved_at: string | null; approved_by_email: string | null; entries: CatalogEntry[] };
   proposals: Map<string, CatalogProposal>;
   timezone: { timezone: string; pending: string | null; version: number };
+  /** 끊긴 요청의 정산 규칙(Anthropic). */
+  cutoffRule: { cutoff_rule: 'received' | 'max_tokens'; version: number };
   authorizationVersion: number;
 };
 
@@ -75,7 +77,7 @@ export const priceSource: { provider: string; model: string; proposed: CatalogEn
 ];
 
 const noLimits = (): Limits => ({ budget: null, rpm: null, tpm: null, count_rpm: null });
-const budget = (mode: 'actual' | 'reserved', amount: string): Limits['budget'] => ({ mode, limit_usd: usd(pico(amount)), period: { kind: 'calendar_month' } });
+const budget = (amount: string): Limits['budget'] => ({ limit_usd: usd(pico(amount)), period: { kind: 'calendar_month' } });
 const grant = (provider: string, model: string, ...caps: string[]): Grant => ({ provider, model, capabilities: caps });
 /** 시드가 고정된 난수. 서버를 다시 띄워도 같은 모양의 데이터가 나온다. */
 function random(seed: number) { let s = seed; return () => { s = (s * 1664525 + 1013904223) % 4294967296; return s / 4294967296; }; }
@@ -90,15 +92,15 @@ export function createState(): MockState {
   const person = (n: number, id: string, kind: 'human' | 'service', display_name: string, email: string | null, owner: string | null, policy: { version: number; disabled?: boolean; grants: Grant[]; limits: Limits }, safety = safe()): MockPrincipal =>
     ({ id, kind, display_name, email, management_owner_id: owner, version: n + 2, policy: { id: uid(5, n), disabled: false, ...policy }, safety, scope_id: uid(6, n) });
   const principals: MockPrincipal[] = [
-    person(1, P.admin, 'human', '미리보기 관리자', 'admin@example.test', null, { version: 12, grants: [grant('anthropic', OPUS, 'messages', 'count_tokens'), grant('anthropic', HAIKU, 'messages', 'count_tokens'), grant('openai', GPT, 'responses')], limits: { budget: budget('actual', '200'), rpm: 120, tpm: null, count_rpm: null } }),
-    person(2, P.backend, 'human', '백엔드 개발자', 'backend-dev@example.test', null, { version: 7, grants: [grant('anthropic', OPUS, 'messages', 'count_tokens'), grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('reserved', '50'), rpm: 60, tpm: 200000, count_rpm: 30 } }),
-    person(3, P.analyst, 'human', '데이터 분석가', 'analyst@example.test', null, { version: 4, grants: [grant('openai', GPT, 'responses'), grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('actual', '30'), rpm: null, tpm: null, count_rpm: null } }),
+    person(1, P.admin, 'human', '미리보기 관리자', 'admin@example.test', null, { version: 12, grants: [grant('anthropic', OPUS, 'messages', 'count_tokens'), grant('anthropic', HAIKU, 'messages', 'count_tokens'), grant('openai', GPT, 'responses')], limits: { budget: budget('200'), rpm: 120, tpm: null, count_rpm: null } }),
+    person(2, P.backend, 'human', '백엔드 개발자', 'backend-dev@example.test', null, { version: 7, grants: [grant('anthropic', OPUS, 'messages', 'count_tokens'), grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('50'), rpm: 60, tpm: 200000, count_rpm: 30 } }),
+    person(3, P.analyst, 'human', '데이터 분석가', 'analyst@example.test', null, { version: 4, grants: [grant('openai', GPT, 'responses'), grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('30'), rpm: null, tpm: null, count_rpm: null } }),
     person(4, P.designer, 'human', '디자이너', 'designer@example.test', null, { version: 2, grants: [grant('anthropic', HAIKU, 'messages')], limits: noLimits() }),
-    person(5, P.qa, 'human', 'QA 담당자', 'qa@example.test', null, { version: 3, grants: [grant('anthropic', OPUS, 'messages'), grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('actual', '20'), rpm: 30, tpm: null, count_rpm: null } },
+    person(5, P.qa, 'human', 'QA 담당자', 'qa@example.test', null, { version: 3, grants: [grant('anthropic', OPUS, 'messages'), grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('20'), rpm: 30, tpm: null, count_rpm: null } },
       { paused: true, version: '4', reason: 'cost_bound_violation', paused_at: ago(0, 5), trigger_request_id: uid(4, 4) }),
     person(6, P.intern, 'human', '인턴 (정지된 계정)', 'intern@example.test', null, { version: 5, disabled: true, grants: [grant('anthropic', HAIKU, 'messages')], limits: noLimits() }),
-    person(7, P.batch, 'service', 'batch-summarizer', null, P.admin, { version: 9, grants: [grant('anthropic', HAIKU, 'messages'), grant('openai', GPT, 'responses')], limits: { budget: budget('reserved', '500'), rpm: 600, tpm: 2000000, count_rpm: null } }),
-    person(8, P.bot, 'service', 'support-bot', null, P.backend, { version: 2, grants: [grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('actual', '80'), rpm: 240, tpm: null, count_rpm: null } }),
+    person(7, P.batch, 'service', 'batch-summarizer', null, P.admin, { version: 9, grants: [grant('anthropic', HAIKU, 'messages'), grant('openai', GPT, 'responses')], limits: { budget: budget('500'), rpm: 600, tpm: 2000000, count_rpm: null } }),
+    person(8, P.bot, 'service', 'support-bot', null, P.backend, { version: 2, grants: [grant('anthropic', HAIKU, 'messages')], limits: { budget: budget('80'), rpm: 240, tpm: null, count_rpm: null } }),
   ];
 
   const credential = (id: string, provider: string, label: string, hint: string, createdDays: number, retiredDays: number | null = null): MockCredential =>
@@ -124,7 +126,7 @@ export function createState(): MockState {
   };
   const keys = [
     key(1, K.local, P.admin, '로컬 개발', '1_year', 40, { anthropic: C.platform, openai: C.openai }, [grant('anthropic', OPUS, 'messages', 'count_tokens'), grant('openai', GPT, 'responses')]),
-    key(2, K.ci, P.admin, 'CI 파이프라인', 'unlimited', 120, { anthropic: C.research }, [grant('anthropic', HAIKU, 'messages')], { limits: { budget: budget('reserved', '25'), rpm: 30, tpm: null, count_rpm: null } }),
+    key(2, K.ci, P.admin, 'CI 파이프라인', 'unlimited', 120, { anthropic: C.research }, [grant('anthropic', HAIKU, 'messages')], { limits: { budget: budget('25'), rpm: 30, tpm: null, count_rpm: null } }),
     key(3, K.experiment, P.admin, '지난 분기 실험', '3_months', 100, { anthropic: C.platform }, [grant('anthropic', OPUS, 'messages')], { revokedDays: 20 }),
     key(4, K.demo, P.admin, '만료된 데모 키', '3_months', 97, { openai: C.openai }, [grant('openai', GPT, 'responses')]),
     key(5, K.oldTeam, P.admin, '이전 팀 키', '6_months', 70, { anthropic: C.oldShared }, [grant('anthropic', HAIKU, 'messages')]),
@@ -132,7 +134,7 @@ export function createState(): MockState {
     key(7, K.blocked, P.backend, '연구 키 (인가 해제됨)', '3_years', 44, { anthropic: C.research }, [grant('anthropic', HAIKU, 'messages')]),
     key(8, K.notebook, P.analyst, '분석 노트북', '1_year', 25, { openai: C.openai, anthropic: C.research }, [grant('openai', GPT, 'responses'), grant('anthropic', HAIKU, 'messages')]),
     key(9, K.unlinked, P.designer, '예전 키 (연결 없음)', '1_year', 200, {}, [grant('anthropic', HAIKU, 'messages')]),
-    key(10, K.batchProd, P.batch, 'batch-prod', 'unlimited', 90, { anthropic: C.platform, openai: C.openai }, [grant('anthropic', HAIKU, 'messages'), grant('openai', GPT, 'responses')], { limits: { budget: budget('reserved', '300'), rpm: 300, tpm: 1000000, count_rpm: null } }),
+    key(10, K.batchProd, P.batch, 'batch-prod', 'unlimited', 90, { anthropic: C.platform, openai: C.openai }, [grant('anthropic', HAIKU, 'messages'), grant('openai', GPT, 'responses')], { limits: { budget: budget('300'), rpm: 300, tpm: 1000000, count_rpm: null } }),
     key(11, K.batchStaging, P.batch, 'batch-staging', '6_months', 85, { anthropic: C.platform }, [grant('anthropic', HAIKU, 'messages')], { revokedDays: 9 }),
     key(12, K.bot, P.bot, 'support-bot-main', '1_year', 14, { anthropic: C.platform }, [grant('anthropic', HAIKU, 'messages')]),
   ];
@@ -154,13 +156,12 @@ export function createState(): MockState {
 
   // ── 요청: 미정산·정산 대기·확정, 완료·실패·거절·취소가 섞여 있다 ──
   const periodStart = iso(monthStart('Asia/Seoul', now)), periodEnd = iso(monthStart('Asia/Seoul', now, 1));
-  type Seed = { n: number; principal: string; key: string | null; provider: string; model: string; api: string; minutes: number; phase: string; outcome: string | null; accounting: string; tokens?: [number, number]; reason?: string; stopped?: boolean; http?: number | null; parent?: number; manual?: boolean; credential?: string | null };
+  type Seed = { n: number; principal: string; key: string | null; provider: string; model: string; api: string; minutes: number; phase: string; outcome: string | null; accounting: string; tokens?: [number, number]; reason?: string; stopped?: boolean; http?: number | null; parent?: number; manual?: boolean; credential?: string | null; settledBy?: 'cutoff_received' | 'cutoff_max_tokens' | 'no_response' };
   const request = (s: Seed): RequestDetail => {
     const admitted = now - s.minutes * 60000, finished = s.phase === 'finished' ? iso(admitted + 4200) : null;
     const credentialId = s.credential === undefined ? keys.find(k => k.id === s.key)?.bindings[s.provider] ?? null : s.credential, bound = credentials.find(c => c.id === credentialId);
     const owner = principals.find(p => p.id === s.principal)!, [input, output] = s.tokens ?? [0, 0];
-    const cost = s.accounting !== 'settled' ? null : s.outcome === 'completed' || s.manual ? usd(price(s.provider, s.model, input, output)) : usd(0n);
-    const reservation = usd(price(s.provider, s.model, 60000, 8000));
+    const cost = s.accounting !== 'settled' ? null : s.outcome === 'completed' || s.manual || s.settledBy?.startsWith('cutoff') ? usd(price(s.provider, s.model, input, output)) : usd(0n);
     const observed = (source: string) => ({ source, actual_model: s.model, input_tokens: String(input), output_tokens: String(output), cache_read_tokens: '0', cache_write_tokens: '0', reasoning_tokens: null, counted_input_tokens: null });
     return {
       id: uid(4, s.n), parent_request_id: s.parent ? uid(4, s.parent) : null, purpose: s.parent ? 'internal_count' : 'root', principal_id: s.principal, key_id: s.key, provider: s.provider, model: s.model, api: s.api,
@@ -169,8 +170,8 @@ export function createState(): MockState {
       provider_request_id: s.outcome === 'completed' ? `req_fake_${s.n.toString().padStart(4, '0')}` : null, http_status: s.http === undefined ? (s.outcome === 'completed' ? 200 : null) : s.http,
       pricing_snapshot: { catalog_version: '4', currency: 'USD', unit: 'per_1m_tokens', rates: approved.find(e => e.provider === s.provider && e.model === s.model)?.rates ?? {} },
       execution_snapshot: { policy_version: String(owner.policy.version), max_output_tokens: 8000, stream: s.api !== 'count_tokens' },
-      budgets: owner.policy.limits.budget ? [{ scope_id: owner.scope_id, policy_version: String(owner.policy.version), period_start: periodStart, period_end: periodEnd, reservation_usd: reservation, remaining_reservation_usd: s.accounting === 'settled' ? usd(0n) : reservation, reserved_tokens: '68000', state: s.accounting === 'settled' ? 'released' : 'held' }] : [],
-      usage: { partial: s.tokens && s.accounting === 'unknown' ? observed('provider') : null, final: s.outcome === 'completed' ? observed('provider') : null, late_final: null },
+      budgets: owner.policy.limits.budget ? [{ scope_id: owner.scope_id, policy_version: String(owner.policy.version), period_start: periodStart, period_end: periodEnd, state: s.accounting === 'settled' ? 'settled' : s.accounting === 'unknown' ? 'unknown' : 'active' }] : [],
+      usage: { partial: s.tokens && s.accounting === 'unknown' ? observed('provider') : null, final: s.outcome === 'completed' ? observed('provider') : s.settledBy ? { ...observed(s.settledBy), cutoff_rule: s.settledBy === 'cutoff_received' ? 'received' : s.settledBy === 'cutoff_max_tokens' ? 'max_tokens' : null, cutoff_fallback_reason: null } : null, late_final: null },
       executor_id: uid(7, (s.n % 3) + 1), execution_stopped_at: s.stopped ?? s.phase === 'finished' ? finished ?? iso(admitted + 9000) : null,
       settlement: s.manual ? { source: 'manual_entry', decision: 'charged', cost_usd: cost!, reason: '공급사 사용량 화면에서 확인한 금액을 반영했습니다.', actor_principal_id: P.admin, settled_at: iso(admitted + 6 * 3600000), executor_id: uid(7, (s.n % 3) + 1), execution_stop_source: 'runtime' } : null,
     };
@@ -193,8 +194,10 @@ export function createState(): MockState {
     request({ n: 15, principal: P.backend, key: K.blocked, provider: 'anthropic', model: HAIKU, api: 'messages', minutes: 600, phase: 'finished', outcome: 'rejected', accounting: 'settled', reason: 'provider_credential_not_authorized', credential: null }),
     request({ n: 16, principal: P.designer, key: K.unlinked, provider: 'anthropic', model: HAIKU, api: 'messages', minutes: 700, phase: 'finished', outcome: 'rejected', accounting: 'settled', reason: 'rate_limited', credential: null }),
     request({ n: 17, principal: P.batch, key: K.batchProd, provider: 'anthropic', model: HAIKU, api: 'messages', minutes: 4400, phase: 'finished', outcome: 'failed', accounting: 'settled', tokens: [61000, 900], reason: 'stream_interrupted', manual: true }),
-    request({ n: 18, principal: P.admin, key: K.local, provider: 'anthropic', model: OPUS, api: 'count_tokens', minutes: 20, phase: 'finished', outcome: 'completed', accounting: 'settled', tokens: [52340, 0], parent: 8 }),
+    request({ n: 18, principal: P.admin, key: K.local, provider: 'anthropic', model: OPUS, api: 'count_tokens', minutes: 20, phase: 'finished', outcome: 'completed', accounting: 'settled', tokens: [52340, 0] }),
+    request({ n: 19, principal: P.backend, key: K.backend, provider: 'anthropic', model: OPUS, api: 'messages', minutes: 35, phase: 'finished', outcome: 'cancelled', accounting: 'settled', tokens: [24000, 1200], reason: 'client_cancelled', settledBy: 'cutoff_received' }),
+    request({ n: 20, principal: P.qa, key: null, provider: 'anthropic', model: HAIKU, api: 'messages', minutes: 50, phase: 'finished', outcome: 'failed', accounting: 'settled', reason: 'provider_error', http: 529, settledBy: 'no_response' }),
   ];
 
-  return { principals, credentials, authorizations, keys, requests, usage, catalog: { version: 4, approved_at: ago(12), approved_by_email: 'admin@example.test', entries: approved.map(e => ({ ...e })) }, proposals: new Map(), timezone: { timezone: 'Asia/Seoul', pending: null, version: 3 }, authorizationVersion: 20 };
+  return { principals, credentials, authorizations, keys, requests, usage, catalog: { version: 4, approved_at: ago(12), approved_by_email: 'admin@example.test', entries: approved.map(e => ({ ...e })) }, proposals: new Map(), timezone: { timezone: 'Asia/Seoul', pending: null, version: 3 }, cutoffRule: { cutoff_rule: 'received', version: 1 }, authorizationVersion: 20 };
 }

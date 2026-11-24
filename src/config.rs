@@ -253,10 +253,7 @@ impl CatalogTemplate {
             features: self.features.clone(),
             approved_beta: self.approved_beta.clone(),
             billing_class: BillingClass::Chargeable,
-            internal_count: false,
             count_billing: None,
-            billing_time_rule: None,
-            input_bound_contract: None,
             chat_output_limit_field: self.chat_output_limit_field.clone(),
             embedding_dimensions: None,
             embedding_encodings: Vec::new(),
@@ -313,32 +310,11 @@ pub enum NativeFeature {
     JsonSchema,
     InlinePng,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct InputBoundContract {
-    pub kind: String,
-    pub context_tokens: u64,
-    pub input_categories: Vec<String>,
-}
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingDimensions {
     pub default: u32,
     pub max: u32,
-}
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BillingTimeRule {
-    FixedAdmissionV1,
-    DeepseekTimeUnresolvedV1,
-}
-impl BillingTimeRule {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::FixedAdmissionV1 => "fixed_admission_v1",
-            Self::DeepseekTimeUnresolvedV1 => "deepseek_time_unresolved_v1",
-        }
-    }
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,11 +331,7 @@ pub struct ModelProfile {
     pub approved_beta: Vec<String>,
     #[serde(default)]
     pub billing_class: BillingClass,
-    #[serde(default)]
-    pub internal_count: bool,
     pub count_billing: Option<String>,
-    pub billing_time_rule: Option<BillingTimeRule>,
-    pub input_bound_contract: Option<InputBoundContract>,
     pub chat_output_limit_field: Option<String>,
     pub embedding_dimensions: Option<EmbeddingDimensions>,
     #[serde(default)]
@@ -854,26 +826,6 @@ impl ValidatedConfig {
             let mut profiles = BTreeSet::new();
             for profile in &provider.profiles {
                 profile.validate(provider.provider, &self.limits)?;
-                if profile.internal_count
-                    && (provider.provider != ProviderId::Anthropic
-                        || profile.api != ApiKind::Messages
-                        || !provider.profiles.iter().any(|count| {
-                            count.model == profile.model
-                                && count.api == ApiKind::CountTokens
-                                && profile
-                                    .features
-                                    .iter()
-                                    .filter(|f| {
-                                        !matches!(
-                                            f,
-                                            NativeFeature::Thinking | NativeFeature::JsonSchema
-                                        )
-                                    })
-                                    .all(|f| count.features.contains(f))
-                        }))
-                {
-                    return Err(StartupError::InvalidProfile);
-                }
                 if !profiles.insert((&profile.model, profile.api)) {
                     return Err(StartupError::InvalidProfile);
                 }
@@ -967,22 +919,6 @@ impl ModelProfile {
         let bounded_text =
             |s: &str, max| !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control);
         let count = self.api == ApiKind::CountTokens;
-        if self.input_bound_contract.is_some()
-            && match provider {
-                ProviderId::Anthropic => {
-                    crate::providers::anthropic::verified_input_bound(self).is_none()
-                }
-                ProviderId::Openai => {
-                    crate::providers::openai::verified_input_bound(self).is_none()
-                }
-                ProviderId::Deepseek => {
-                    crate::providers::deepseek::verified_input_bound(self).is_none()
-                }
-            }
-        {
-            return Err(StartupError::InvalidProfile);
-        }
-
         if (self.api == ApiKind::OpenaiChat
             && self.chat_output_limit_field.as_deref() == Some("max_tokens")
             && self.features.contains(&NativeFeature::Thinking))
@@ -1069,14 +1005,7 @@ impl ModelProfile {
         {
             return Err(StartupError::InvalidPrice);
         }
-        if (provider == ProviderId::Deepseek
-            && (self.billing_time_rule.is_none()
-                || self.features.contains(&NativeFeature::InlinePng)))
-            || (provider != ProviderId::Deepseek
-                && self
-                    .billing_time_rule
-                    .is_some_and(|r| r != BillingTimeRule::FixedAdmissionV1))
-        {
+        if provider == ProviderId::Deepseek && self.features.contains(&NativeFeature::InlinePng) {
             return Err(StartupError::InvalidProfile);
         }
         if provider != ProviderId::Anthropic && !self.approved_beta.is_empty() {

@@ -35,14 +35,17 @@ fn configuration_yaml(yaml: &str) -> config::ValidatedConfig {
     })
     .unwrap()
 }
-fn verified_yaml() -> String {
-    include_str!("support/config.yaml").replace("provider: anthropic","provider: openai").replace("https://api.anthropic.com","https://api.openai.com").replace("api: messages","api: responses").replace("        max_input_tokens: 4096","        features: [client_tools, thinking, cache, json_schema, inline_png]\n        input_bound_contract:\n          kind: openai_responses_context_v1\n          context_tokens: 4096\n          input_categories: [input]\n        max_input_tokens: 4096").replace("          input: '1.000000000000'","          input: '1.000000000000'\n          cache_read: '0.500000000000'")
+/// client tool·thinking·cache·json_schema·이미지 기능과 cache 읽기 가격을 둔 Responses profile.
+fn feature_yaml() -> String {
+    include_str!("support/config.yaml").replace("provider: anthropic","provider: openai").replace("https://api.anthropic.com","https://api.openai.com").replace("api: messages","api: responses").replace("        max_input_tokens: 4096","        features: [client_tools, thinking, cache, json_schema, inline_png]\n        max_input_tokens: 4096").replace("          input: '1.000000000000'","          input: '1.000000000000'\n          cache_read: '0.500000000000'")
 }
-fn verified_configuration() -> config::ValidatedConfig {
-    configuration_yaml(&verified_yaml())
+fn feature_configuration() -> config::ValidatedConfig {
+    configuration_yaml(&feature_yaml())
 }
 struct Harness {
     db: postgres::TestDb,
+    /// 제품 조립이 쓰는 DB. 고정 시계 조립에서는 시험 schema의 시계 함수를 먼저 찾는 연결이다.
+    database: Arc<m_gated::ledger::PgIdentityStore>,
     provider: Arc<provider::Provider>,
     _provider_server: provider::Server,
     _jwks: sso::Server,
@@ -63,6 +66,13 @@ impl Harness {
         Self::with_reset(cfg, false).await
     }
     async fn with_reset(cfg: config::ValidatedConfig, reset: bool) -> Self {
+        Self::assemble(cfg, reset, false).await
+    }
+    /// 제품 SQL 시각을 gw_fixture_clock으로 고정한다. 시험은 set_clock으로 시계를 옮긴다.
+    async fn with_clock(cfg: config::ValidatedConfig) -> Self {
+        Self::assemble(cfg, false, true).await
+    }
+    async fn assemble(cfg: config::ValidatedConfig, reset: bool, clock: bool) -> Self {
         use m_gated::{
             auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
             bootstrap::{self, Dependencies},
@@ -71,6 +81,11 @@ impl Harness {
             runtime::Dependency,
         };
         let db = postgres::TestDb::new().await;
+        let database = if clock {
+            db.clock_store(None).await
+        } else {
+            db.store.clone()
+        };
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
         let verifier = SsoVerifier::new(
@@ -82,18 +97,17 @@ impl Harness {
             .verify(&sso::credential(token.clone()), 1900000000)
             .await
             .unwrap();
-        let current = db
-            .store
+        let current = database
             .current_human(&identity, &AccessSettings::from_config(&cfg))
             .await
             .unwrap();
         let principal = current.id;
-        sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"openai","model":"synthetic-text","capabilities":["responses"]}])).execute(db.store.pool()).await.unwrap();
-        let key = finance::virtual_key(&db.store, &cfg, principal).await;
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+        sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"openai","model":"synthetic-text","capabilities":["responses"]}])).execute(database.pool()).await.unwrap();
+        let key = finance::virtual_key(&database, &cfg, principal).await;
+        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
             PgLedger::new(
-                db.store.clone(),
+                database.clone(),
                 AccessSettings::from_config(&cfg),
                 m_gated::gateway::auth_config_digest(&cfg),
             )
@@ -119,7 +133,7 @@ impl Harness {
         let dashboard = Arc::new(m_gated::admin::DashboardApi::new(
             &cfg,
             auth.clone(),
-            db.store.clone(),
+            database.clone(),
         ));
         let app = bootstrap::build(
             cfg,
@@ -150,6 +164,7 @@ impl Harness {
         ));
         Self {
             db,
+            database,
             provider,
             _provider_server: provider_server,
             _jwks: jwks,
@@ -185,6 +200,7 @@ impl Harness {
     async fn close(self) {
         self.task.abort();
         let _ = self.task.await;
+        self.database.pool().close().await;
         self.db.close().await;
     }
 }
@@ -260,24 +276,26 @@ async fn idle(h: &Harness) {
     assert_eq!(h.runtime.available_inference(), 16);
     assert_eq!(h.runtime.active_principals(), 0);
 }
-async fn strict(h: &Harness) {
-    sqlx::query("UPDATE gw_policies SET budget_mode='reserved',budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
-    h.provider.responses_contract(4096, 1024).await;
+/// 예산과 분당 토큰 한도를 함께 둔 주체 정책. 두 한도 모두 정산된 금액·토큰만 본다.
+async fn limited(h: &Harness) {
+    sqlx::query("UPDATE gw_policies SET budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
 }
-async fn reservation(h: &Harness) {
-    let r=sqlx::query("SELECT r.phase,b.reservation_usd::text AS amount,b.remaining_reservation_usd::text AS held,b.reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) ORDER BY admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
+/// 송신 중인 요청은 아직 정산 전이다. 실행 중에는 금액도 토큰도 잡아 두지 않는다.
+async fn dispatching(h: &Harness) {
+    let r=sqlx::query("SELECT r.phase,r.accounting_state,b.state,t.cost_usd::text AS cost,(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) AS settled_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) ORDER BY r.admitted_at DESC LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(r.get::<String, _>("phase"), "dispatching");
-    assert_eq!(r.get::<String, _>("amount"), "0.004296000000");
-    assert_eq!(r.get::<String, _>("held"), "0.004296000000");
-    assert_eq!(r.get::<i64, _>("reserved_tokens"), 4196);
+    assert_eq!(r.get::<String, _>("accounting_state"), "pending");
+    assert_eq!(r.get::<String, _>("state"), "active");
+    assert_eq!(r.get::<String, _>("cost"), "0.000000000000");
+    assert_eq!(r.get::<i64, _>("settled_tokens"), 0);
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn responses_completed_and_output_limit_incomplete_release_nonzero_reservation_and_tpm() {
+async fn responses_completed_and_output_limit_incomplete_settle_cost_and_tpm_tokens() {
     for stream in [false, true] {
         for status in ["completed", "incomplete"] {
-            let h = Harness::with_config(verified_configuration()).await;
-            strict(&h).await;
+            let h = Harness::with_config(feature_configuration()).await;
+            limited(&h).await;
             let wire = if stream {
                 {
                     let progress = |sequence| {
@@ -328,7 +346,7 @@ async fn responses_completed_and_output_limit_incomplete_release_nonzero_reserva
             let send = h.request("/openai/v1/responses", body.clone()).send();
             let check = async {
                 started.await.unwrap();
-                reservation(&h).await;
+                dispatching(&h).await;
                 release.send(()).unwrap();
             };
             let (r, ()) = tokio::join!(send, check);
@@ -341,13 +359,11 @@ async fn responses_completed_and_output_limit_incomplete_release_nonzero_reserva
                 .unwrap();
             assert_eq!(r.bytes().await.unwrap(), wire);
             idle(&h).await;
-            let r=sqlx::query("SELECT r.outcome,r.accounting_state,r.cost_usd::text AS cost,b.remaining_reservation_usd::text AS held,b.remaining_reserved_tokens,w.reserved_tokens,w.settled_tokens,t.unknown_count,t.input_tokens,t.output_tokens,e.normalized_usage AS usage,e.provider_usage AS native,e.pricing_resolution FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) JOIN test_user_rate_windows w ON (w.scope_id,w.lane,w.window_start)=(b.scope_id,b.rate_lane,b.rate_start) JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+            // 정산 토큰은 받은 시각이 아니라 정산한 1분 칸에 쌓인다. 이 scope의 칸 전체 합으로 본다.
+            let r=sqlx::query("SELECT r.outcome,r.accounting_state,r.cost_usd::text AS cost,(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) AS settled_tokens,t.unknown_count,t.input_tokens,t.output_tokens,e.normalized_usage AS usage,e.provider_usage AS native,e.pricing_resolution FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(r.get::<String, _>("outcome"), "completed");
             assert_eq!(r.get::<String, _>("accounting_state"), "settled");
             assert_eq!(r.get::<String, _>("cost"), "0.000120000000");
-            assert_eq!(r.get::<String, _>("held"), "0.000000000000");
-            assert_eq!(r.get::<i64, _>("remaining_reserved_tokens"), 0);
-            assert_eq!(r.get::<i64, _>("reserved_tokens"), 0);
             assert_eq!(r.get::<i64, _>("settled_tokens"), 120);
             assert_eq!(r.get::<i64, _>("unknown_count"), 0);
             assert_eq!(r.get::<i64, _>("input_tokens"), 100);
@@ -404,9 +420,9 @@ async fn responses_completed_and_output_limit_incomplete_release_nonzero_reserva
                 .unwrap(),
                 2
             );
-            let totals=sqlx::query("SELECT cost_usd::text AS cost, reserved_usd::text AS reserved,settled_count,unknown_count,input_tokens,output_tokens FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+            let totals=sqlx::query("SELECT cost_usd::text AS cost,settled_count,unknown_count,input_tokens,output_tokens,(SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows) AS settled_tokens FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
             assert_eq!(totals.get::<String, _>("cost"), "0.000240000000");
-            assert_eq!(totals.get::<String, _>("reserved"), "0.000000000000");
+            assert_eq!(totals.get::<i64, _>("settled_tokens"), 240);
             assert_eq!(totals.get::<i64, _>("settled_count"), 2);
             assert_eq!(totals.get::<i64, _>("unknown_count"), 0);
             assert_eq!(totals.get::<i64, _>("input_tokens"), 200);
@@ -416,14 +432,38 @@ async fn responses_completed_and_output_limit_incomplete_release_nonzero_reserva
     }
 }
 
+/// Provider가 인증 오류·redirect·HTTP 오류로 답했거나 응답 전에 끊긴 요청은 0원으로 정산하고 막지 않는다(결정 0005).
+/// 다음 요청은 그대로 Provider에 보낸다.
+async fn no_response(h: &Harness) {
+    assert_eq!(
+        finance::last_settlement(h.db.store.pool()).await,
+        finance::no_response()
+    );
+    let totals:(i64,String,i64)=sqlx::query_as("SELECT t.unknown_count,t.cost_usd::text,(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=t.scope_id) FROM test_user_usage_totals t").fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(totals, (0, "0.000000000000".into(), 0));
+    let sent = h.provider.calls.lock().await.len();
+    let next = h
+        .request("/openai/v1/responses", BODY)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        next.headers()
+            .get("x-gateway-error-code")
+            .is_none_or(|v| v != "unsettled_usage_block")
+    );
+    let _ = next.bytes().await;
+    idle(h).await;
+    assert_eq!(h.provider.calls.lock().await.len(), sent + 1);
+}
 async fn unknown(h: &Harness) {
-    let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,b.remaining_reservation_usd::text AS held,b.remaining_reserved_tokens,t.unknown_count,t.reserved_usd::text AS reserved FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) ORDER BY r.admitted_at LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
+    // unknown 요청은 비용도 토큰도 정산하지 않는다. 대신 주체의 유료 호출을 막는다.
+    let row=sqlx::query("SELECT r.accounting_state,r.cost_usd::text AS cost,t.unknown_count,t.cost_usd::text AS total,(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) AS settled_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) ORDER BY r.admitted_at LIMIT 1").fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
     assert!(row.get::<Option<String>, _>("cost").is_none());
-    assert_eq!(row.get::<String, _>("held"), "0.004296000000");
-    assert_eq!(row.get::<String, _>("reserved"), "0.004296000000");
-    assert_eq!(row.get::<i64, _>("remaining_reserved_tokens"), 4196);
     assert_eq!(row.get::<i64, _>("unknown_count"), 1);
+    assert_eq!(row.get::<String, _>("total"), "0.000000000000");
+    assert_eq!(row.get::<i64, _>("settled_tokens"), 0);
     let next = h
         .request("/openai/v1/responses", BODY)
         .send()
@@ -442,8 +482,7 @@ async fn unknown(h: &Harness) {
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn responses_missing_conflicting_truncated_or_unpriced_finality_holds_reservation_and_blocks()
-{
+async fn responses_missing_conflicting_truncated_or_unpriced_finality_stays_unknown_and_blocks() {
     for stream in [false, true] {
         for case in [
             "missing_usage",
@@ -467,15 +506,15 @@ async fn responses_missing_conflicting_truncated_or_unpriced_finality_holds_rese
         ] {
             let cfg = if case == "missing_price" {
                 configuration_yaml(
-                    &verified_yaml()
+                    &feature_yaml()
                         .replace("          cache_read: '0.500000000000'\n", "")
                         .replace(", cache,", ","),
                 )
             } else {
-                verified_configuration()
+                feature_configuration()
             };
             let h = Harness::with_config(cfg).await;
-            strict(&h).await;
+            limited(&h).await;
             let mut value: serde_json::Value = serde_json::from_str(&native("incomplete")).unwrap();
             match case {
                 "missing_details" => {
@@ -533,7 +572,7 @@ async fn responses_missing_conflicting_truncated_or_unpriced_finality_holds_rese
                 let (r, ()) = tokio::join!(send, produce);
                 let r = r.unwrap();
                 assert_eq!(r.status(), 200);
-                reservation(&h).await;
+                dispatching(&h).await;
                 tx.send(Bytes::from(if case == "duplicate_terminal" {
                     format!("{tail}{tail}")
                 } else {
@@ -578,7 +617,7 @@ async fn responses_missing_conflicting_truncated_or_unpriced_finality_holds_rese
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn responses_state_resource_and_unverified_strict_never_dispatch() {
+async fn responses_state_and_resource_fields_never_dispatch() {
     let h = Harness::new().await;
     for body in [
         BODY.replace("\"store\":false,", ""),
@@ -616,21 +655,94 @@ async fn responses_state_resource_and_unverified_strict_never_dispatch() {
             .unwrap(),
         0
     );
-    strict(&h).await;
-    let r = h
+    assert!(h.provider.calls.lock().await.is_empty());
+    h.close().await;
+}
+/// 고정 시계를 옮긴다. 시계 표는 시험 schema에 있어 어느 연결로도 바꿀 수 있다.
+async fn set_clock(h: &Harness, at: &str) {
+    sqlx::query("UPDATE gw_fixture_clock SET observed=$1::timestamptz")
+        .bind(at)
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+}
+/// 입력 상한이 없는 Responses profile에도 예산과 분당 토큰 한도를 함께 둘 수 있다.
+/// 예전에는 입력 상한 증거가 없다며 unsupported_strict_policy로 막았다.
+/// 정산한 요청의 토큰은 받은 1분 칸이 아니라 정산한 1분 칸에 쌓이고, 그 칸에서 송신하려는 요청만 막는다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn responses_tpm_and_budget_apply_without_an_input_bound_in_the_settlement_minute() {
+    let native = r#"{"object":"response","id":"resp_synthetic","status":"completed","model":"synthetic-text","output":[],"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}"#;
+    let h = Harness::with_clock(configuration()).await;
+    sqlx::query("UPDATE gw_policies SET budget_limit_usd=1,tpm_limit=120 WHERE principal_id=$1 AND key_id IS NULL").bind(h.principal).execute(h.db.store.pool()).await.unwrap();
+    h.provider
+        .set(
+            StatusCode::OK,
+            HeaderMap::from_iter([(
+                "content-type".parse().unwrap(),
+                "application/json".parse().unwrap(),
+            )]),
+            Bytes::from_static(native.as_bytes()),
+        )
+        .await;
+    set_clock(&h, "2025-04-10T10:00:10Z").await;
+    // 10:00에 받아 송신한 요청의 응답을 붙잡아 두고, 시계를 10:01로 옮긴 뒤 정산한다.
+    let (started, release) = h.provider.hold_response().await;
+    let send = h.request("/openai/v1/responses", BODY).send();
+    let hold = async {
+        started.await.unwrap();
+        set_clock(&h, "2025-04-10T10:01:10Z").await;
+        release.send(()).unwrap();
+    };
+    let (first, ()) = tokio::join!(send, hold);
+    let first = first.unwrap();
+    assert_eq!(first.status(), 200);
+    assert_eq!(first.bytes().await.unwrap(), native);
+    idle(&h).await;
+    // 같은 10:01 칸에서 받은 요청은 그 칸에 정산된 120 token이 한도에 닿아 송신 전에 거부된다.
+    let rejected = h
         .request("/openai/v1/responses", BODY)
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 400);
+    assert_eq!(rejected.status(), 429);
+    assert_eq!(rejected.headers()["x-gateway-error-code"], "rate_limited");
     assert_eq!(
-        r.headers()["x-gateway-error-code"],
-        "unsupported_strict_policy"
+        rejected.headers()["x-gateway-dispatch-state"],
+        "not_dispatched"
     );
-    drop(r);
+    let _ = rejected.bytes().await;
     idle(&h).await;
-    assert!(h.provider.calls.lock().await.is_empty());
+    // 다음 1분 칸에는 정산된 토큰이 없으므로 다시 송신한다.
+    set_clock(&h, "2025-04-10T10:02:05Z").await;
+    let next = h
+        .request("/openai/v1/responses", BODY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(next.status(), 200);
+    assert_eq!(next.bytes().await.unwrap(), native);
+    idle(&h).await;
+    let windows: Vec<(String, i64, i64)> = sqlx::query_as("SELECT to_char(window_start AT TIME ZONE 'UTC','HH24:MI'),admitted_count,settled_tokens FROM test_user_rate_windows WHERE lane='inference' ORDER BY window_start").fetch_all(h.db.store.pool()).await.unwrap();
+    let totals: (String, i64, i64) = sqlx::query_as(
+        "SELECT cost_usd::text,unknown_count,input_tokens+output_tokens FROM test_user_usage_totals",
+    )
+    .fetch_one(h.db.store.pool())
+    .await
+    .unwrap();
+    let calls = h.provider.calls.lock().await.len();
     h.close().await;
+    // 받은 칸(10:00)은 요청 수만 세고 토큰은 정산한 칸(10:01, 10:02)에만 있다.
+    assert_eq!(
+        windows,
+        vec![
+            ("10:00".into(), 1, 0),
+            ("10:01".into(), 1, 120),
+            ("10:02".into(), 1, 120)
+        ]
+    );
+    assert_eq!(totals, ("0.000280000000".into(), 0, 240));
+    assert_eq!(calls, 2);
 }
 async fn sdk(h: &Harness, kind: &str, status: u16, native_status: &str, token: &str) {
     use std::os::unix::fs::DirBuilderExt;
@@ -702,8 +814,8 @@ async fn sdk(h: &Harness, kind: &str, status: u16, native_status: &str, token: &
 async fn responses_fixed_sdk_observes_native_completed_incomplete_and_one_send_per_call() {
     for stream in [false, true] {
         for status in ["completed", "incomplete"] {
-            let h = Harness::with_config(verified_configuration()).await;
-            strict(&h).await;
+            let h = Harness::with_config(feature_configuration()).await;
+            limited(&h).await;
             let wire = if stream {
                 format!("{}{}", start(), terminal(status))
             } else {
@@ -750,7 +862,7 @@ async fn responses_fixed_sdk_observes_native_completed_incomplete_and_one_send_p
         }
     }
     for status in [400, 401, 403, 429, 502, 503] {
-        let h = Harness::with_config(verified_configuration()).await;
+        let h = Harness::with_config(feature_configuration()).await;
         if status == 403 {
             sqlx::query("UPDATE gw_policies SET allow_rules='[]' WHERE key_id IS NULL")
                 .execute(h.db.store.pool())
@@ -806,12 +918,10 @@ async fn responses_fixed_sdk_observes_native_completed_incomplete_and_one_send_p
             usize::from(status == 502)
         );
         if status == 502 {
+            // 회사 키 인증 오류 응답은 0원으로 정산한다(결정 0005).
             assert_eq!(
-                sqlx::query_scalar::<_, String>("SELECT accounting_state FROM gw_requests")
-                    .fetch_one(h.db.store.pool())
-                    .await
-                    .unwrap(),
-                "unknown"
+                finance::last_settlement(h.db.store.pool()).await,
+                finance::no_response()
             );
         }
         h.close().await;
@@ -842,8 +952,8 @@ async fn responses_large_terminal_and_nonstream_exact_limits_preserve_native_and
     use sha2::{Digest, Sha256};
     for stream in [false, true] {
         for size in [256 * 1024 + 1, 16 * 1024 * 1024, 16 * 1024 * 1024 + 1] {
-            let h = Harness::with_config(verified_configuration()).await;
-            strict(&h).await;
+            let h = Harness::with_config(feature_configuration()).await;
+            limited(&h).await;
             // SSE 상한은 JSON bytes가 아니라 event 전체 wire bytes다.
             let prefix = "event: response.incomplete\r\ndata: {\"type\":\"response.incomplete\",\"sequence_number\":1,\"response\":";
             let suffix = "}\r\n\r\n";
@@ -935,10 +1045,10 @@ async fn responses_large_terminal_and_nonstream_exact_limits_preserve_native_and
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn responses_full_queue_cancel_has_no_synthetic_terminal_and_holds_unknown_reservation() {
+async fn responses_full_queue_cancel_has_no_synthetic_terminal_and_stays_unknown() {
     use std::time::Duration;
-    let h = Harness::with_config(verified_configuration()).await;
-    strict(&h).await;
+    let h = Harness::with_config(feature_configuration()).await;
+    limited(&h).await;
     let (tx, stopped) = h.provider.stream().await;
     let socket = tokio::net::TcpStream::connect(h.base.trim_start_matches("http://"))
         .await
@@ -963,7 +1073,7 @@ async fn responses_full_queue_cancel_has_no_synthetic_terminal_and_holds_unknown
     tx.send(Bytes::from(start())).await.unwrap();
     let response = r.await.unwrap();
     assert_eq!(response.status(), 200);
-    reservation(&h).await;
+    dispatching(&h).await;
     let producer = tokio::spawn(async move {
         for seq in 1..=256 {
             let wire = format!(
@@ -1020,10 +1130,10 @@ async fn responses_full_queue_cancel_has_no_synthetic_terminal_and_holds_unknown
 async fn responses_absolute_transport_deadline_preserves_five_second_finalization_gap() {
     let cfg = configuration_yaml(&format!(
         "{}\nlimits:\n  transport_timeout_ms: 1500\n  request_timeout_ms: 6500\n  body_timeout_ms: 1500\n  body_idle_timeout_ms: 1500\n",
-        verified_yaml()
+        feature_yaml()
     ));
     let h = Harness::with_config(cfg).await;
-    strict(&h).await;
+    limited(&h).await;
     let (tx, stopped) = h.provider.stream().await;
     tx.send(Bytes::from(start())).await.unwrap();
     let r = h
@@ -1035,7 +1145,7 @@ async fn responses_absolute_transport_deadline_preserves_five_second_finalizatio
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    reservation(&h).await;
+    dispatching(&h).await;
     assert!(r.bytes().await.is_err());
     tokio::time::timeout(std::time::Duration::from_secs(1), stopped)
         .await
@@ -1060,8 +1170,8 @@ async fn responses_transport_errors_strip_company_secrets_and_never_redirect_or_
         "reset",
         "native_error",
     ] {
-        let h = Harness::with_reset(verified_configuration(), kind == "reset").await;
-        strict(&h).await;
+        let h = Harness::with_reset(feature_configuration(), kind == "reset").await;
+        limited(&h).await;
         let target = provider::Provider::new();
         let target_server = target.serve().await;
         let (status,headers,body)=match kind{
@@ -1097,10 +1207,16 @@ async fn responses_transport_errors_strip_company_secrets_and_never_redirect_or_
             assert!(!std::str::from_utf8(&bytes).unwrap().contains("synthetic-"));
         }
         idle(&h).await;
-        unknown(&h).await;
+        // 해석하지 못한 응답(gzip)만 미정산이다. 인증 오류·redirect·연결 끊김·HTTP 오류는 0원으로 정산한다.
+        let blocked = kind == "encoding";
+        if blocked {
+            unknown(&h).await;
+        } else {
+            no_response(&h).await;
+        }
         assert!(target.calls.lock().await.is_empty());
         let calls = h.provider.calls.lock().await;
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), if blocked { 1 } else { 2 });
         for name in [
             "openai-project",
             "idempotency-key",
@@ -1150,7 +1266,7 @@ fn limits() -> serde_json::Value {
 }
 async fn key(h: &Harness, service: Option<uuid::Uuid>) -> (String, uuid::Uuid) {
     let mut input = finance::with_credentials(
-        serde_json::json!({"name":"합성 Responses key","validity":"3_months","grants":grants(),"limits":{"budget":{"mode":"reserved","limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":100000,"count_rpm":null}}),
+        serde_json::json!({"name":"합성 Responses key","validity":"3_months","grants":grants(),"limits":{"budget":{"limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"rpm":null,"tpm":100000,"count_rpm":null}}),
     );
     if let Some(service) = service {
         input["service_principal_id"] = service.to_string().into();
@@ -1165,8 +1281,8 @@ async fn key(h: &Harness, service: Option<uuid::Uuid>) -> (String, uuid::Uuid) {
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn responses_personal_and_service_keys_apply_both_scopes_owner_and_revoke() {
-    let h = Harness::with_config(verified_configuration()).await;
-    strict(&h).await;
+    let h = Harness::with_config(feature_configuration()).await;
+    limited(&h).await;
     h.provider
         .set(
             StatusCode::OK,
@@ -1187,13 +1303,13 @@ async fn responses_personal_and_service_keys_apply_both_scopes_owner_and_revoke(
     r.bytes().await.unwrap();
     idle(&h).await;
     let b = sqlx::query(
-        "SELECT count(*) AS n,min(remaining_reservation_usd)::text AS held FROM gw_request_budgets",
+        "SELECT count(*) AS n,count(*) FILTER(WHERE state='settled' AND applied_cost_usd=0.000120) AS settled FROM gw_request_budgets",
     )
     .fetch_one(h.db.store.pool())
     .await
     .unwrap();
     assert_eq!(b.get::<i64, _>("n"), 2);
-    assert_eq!(b.get::<String, _>("held"), "0.000000000000");
+    assert_eq!(b.get::<i64, _>("settled"), 2);
     let(status,v)=api(&h,reqwest::Method::POST,"/api/admin/principals",Some(serde_json::json!({"display_name":"합성 Responses service","management_owner_id":h.principal}))).await;
     assert_eq!(status, 201);
     let service: uuid::Uuid = v["target"]["id"].as_str().unwrap().parse().unwrap();
@@ -1252,12 +1368,12 @@ fn features_request() -> String {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn responses_native_image_function_reasoning_schema_and_alias_preserve_exact_wire() {
     for stream in [false, true] {
-        let yaml = verified_yaml().replace(
+        let yaml = feature_yaml().replace(
             "actual_models:\n          - synthetic-text",
             "actual_models: [synthetic-text, synthetic-alias]",
         );
         let h = Harness::with_config(configuration_yaml(&yaml)).await;
-        strict(&h).await;
+        limited(&h).await;
         let mut request: serde_json::Value = serde_json::from_str(&features_request()).unwrap();
         request["stream"] = stream.into();
         let request = request.to_string();
@@ -1318,8 +1434,8 @@ async fn responses_native_image_function_reasoning_schema_and_alias_preserve_exa
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL and TEST_FNM_DIR, installed fixed SDK"]
 async fn responses_sdk_consumes_large_completed_and_incomplete_terminal_once() {
     for status in ["completed", "incomplete"] {
-        let h = Harness::with_config(verified_configuration()).await;
-        strict(&h).await;
+        let h = Harness::with_config(feature_configuration()).await;
+        limited(&h).await;
         let prefix = format!(
             "event: response.{status}\ndata: {{\"type\":\"response.{status}\",\"sequence_number\":1,\"response\":"
         );
@@ -1353,20 +1469,19 @@ async fn responses_sdk_consumes_large_completed_and_incomplete_terminal_once() {
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn responses_token_only_bound_violation_and_amount_overflow_pause_atomically() {
-    for case in ["input_bound", "output_bound", "amount_overflow"] {
+    for case in ["output_bound", "amount_overflow"] {
         let yaml = if case == "amount_overflow" {
-            verified_yaml().replace(
+            feature_yaml().replace(
                 "input: '1.000000000000'",
                 "input: '1000000000000.000000000000'",
             )
         } else {
-            verified_yaml()
+            feature_yaml()
         };
         let h = Harness::with_config(configuration_yaml(&yaml)).await;
         let mut value: serde_json::Value = serde_json::from_str(&native("completed")).unwrap();
         let (input, output, cached) = match case {
-            "input_bound" => (4097u64, 20u64, 4097u64),
-            "output_bound" => (100, 101, 40),
+            "output_bound" => (100u64, 101u64, 40u64),
             _ => (1_000_000_000_000_000_000, 20, 40),
         };
         value["usage"]["input_tokens"] = input.into();
@@ -1441,11 +1556,11 @@ async fn responses_uncertain_dispatch_original_id_expires_unknown_without_reissu
     use std::sync::atomic::Ordering;
     let db = postgres::TestDb::new().await;
     let principal = finance::human(db.store.pool()).await;
-    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_mode='reserved',budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
     let current = finance::current(db.store.pool(), principal).await;
     let proxy = pg_proxy::CommitProxy::new().await;
     let store = db.clock_store(Some(proxy.port)).await;
-    let cfg = verified_configuration();
+    let cfg = feature_configuration();
     let ledger = PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
     let spec = RequestSpec::from_profile(
         ProviderId::Openai,
@@ -1502,9 +1617,9 @@ async fn responses_uncertain_dispatch_original_id_expires_unknown_without_reissu
         Some(Finalized::Unknown)
     );
     assert_eq!(second.recover_expired(spec.id).await.unwrap(), None);
-    let row=sqlx::query("SELECT r.accounting_state,b.remaining_reservation_usd::text AS held,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
+    let row=sqlx::query("SELECT r.accounting_state,b.state,b.period_start::text AS period,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) WHERE r.id=$1").bind(spec.id).fetch_one(healthy.pool()).await.unwrap();
     assert_eq!(row.get::<String, _>("accounting_state"), "unknown");
-    assert_eq!(row.get::<String, _>("held"), "0.004296000000");
+    assert_eq!(row.get::<String, _>("state"), "unknown");
     assert!(row.get::<String, _>("period").starts_with("2025-03-01"));
     assert_eq!(row.get::<i64, _>("unknown_count"), 1);
     assert!(provider.calls.lock().await.is_empty());
@@ -1522,8 +1637,8 @@ async fn responses_native_error_event_counts_final_crlf_in_64k_wire_limit() {
         (64 * 1024 + 1, true),
         (64 * 1024, false),
     ] {
-        let h = Harness::with_config(verified_configuration()).await;
-        strict(&h).await;
+        let h = Harness::with_config(feature_configuration()).await;
+        limited(&h).await;
         let (tx, stopped) = h.provider.stream().await;
         let send = h
             .request(
@@ -1567,7 +1682,7 @@ async fn responses_native_error_event_counts_final_crlf_in_64k_wire_limit() {
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn responses_nonterminal_contradictions_hold_reservation_despite_later_valid_terminal() {
+async fn responses_nonterminal_contradictions_stay_unknown_despite_later_valid_terminal() {
     let mut incorrectly_settled = 0;
     for kind in ["response.created", "response.in_progress"] {
         for (field, value) in [
@@ -1585,8 +1700,8 @@ async fn responses_nonterminal_contradictions_hold_reservation_despite_later_val
             ("incomplete_details", serde_json::json!(false)),
             ("usage", serde_json::json!({})),
         ] {
-            let h = Harness::with_config(verified_configuration()).await;
-            strict(&h).await;
+            let h = Harness::with_config(feature_configuration()).await;
+            limited(&h).await;
             let mut response = serde_json::json!({"id":"resp_fixture","object":"response","model":"synthetic-text","status":"in_progress","error":null,"incomplete_details":null,"usage":null});
             response[field] = value;
             let seq = u64::from(kind == "response.in_progress");
@@ -1611,7 +1726,7 @@ async fn responses_nonterminal_contradictions_hold_reservation_despite_later_val
             let send = h.request("/openai/v1/responses", body).send();
             let barrier = async {
                 started.await.unwrap();
-                reservation(&h).await;
+                dispatching(&h).await;
                 release.send(()).unwrap();
             };
             let (r, ()) = tokio::join!(send, barrier);
@@ -1619,7 +1734,7 @@ async fn responses_nonterminal_contradictions_hold_reservation_despite_later_val
             assert!([200, 502].contains(&r.status().as_u16()));
             let _ = r.bytes().await;
             idle(&h).await;
-            let held = sqlx::query_scalar::<_, bool>("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND b.remaining_reservation_usd=0.004296 AND b.remaining_reserved_tokens=4196 AND t.reserved_usd=0.004296 AND t.unknown_count=1 AND w.reserved_tokens=4196 AND w.settled_tokens=0 FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start) JOIN test_user_rate_windows w ON (w.scope_id,w.lane,w.window_start)=(b.scope_id,b.rate_lane,b.rate_start)").fetch_one(h.db.store.pool()).await.unwrap();
+            let unknown = sqlx::query_scalar::<_, bool>("SELECT r.accounting_state='unknown' AND r.cost_usd IS NULL AND t.unknown_count=1 AND t.cost_usd=0 AND (SELECT COALESCE(sum(w.settled_tokens),0) FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id)=0 FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON (t.scope_id,t.period_start)=(b.scope_id,b.period_start)").fetch_one(h.db.store.pool()).await.unwrap();
             let next = h
                 .request("/openai/v1/responses", BODY)
                 .send()
@@ -1637,20 +1752,20 @@ async fn responses_nonterminal_contradictions_hold_reservation_despite_later_val
             let _ = next.bytes().await;
             idle(&h).await;
             let calls = h.provider.calls.lock().await.len();
-            incorrectly_settled += usize::from(!(held && blocked && calls == 1));
+            incorrectly_settled += usize::from(!(unknown && blocked && calls == 1));
             h.close().await;
         }
     }
     assert_eq!(
         incorrectly_settled, 0,
-        "상충 metadata 뒤 정산/예약 해제/후속 송신을 허용했다"
+        "상충 metadata 뒤 정산/토큰 적립/후속 송신을 허용했다"
     );
 }
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn responses_output_message_variants_reject_before_financial_start_for_any_role_and_order() {
-    let h = Harness::with_config(verified_configuration()).await;
+    let h = Harness::with_config(feature_configuration()).await;
     let mut not_rejected = 0;
     for role in ["user", "system", "developer", "assistant"] {
         for variant in ["output_text", "refusal"] {
@@ -1747,8 +1862,8 @@ async fn s9_sdk_error_matrix_measures_company_auth_and_zero_refresh_retry() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL and fixed SDK"]
 async fn s9_responses_native_failure_sdk_abort_preserves_observed_failed() {
     for kind in ["response.failed", "error"] {
-        let h = Harness::with_config(verified_configuration()).await;
-        strict(&h).await;
+        let h = Harness::with_config(feature_configuration()).await;
+        limited(&h).await;
         let (tx, stopped) = h.provider.stream().await;
         let failure = if kind == "error" {
             serde_json::json!({"type":"error","sequence_number":1,"code":"server_error","message":"synthetic error","param":null})
@@ -1784,11 +1899,8 @@ async fn s9_responses_native_failure_sdk_abort_preserves_observed_failed() {
             )
         );
         assert_eq!(h.provider.calls.lock().await.len(), 1);
-        let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
-        assert_eq!(
-            held,
-            ("0.004296000000".into(), "0.004296000000".into(), 4196, 4196)
-        );
+        let totals:(i64,i64)=sqlx::query_as("SELECT unknown_count,(SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+        assert_eq!(totals, (1, 0));
         assert_eq!(h.runtime.available_inference(), 16);
         assert_eq!(h.runtime.request_resources().body_bytes, 0);
         h.close().await;
@@ -1803,8 +1915,8 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
         (format!("event: {}\n", "x".repeat(129)), "stream_limit"),
     ] {
         for mode in ["h0", "h1", "sdk"] {
-            let h = Harness::with_config(verified_configuration()).await;
-            strict(&h).await;
+            let h = Harness::with_config(feature_configuration()).await;
+            limited(&h).await;
             let body = BODY.replacen('{', "{\"stream\":true,", 1);
             let prefix = start();
             let (tx, stopped) = h.provider.stream().await;
@@ -1858,15 +1970,23 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
             .fetch_one(h.db.store.pool())
             .await
             .unwrap();
-            assert_eq!(
-                row,
-                ("finished".into(), code.into(), "unknown".into(), true)
-            );
-            let held:(String,String,i64,i64)=sqlx::query_as("SELECT reservation_usd::text,remaining_reservation_usd::text,reserved_tokens,remaining_reserved_tokens FROM test_user_request_budgets").fetch_one(h.db.store.pool()).await.unwrap();
-            assert_eq!(
-                held,
-                ("0.004296000000".into(), "0.004296000000".into(), 4196, 4196)
-            );
+            let totals:(i64,i64)=sqlx::query_as("SELECT unknown_count,(SELECT COALESCE(sum(settled_tokens),0)::bigint FROM test_user_rate_windows) FROM test_user_usage_totals").fetch_one(h.db.store.pool()).await.unwrap();
+            if code == "stream_limit" && mode != "h1" {
+                // 첫 event 전에 크기 한도로 끊긴 스트림은 0원으로 정산한다(결정 0005).
+                assert_eq!((row.0.as_str(), row.1.as_str()), ("finished", code));
+                assert_eq!(
+                    finance::last_settlement(h.db.store.pool()).await,
+                    finance::no_response()
+                );
+                assert_eq!(totals, (0, 0));
+            } else {
+                // 문법 오류, 그리고 첫 event 뒤의 OpenAI 끊김은 사용량을 알 수 없어 미정산이다.
+                assert_eq!(
+                    row,
+                    ("finished".into(), code.into(), "unknown".into(), true)
+                );
+                assert_eq!(totals, (1, 0));
+            }
             assert_eq!(h.provider.calls.lock().await.len(), 1);
             assert_eq!(h.runtime.available_inference(), 16);
             assert_eq!(h.runtime.request_resources().body_bytes, 0);
@@ -1877,9 +1997,9 @@ async fn s9_stream_syntax_and_limit_have_distinct_h0_h1_and_sdk_causes() {
 
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
-async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_reservation() {
-    let h = Harness::with_config(verified_configuration()).await;
-    strict(&h).await;
+async fn s9_verified_terminal_before_stream_limit_settles_once() {
+    let h = Harness::with_config(feature_configuration()).await;
+    limited(&h).await;
 
     let body = BODY.replacen('{', "{\"stream\":true,", 1);
     let native = format!("{}{}", start(), terminal("completed"));
@@ -1934,12 +2054,10 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
             Some("0.000120000000".into())
         )
     );
-    let budget:(String,i64,i64,String,i64)=sqlx::query_as("SELECT b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(
-        budget,
-        ("0.000000000000".into(), 0, 0, "0.000120000000".into(), 1)
-    );
-    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',w.settled_tokens FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_rate_windows w ON w.scope_id=b.scope_id AND w.lane=b.rate_lane AND w.window_start=b.rate_start WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    let budget:(i64,String,i64)=sqlx::query_as("SELECT t.unknown_count,t.cost_usd::text,(SELECT count(*) FROM gw_usage_events WHERE request_id=$1 AND kind='final') FROM test_user_request_budgets b JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start WHERE b.request_id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(budget, (0, "0.000120000000".into(), 1));
+    // 정산 토큰은 정산한 1분 칸에 쌓인다. 이 scope의 칸 전체 합으로 본다.
+    let final_state:(String,String,i64)=sqlx::query_as("SELECT r.outcome,e.normalized_usage->>'source',(SELECT COALESCE(sum(w.settled_tokens),0)::bigint FROM test_user_rate_windows w WHERE w.scope_id=b.scope_id) FROM gw_requests r JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) WHERE r.id=$1").bind(id).fetch_one(h.db.store.pool()).await.unwrap();
     assert_eq!(final_state, ("failed".into(), "provider".into(), 120));
     h.provider
         .set(
@@ -1968,8 +2086,8 @@ async fn s9_verified_terminal_before_stream_limit_settles_once_and_releases_rese
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
-    let h = Harness::with_config(verified_configuration()).await;
-    strict(&h).await;
+    let h = Harness::with_config(feature_configuration()).await;
+    limited(&h).await;
 
     let body = BODY.replacen('{', "{\"stream\":true,", 1);
     let native = format!(
@@ -2008,18 +2126,8 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
     stopped.await.unwrap();
     drop(tx);
     h.runtime.wait_requests().await;
-    let row:(String,String,bool,String,i64,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,b.remaining_reservation_usd::text,b.remaining_reserved_tokens,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
-    assert_eq!(
-        row,
-        (
-            "stream_limit".into(),
-            "unknown".into(),
-            true,
-            "0.004296000000".into(),
-            4196,
-            1
-        )
-    );
+    let row:(String,String,bool,i64)=sqlx::query_as("SELECT r.reason_code,r.accounting_state,r.cost_usd IS NULL,t.unknown_count FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL) JOIN test_user_usage_totals t ON t.scope_id=b.scope_id AND t.period_start=b.period_start").fetch_one(h.db.store.pool()).await.unwrap();
+    assert_eq!(row, ("stream_limit".into(), "unknown".into(), true, 1));
     let blocked = h
         .request("/openai/v1/responses", body)
         .send()
@@ -2041,8 +2149,8 @@ async fn s9_stream_limit_never_promotes_unpriced_complete_usage() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s9_terminal_cr_boundary_requires_optional_lf_wire_validation_before_settlement() {
     for ending in ["eof", "next_non_lf", "optional_lf"] {
-        let h = Harness::with_config(verified_configuration()).await;
-        strict(&h).await;
+        let h = Harness::with_config(feature_configuration()).await;
+        limited(&h).await;
         let head = "event: response.completed\rdata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":";
         let tail = "}\r\r";
         let object = padded_native("completed", 16 * 1024 * 1024 - head.len() - tail.len());
@@ -2108,11 +2216,13 @@ async fn s9_terminal_cr_boundary_requires_optional_lf_wire_validation_before_set
 
 #[path = "support/s9_finality.rs"]
 mod s9_finality;
+/// 이 Provider에는 끊긴 요청 규칙이 없다. 첫 event 뒤에 끊긴 스트림은 미정산으로 남기고 막는다(결정 0005).
+const S9_CUTOFF: Option<(&str, i64)> = None;
 async fn s9_finality_fixture(
     incomplete: bool,
 ) -> (Harness, &'static str, String, String, String, &'static str) {
-    let h = Harness::with_config(verified_configuration()).await;
-    strict(&h).await;
+    let h = Harness::with_config(feature_configuration()).await;
+    limited(&h).await;
     (
         h,
         "/openai/v1/responses",
@@ -2142,8 +2252,8 @@ fn s9_native_error_tail(length: usize) -> String {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s9_terminal_at_cr_wire_limit_before_cancel_has_no_supervisor_final() {
     for shutdown in [false, true] {
-        let h = Harness::with_config(verified_configuration()).await;
-        strict(&h).await;
+        let h = Harness::with_config(feature_configuration()).await;
+        limited(&h).await;
         let head = "event: response.completed\rdata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":";
         let tail = "}\r\r";
         let object = padded_native("completed", 16 * 1024 * 1024 - head.len() - tail.len());
@@ -2173,13 +2283,10 @@ async fn s9_terminal_at_cr_wire_limit_before_cancel_has_no_supervisor_final() {
         stopped.await.unwrap();
         drop(tx);
         h.runtime.wait_requests().await;
-        let row:(String,bool,i64,String,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final'),b.remaining_reservation_usd::text,b.remaining_reserved_tokens FROM gw_requests r JOIN test_user_request_budgets b ON b.request_id=r.id AND b.scope_id IN (SELECT id FROM gw_policies WHERE key_id IS NULL)").fetch_one(h.db.store.pool()).await.unwrap();
+        let row:(String,bool,i64)=sqlx::query_as("SELECT r.accounting_state,r.cost_usd IS NULL,(SELECT count(*) FROM gw_usage_events WHERE request_id=r.id AND kind='final') FROM gw_requests r").fetch_one(h.db.store.pool()).await.unwrap();
         let resources = h.runtime.request_resources();
         h.close().await;
-        assert_eq!(
-            row,
-            ("unknown".into(), true, 0, "0.004296000000".into(), 4196)
-        );
+        assert_eq!(row, ("unknown".into(), true, 0));
         assert_eq!(resources.body_bytes, 0);
         assert_eq!(resources.queue_bytes, 0);
         assert!(resources.parser_peak <= 256 * 1024);

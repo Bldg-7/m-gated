@@ -149,7 +149,8 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
   const choices: Choice[] = [];
   for (const c of [...flatten(ceiling), ...flatten(policy.grants)]) if (!choices.some(x => choiceKey(x) === choiceKey(c))) choices.push({ ...c, known: known.has(choiceKey(c)) });
   const [selected, setSelected] = useState(() => new Set(flatten(policy.grants).map(choiceKey)));
-  const [budgetMode, setBudgetMode] = useState<string>(policy.limits.budget?.mode ?? 'none');
+  // 월 예산 칸이 비어 있지 않을 때만 예산 기간 안내를 보인다.
+  const [hasBudget, setHasBudget] = useState(!!policy.limits.budget);
   const toggle = (key: string, on: boolean) => setSelected(prev => { const next = new Set(prev); if (on) next.add(key); else next.delete(key); return next; });
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     const f = fields(event); onError(null);
@@ -166,10 +167,11 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
       if (raw && (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > 1000000000)) { onError(t('요청·토큰 한도는 1~1000000000의 정수입니다.')); return; }
       limits[field] = raw ? Number(raw) : null;
     }
-    if (budgetMode !== 'none') {
-      const amount = toUsd(String(f.get('budget') ?? ''));
+    const rawBudget = String(f.get('budget') ?? '').trim();
+    if (rawBudget) {
+      const amount = toUsd(rawBudget);
       if (!amount) { onError(t('월 예산은 USD 금액으로 입력하세요(예: 100 또는 12.5, 소수점 12자리까지).')); return; }
-      limits.budget = { mode: budgetMode === 'reserved' ? 'reserved' : 'actual', limit_usd: amount, period: { kind: 'calendar_month' } };
+      limits.budget = { limit_usd: amount, period: { kind: 'calendar_month' } };
     }
     // 계정 정지는 요약 카드의 버튼으로 따로 바꾼다. 여기서는 지금 상태를 그대로 보낸다.
     onSubmit({ expected_version: policy.version, disabled: policy.disabled, grants, limits, reason: String(f.get('reason')) });
@@ -185,13 +187,12 @@ function PolicyForm({ policy, ceiling, busy, onSubmit, onError }: { principalId:
     </fieldset>
     <fieldset className="stack-sm"><legend>{t('한도')}</legend>
       <div className="form-grid">
-        <div className="field"><label htmlFor="policy-budget-mode">{t('월 예산 방식')}</label><Select id="policy-budget-mode" value={budgetMode} onChange={setBudgetMode} options={[{ value: 'none', label: t('예산 없음') }, { value: 'actual', label: t('실사용량 (하드캡 아님)') }, { value: 'reserved', label: t('예약 기반') }]} /></div>
-        {budgetMode !== 'none' && <label>{t('월 예산 (USD)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} defaultValue={budget ? shortUsd(budget.limit_usd) : ''} required /></label>}
+        <label>{t('월 예산 (USD)')}<input name="budget" className="amount" inputMode="decimal" spellCheck={false} defaultValue={budget ? shortUsd(budget.limit_usd) : ''} placeholder={t('제한 없음')} onInput={e => setHasBudget(e.currentTarget.value.trim() !== '')} /></label>
         <label>{t('분당 요청 수 한도 (RPM)')}<input name="rpm" className="mono" inputMode="numeric" defaultValue={policy.limits.rpm ?? ''} placeholder={t('제한 없음')} /></label>
         <label>{t('분당 토큰 수 한도 (TPM)')}<input name="tpm" className="mono" inputMode="numeric" defaultValue={policy.limits.tpm ?? ''} placeholder={t('제한 없음')} /></label>
         <label>{t('분당 토큰 계산 요청 수 한도 (Count RPM)')}<input name="count_rpm" className="mono" inputMode="numeric" defaultValue={policy.limits.count_rpm ?? ''} placeholder={t('제한 없음')} /></label>
       </div>
-      {budgetMode !== 'none' && <BudgetTimezoneNote />}
+      {hasBudget && <BudgetTimezoneNote />}
     </fieldset>
     <label>{t('정책 변경 사유')}<input name="reason" required maxLength={1000} /></label>
     <div className="actions"><button className="btn-primary">{t('정책 저장')}</button></div>

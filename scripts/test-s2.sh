@@ -25,7 +25,7 @@ cargo test --locked --test postgres_contract "$clock_test" -- --ignored --exact 
 cargo test --locked --test postgres_contract "$migration_test" -- --ignored --exact --test-threads=1 --nocapture
 cargo test --locked --test postgres_contract "$cleanup_test" -- --ignored --exact --test-threads=1
 # DB 범위 절대 경보누계는 다른 자기 schema의 process-global 계측과 섞지 않는다.
-for alarm_test in telemetry_actual_sql_jwks_provider_success_unknown_and_company_key_are_redacted telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_duplicate telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_reassembly telemetry_handoff_import_baseline_is_atomic_once_through_ack_loss_and_reassembly telemetry_handoff_retained_settlement_and_released_safety_keep_baseline_not_active_gauges; do
+for alarm_test in telemetry_actual_sql_jwks_provider_success_unknown_and_company_key_are_redacted telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_duplicate telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_reassembly; do
   cargo test --locked --test postgres_contract "s10::$alarm_test" -- --ignored --exact --test-threads=1
  done
 cargo fmt --all -- --check

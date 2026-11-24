@@ -75,21 +75,22 @@ async fn error_sdk_options(
     );
 }
 
+/// SDK 오류 행렬의 장부. 보내지 않은 요청은 장부 행이 없다. 보낸 요청은 Provider가 인증 오류나 HTTP 오류로
+/// 답했으므로 0원(`no_response`)으로 정산하고 미정산으로 남기지 않는다(결정 0005).
 pub async fn assert_error_ledger(pool: &sqlx::PgPool, dispatched: bool) {
-    let state:(i64,i64,i64,bool,bool)=sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE dispatch_authorized_at IS NOT NULL)::bigint,count(*) FILTER(WHERE accounting_state='unknown')::bigint,COALESCE(bool_and(cost_usd IS NULL),true),COALESCE((SELECT bool_and(remaining_reservation_usd=0 AND remaining_reserved_tokens=0) FROM gw_request_budgets),true) FROM gw_requests").fetch_one(pool).await.unwrap();
+    let state:(i64,i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(*) FILTER(WHERE dispatch_authorized_at IS NOT NULL)::bigint,count(*) FILTER(WHERE accounting_state='settled' AND cost_usd=0)::bigint,count(*) FILTER(WHERE accounting_state='unknown')::bigint FROM gw_requests").fetch_one(pool).await.unwrap();
     assert_eq!(
         state,
         (
             i64::from(dispatched),
             i64::from(dispatched),
             i64::from(dispatched),
-            true,
-            true
+            0
         )
     );
-    let finals: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_usage_events WHERE kind='final'")
+    let finals: (i64, i64) = sqlx::query_as("SELECT count(*),count(*) FILTER(WHERE normalized_usage->>'source'='no_response') FROM gw_usage_events WHERE kind='final'")
         .fetch_one(pool)
         .await
         .unwrap();
-    assert_eq!(finals, 0);
+    assert_eq!(finals, (i64::from(dispatched), i64::from(dispatched)));
 }

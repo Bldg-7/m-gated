@@ -3,7 +3,7 @@ use m_gated::{
     ledger::finance::{FinalUsage, PricingSnapshot},
 };
 fn profile() -> ModelProfile {
-    serde_json::from_value(serde_json::json!({"model":"synthetic-deepseek","api":"deepseek_chat","billing_time_rule":"fixed_admission_v1","profile_version":"deepseek-v1","pricing_version":"deepseek-price-v1","fixture_version":"deepseek-native-v1","actual_models":["synthetic-deepseek"],"max_input_tokens":4096,"max_output_tokens":1024,"max_body_bytes":8388608,"max_response_bytes":16777216,"rates":{"input":"1.000000000000","output":"2.000000000000","cache_read":"0.500000000000"}})).unwrap()
+    serde_json::from_value(serde_json::json!({"model":"synthetic-deepseek","api":"deepseek_chat","profile_version":"deepseek-v1","pricing_version":"deepseek-price-v1","fixture_version":"deepseek-native-v1","actual_models":["synthetic-deepseek"],"max_input_tokens":4096,"max_output_tokens":1024,"max_body_bytes":8388608,"max_response_bytes":16777216,"rates":{"input":"1.000000000000","output":"2.000000000000","cache_read":"0.500000000000"}})).unwrap()
 }
 #[test]
 fn deepseek_price_does_not_inherit_anthropic_cache_sum() {
@@ -127,12 +127,13 @@ async fn deepseek_native_feature_and_rejection_matrix() {
     }
 }
 #[test]
-fn deepseek_time_unresolved_has_no_fixed_price_or_reservation_proof() {
-    use m_gated::{config::BillingTimeRule, ledger::finance::RequestSpec};
-    let mut p = profile();
-    p.billing_time_rule = Some(BillingTimeRule::DeepseekTimeUnresolvedV1);
+fn deepseek_settles_at_the_catalog_price_with_a_cost_bound() {
+    use m_gated::ledger::finance::RequestSpec;
+    let p = profile();
     let spec = RequestSpec::from_profile(ProviderId::Deepseek, &p, Some(100));
-    assert!(spec.cost_bound.is_none());
+    // 시간대별 가격 규칙이 없으므로 다른 Provider처럼 받을 때의 가격과 비용 상한이 있다.
+    assert_eq!(spec.pricing.billing_time_rule, "fixed_admission_v1");
+    assert!(spec.cost_bound.is_some());
     let u = FinalUsage {
         actual_model: p.model.clone(),
         input_tokens: 100,
@@ -141,8 +142,7 @@ fn deepseek_time_unresolved_has_no_fixed_price_or_reservation_proof() {
         cache_write_tokens: 0,
         reasoning_tokens: Some(10),
     };
-    assert!(spec.pricing.price(&u, false).is_err());
-    assert!(spec.pricing.price(&u, true).is_err());
+    assert!(spec.pricing.price(&u, false).is_ok());
     let mut wrong = spec.pricing.clone();
     wrong.provider = "openai".into();
     assert!(wrong.price(&u, false).is_err());
@@ -150,6 +150,12 @@ fn deepseek_time_unresolved_has_no_fixed_price_or_reservation_proof() {
     fixed.included_token_rules =
         "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1".into();
     assert!(fixed.price(&u, false).is_err());
+    let mut removed = spec.pricing.clone();
+    removed.billing_time_rule = "deepseek_time_unresolved_v1".into();
+    assert!(
+        removed.price(&u, false).is_err(),
+        "없앤 시간대 규칙은 가격을 정하지 않는다"
+    );
 }
 
 #[tokio::test]

@@ -90,14 +90,14 @@ pub(crate) fn stamp(e: &str) -> String {
     dashboard::stamp_sql(e)
 }
 pub(crate) async fn key_metadata(c: &mut PgConnection, id: Uuid) -> Result<Value, ManagementError> {
-    let row=sqlx::query(&format!("SELECT k.*,{} AS created,{} AS expires,{} AS revoked,p.budget_mode,p.budget_limit_usd::text AS budget,p.period_timezone,p.rpm_limit,p.tpm_limit,p.count_rpm_limit,o.display_name AS owner_name,o.email AS owner_email,o.kind AS owner_kind FROM gw_virtual_keys k JOIN gw_policies p ON p.key_id=k.id JOIN gw_principals o ON o.id=k.principal_id WHERE k.id=$1",stamp("k.created_at"),stamp("k.expires_at"),stamp("k.revoked_at"))).bind(id).fetch_optional(&mut *c).await?.ok_or(ManagementError::NotFound)?;
+    let row=sqlx::query(&format!("SELECT k.*,{} AS created,{} AS expires,{} AS revoked,p.budget_limit_usd::text AS budget,p.period_timezone,p.rpm_limit,p.tpm_limit,p.count_rpm_limit,o.display_name AS owner_name,o.email AS owner_email,o.kind AS owner_kind FROM gw_virtual_keys k JOIN gw_policies p ON p.key_id=k.id JOIN gw_principals o ON o.id=k.principal_id WHERE k.id=$1",stamp("k.created_at"),stamp("k.expires_at"),stamp("k.revoked_at"))).bind(id).fetch_optional(&mut *c).await?.ok_or(ManagementError::NotFound)?;
     let bindings = super::credentials::key_bindings(c, id).await?;
     Ok(
         json!({"provider_credentials":bindings,"id":id,"principal_id":row.get::<Uuid,_>("principal_id"),"owner":{"kind":row.get::<String,_>("owner_kind"),"display_name":row.get::<String,_>("owner_name"),"email":row.get::<Option<String>,_>("owner_email")},"name":row.get::<String,_>("name"),"key_hint":row.get::<String,_>("public_prefix"),"created_at":row.get::<String,_>("created"),"created_by":row.get::<Uuid,_>("created_by"),"created_command_id":row.get::<Uuid,_>("created_command_id"),"validity":row.get::<String,_>("validity_preset"),"expires_at":row.get::<Option<String>,_>("expires"),"revoked_at":row.get::<Option<String>,_>("revoked"),"version":row.get::<i64,_>("version").to_string(),"grants":row.get::<Value,_>("grant_snapshot"),"limits":limits(&row)}),
     )
 }
 pub(crate) fn limits(row: &sqlx::postgres::PgRow) -> Value {
-    json!({"budget":row.get::<Option<String>,_>("budget").map(|n|json!({"mode":row.get::<String,_>("budget_mode"),"limit_usd":n,"period":{"kind":"calendar_month"}})),"rpm":row.get::<Option<i64>,_>("rpm_limit"),"tpm":row.get::<Option<i64>,_>("tpm_limit"),"count_rpm":row.get::<Option<i64>,_>("count_rpm_limit")})
+    json!({"budget":row.get::<Option<String>,_>("budget").map(|n|json!({"limit_usd":n,"period":{"kind":"calendar_month"}})),"rpm":row.get::<Option<i64>,_>("rpm_limit"),"tpm":row.get::<Option<i64>,_>("tpm_limit"),"count_rpm":row.get::<Option<i64>,_>("count_rpm_limit")})
 }
 pub(crate) async fn principal(
     c: &mut PgConnection,
@@ -158,12 +158,12 @@ pub(crate) async fn request_detail(
         return Ok(value);
     }
     let mut budgets = Vec::new();
-    let rows=sqlx::query(&format!("SELECT b.*,reservation_usd::text AS reservation,remaining_reservation_usd::text AS remaining,{} AS start,{} AS finish FROM gw_request_budgets b WHERE request_id=$1 ORDER BY scope_id LIMIT 3",stamp("period_start"),stamp("period_end"))).bind(id).fetch_all(&mut *c).await?;
+    let rows=sqlx::query(&format!("SELECT b.*,{} AS start,{} AS finish FROM gw_request_budgets b WHERE request_id=$1 ORDER BY scope_id LIMIT 3",stamp("period_start"),stamp("period_end"))).bind(id).fetch_all(&mut *c).await?;
     if rows.len() > 2 {
         return Err(ManagementError::Invariant);
     }
     for b in rows {
-        budgets.push(json!({"scope_id":b.get::<Uuid,_>("scope_id"),"policy_version":b.get::<i64,_>("policy_version").to_string(),"period_start":b.get::<String,_>("start"),"period_end":b.get::<String,_>("finish"),"reservation_usd":b.get::<String,_>("reservation"),"remaining_reservation_usd":b.get::<String,_>("remaining"),"reserved_tokens":b.get::<i64,_>("reserved_tokens").to_string(),"state":b.get::<String,_>("state")}));
+        budgets.push(json!({"scope_id":b.get::<Uuid,_>("scope_id"),"policy_version":b.get::<i64,_>("policy_version").to_string(),"period_start":b.get::<String,_>("start"),"period_end":b.get::<String,_>("finish"),"state":b.get::<String,_>("state")}));
     }
     let events=sqlx::query("SELECT kind,normalized_usage,pricing_resolution FROM gw_usage_events WHERE request_id=$1 ORDER BY kind LIMIT 5").bind(id).fetch_all(&mut *c).await?;
     let mut usage = json!({"partial":null,"final":null,"late_final":null});

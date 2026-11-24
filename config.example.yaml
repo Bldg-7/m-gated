@@ -167,7 +167,6 @@ retention:
 #   tpm: 2000000
 #   count_rpm: 600
 #   budget:
-#     mode: actual
 #     limit_usd: '500.000000000000'
 #     period: {kind: calendar_month}  # the time zone is set on the dashboard (Settings)
 

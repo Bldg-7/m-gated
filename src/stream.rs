@@ -61,6 +61,8 @@ enum Token {
     String {
         key: bool,
         keep: bool,
+        /// 출력 내용 경로의 문자열. 상한을 넘으면 오류 대신 내용을 버린다.
+        content: bool,
         bytes: Vec<u8>,
         escape: Escape,
         utf8: Utf8,
@@ -155,6 +157,7 @@ impl Number {
 pub struct JsonDecoder {
     fields: Vec<String>,
     string_shapes: Vec<String>,
+    content: Vec<String>,
     stack: Vec<Container>,
     token: Token,
     values: BTreeMap<String, Scalar>,
@@ -173,6 +176,7 @@ impl JsonDecoder {
         Self {
             fields: fields.iter().map(|s| s.to_string()).collect(),
             string_shapes: string_shapes.iter().map(|s| s.to_string()).collect(),
+            content: Vec::new(),
             stack: Vec::new(),
             token: Token::None,
             values: BTreeMap::new(),
@@ -211,6 +215,21 @@ impl JsonDecoder {
             }
         })
     }
+    /// 출력 내용(끊긴 요청의 `received` 정산에 쓰는 텍스트) 경로를 고른다. 회계 metadata와 달리
+    /// 내용의 크기는 스트림을 끊을 까닭이 아니다. 상한 안의 문자열만 보관하고, 넘으면 내용을 버린 채
+    /// 문자열이었다는 것(`Scalar::StringShape`)만 남긴다.
+    pub fn with_content(mut self, content: &[&str]) -> Self {
+        self.content = content.iter().map(|s| s.to_string()).collect();
+        self
+    }
+    fn content_selected(&self) -> bool {
+        self.content.iter().any(|field| {
+            self.stack
+                .iter()
+                .map(|c| if c.object { c.key.as_str() } else { "*" })
+                .eq(field.split('.'))
+        })
+    }
     fn string_shape_selected(&self) -> bool {
         self.string_shapes.iter().any(|field| {
             self.stack
@@ -232,6 +251,7 @@ impl JsonDecoder {
                 .fields
                 .iter()
                 .chain(&self.string_shapes)
+                .chain(&self.content)
                 .map(|s| s.capacity() + 64)
                 .sum::<usize>()
             + self
@@ -363,7 +383,8 @@ impl JsonDecoder {
         match token {
             Token::String {
                 key,
-                keep,
+                mut keep,
+                content,
                 mut bytes,
                 mut escape,
                 mut utf8,
@@ -446,14 +467,19 @@ impl JsonDecoder {
                     } else {
                         let value = if keep {
                             bytes.push(b'"');
-                            Some(Scalar::String(
-                                crate::json::string(
-                                    std::str::from_utf8(&bytes).map_err(|_| ParseError::Syntax)?,
-                                    1024,
+                            let raw =
+                                std::str::from_utf8(&bytes).map_err(|_| ParseError::Syntax)?;
+                            Some(if content {
+                                // 출력 내용은 6KiB까지만 담고, 넘으면 문자열이었다는 것만 남긴다.
+                                crate::json::string(raw, 6 * 1024)
+                                    .map_or(Scalar::StringShape, Scalar::String)
+                            } else {
+                                Scalar::String(
+                                    crate::json::string(raw, 1024)
+                                        .map_err(|_| ParseError::Limit)?,
                                 )
-                                .map_err(|_| ParseError::Limit)?,
-                            ))
-                        } else if self.string_shape_selected() {
+                            })
+                        } else if content || self.string_shape_selected() {
                             Some(Scalar::StringShape)
                         } else {
                             None
@@ -463,14 +489,21 @@ impl JsonDecoder {
                 } else {
                     if keep || key {
                         if bytes.len() >= if key { 32 * 1024 } else { 6 * 1024 + 2 } {
-                            return Err(ParseError::Limit);
+                            if !content {
+                                return Err(ParseError::Limit);
+                            }
+                            // 출력 내용이 상한을 넘으면 버린다. 문법 검사는 끝까지 계속한다.
+                            keep = false;
+                            bytes = Vec::new();
+                        } else {
+                            bytes.push(b);
+                            self.measure(bytes.capacity())?;
                         }
-                        bytes.push(b);
-                        self.measure(bytes.capacity())?;
                     }
                     self.token = Token::String {
                         key,
                         keep,
+                        content,
                         bytes,
                         escape,
                         utf8,
@@ -521,6 +554,7 @@ impl JsonDecoder {
                     self.token = Token::String {
                         key: true,
                         keep: true,
+                        content: false,
                         bytes: vec![b'"'],
                         escape: Escape::Plain,
                         utf8: Utf8::default(),
@@ -583,10 +617,12 @@ impl JsonDecoder {
                 self.measure(0)?;
             }
             b'"' => {
-                let keep = self.selected() && !self.string_shape_selected();
+                let content = self.content_selected() && !self.string_shape_selected();
+                let keep = (self.selected() || content) && !self.string_shape_selected();
                 self.token = Token::String {
                     key: false,
                     keep,
+                    content,
                     bytes: if keep { vec![b'"'] } else { Vec::new() },
                     escape: Escape::Plain,
                     utf8: Utf8::default(),
@@ -644,6 +680,7 @@ pub struct Event {
 pub struct SseDecoder {
     fields: Vec<String>,
     string_shapes: Vec<String>,
+    content: Vec<String>,
     json: JsonDecoder,
     field: Vec<u8>,
     name: String,
@@ -673,6 +710,7 @@ impl SseDecoder {
         Self {
             fields: fields.iter().map(|s| s.to_string()).collect(),
             string_shapes: string_shapes.iter().map(|s| s.to_string()).collect(),
+            content: Vec::new(),
             json: JsonDecoder::with_string_shapes(fields, string_shapes),
             field: Vec::new(),
             name: String::new(),
@@ -697,6 +735,12 @@ impl SseDecoder {
     }
     pub fn chat(fields: &[&str]) -> Self {
         Self::chat_with_string_shapes(fields, &[])
+    }
+    /// event마다 출력 내용 경로를 고른다(`JsonDecoder::with_content`).
+    pub fn with_content(mut self, content: &[&str]) -> Self {
+        self.content = content.iter().map(|s| s.to_string()).collect();
+        self.json.content = self.content.clone();
+        self
     }
     pub fn chat_with_string_shapes(fields: &[&str], string_shapes: &[&str]) -> Self {
         let mut s = Self::with_string_shapes(fields, string_shapes);
@@ -735,9 +779,10 @@ impl SseDecoder {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
+            let content = self.content.iter().map(String::as_str).collect::<Vec<_>>();
             let old = std::mem::replace(
                 &mut self.json,
-                JsonDecoder::with_string_shapes(&fields, &shapes),
+                JsonDecoder::with_string_shapes(&fields, &shapes).with_content(&content),
             );
             self.json.reserved = self.reserved;
             self.peak = self.peak.max(old.retained_peak() + 4096);
@@ -1053,6 +1098,56 @@ mod tests {
                     .is_err()
             );
         }
+    }
+    #[test]
+    fn content_paths_drop_large_strings_without_failing_the_stream() {
+        // 회계 metadata는 1KiB를 넘으면 스트림을 끊지만, 출력 내용은 6KiB까지 담고 넘으면 버린다.
+        for (n, kept) in [
+            (1025, true),
+            (6 * 1024, true),
+            (6 * 1024 + 1, false),
+            (64 * 1024, false),
+        ] {
+            let wire = format!(
+                "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"delta\":{{\"text\":\"{}\"}}}}\n\n",
+                "x".repeat(n)
+            );
+            let mut parser = SseDecoder::new(&["type"]).with_content(&["delta.text"]);
+            let mut events = Vec::new();
+            for b in wire.bytes() {
+                if let Some(event) = parser.byte(b).unwrap() {
+                    events.push(event);
+                }
+            }
+            assert_eq!(events.len(), 1);
+            let text = events[0].values.get("delta.text");
+            if kept {
+                assert_eq!(text.and_then(Scalar::text).map(str::len), Some(n));
+            } else {
+                assert_eq!(text, Some(&Scalar::StringShape), "{n}");
+            }
+            assert!(parser.retained_peak() <= RETAINED_BYTES);
+        }
+        // 버린 내용도 문법은 끝까지 검사한다.
+        let wire = format!(
+            "data: {{\"delta\":{{\"text\":\"{}\\x\"}}}}\n\n",
+            "x".repeat(7 * 1024)
+        );
+        let mut parser = SseDecoder::new(&[]).with_content(&["delta.text"]);
+        assert_eq!(
+            wire.bytes().try_for_each(|b| parser.byte(b).map(|_| ())),
+            Err(ParseError::Syntax)
+        );
+        // 내용 경로가 아닌 선택 문자열은 그대로 1KiB 상한에서 끊는다.
+        let wire = format!(
+            "data: {{\"delta\":{{\"text\":\"{}\"}}}}\n\n",
+            "x".repeat(1025)
+        );
+        let mut parser = SseDecoder::new(&["delta.text"]);
+        assert_eq!(
+            wire.bytes().try_for_each(|b| parser.byte(b).map(|_| ())),
+            Err(ParseError::Limit)
+        );
     }
     #[test]
     fn key_paths_cannot_be_forged_with_dot_names_or_escaped_duplicates() {

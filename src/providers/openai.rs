@@ -722,6 +722,13 @@ fn observation(
     }
 }
 pub(super) async fn read_response(
+    response: reqwest::Response,
+    options: SendOptions<'_>,
+) -> Result<UpstreamResponse, UpstreamError> {
+    let status = response.status();
+    super::transport::keep_error_status(status, read_response_body(response, options).await)
+}
+async fn read_response_body(
     mut response: reqwest::Response,
     options: SendOptions<'_>,
 ) -> Result<UpstreamResponse, UpstreamError> {
@@ -947,6 +954,8 @@ pub(super) async fn relay(
                     }
                     terminal_boundary_pending = false;
                     if let Some(event) = event {
+                        // 첫 event를 받은 뒤에 끊기면 첫 응답 전 끊김(0원)이 아니다.
+                        progress.started = true;
                         let terminal = if chat || deepseek {
                             event.values.get("$done") == Some(&Scalar::Bool(true))
                         } else {
@@ -1081,29 +1090,6 @@ pub(super) async fn relay(
         };
     }
     Ok(observation)
-}
-
-/// 해당 API의 모든 허용 입력/alias를 포함하는 모델 context 최악 계약이다. 실제 모델 계약은 운영자가 profile로 선언한다.
-pub fn verified_input_bound(profile: &ModelProfile) -> Option<u64> {
-    let c = profile.input_bound_contract.as_ref()?;
-    (matches!(
-        (profile.api, c.kind.as_str()),
-        (
-            crate::config::ApiKind::Responses,
-            "openai_responses_context_v1"
-        ) | (crate::config::ApiKind::OpenaiChat, "openai_chat_context_v1")
-    ) && c.context_tokens == profile.max_input_tokens
-        && c.context_tokens > 0
-        && c.context_tokens <= 1_000_000_000
-        && c.input_categories
-            == [if profile.api == crate::config::ApiKind::OpenaiChat {
-                "messages"
-            } else {
-                "input"
-            }]
-        && !profile.profile_version.is_empty()
-        && !profile.fixture_version.is_empty())
-    .then_some(c.context_tokens)
 }
 
 #[cfg(test)]

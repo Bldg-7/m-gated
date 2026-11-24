@@ -11,6 +11,6 @@ COPY --from=build /build/target/release/m-gated /fixture/m-gated
 COPY web/dist /fixture/web/dist
 COPY tests/process/package*.json tests/process/.npmrc /fixture/tests/process/
 RUN npm --prefix tests/process ci --ignore-scripts --no-audit --no-fund
-COPY tests/process/main.mjs tests/process/load.mjs tests/process/legacy-writer.mjs /fixture/tests/process/
+COPY tests/process/main.mjs tests/process/load.mjs /fixture/tests/process/
 COPY tests/support/config.yaml /fixture/synthetic-config.yaml
 CMD ["node","tests/process/main.mjs"]

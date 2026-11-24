@@ -5,14 +5,16 @@ import type { Usage } from '../../lib/types';
 import { shownText } from '../../test-text';
 import { Money } from '../../ui/ui';
 afterEach(cleanup);
-export const fixture: Usage = { currency: 'USD', from: '2026-01-01T00:00:00Z', to: '2026-02-01T00:00:00Z', as_of: '2026-03-10T00:00:00Z', detail_available_from: null, aggregation: 'detail', settled_usd: '0.000000000001', held_reservation_usd: '1.200000000000', period_unknown_count: '0', global_unknown_count: '1', global_expired_dispatch_count: '0', block_state: { blocked: true, reasons: ['unsettled'], global_unknown_count: '1', expired_dispatch_count: '0' }, balance_context: 'current_principal', budget_balances: [{ scope_id: 'scope', scope_kind: 'principal', key_id: null, period_start: '2026-03-01T00:00:00Z', period_end: '2026-04-01T00:00:00Z', timezone: 'UTC', policy_version: '7', config_digest: 'abc', mode: 'actual', limit_usd: '100.000000000000', settled_usd: '3.000000000000', reserved_usd: '2.000000000000', scope_unknown_count: '1', principal_unknown_count: '1', balance_state: 'unresolved', remaining_usd: null, blocked: true, reasons: ['unsettled'], as_of: '2026-03-10T00:00:00Z' }], buckets: { items: [], next_cursor: null, as_of: '2026-03-10T00:00:00Z' } };
-test('dashboard_separates_cost_reservation_unknown_and_global_block', () => {
+export const fixture: Usage = { currency: 'USD', from: '2026-01-01T00:00:00Z', to: '2026-02-01T00:00:00Z', as_of: '2026-03-10T00:00:00Z', detail_available_from: null, aggregation: 'detail', settled_usd: '0.000000000001', period_unknown_count: '0', global_unknown_count: '1', global_expired_dispatch_count: '0', block_state: { blocked: true, reasons: ['unsettled'], global_unknown_count: '1', expired_dispatch_count: '0' }, balance_context: 'current_principal', budget_balances: [{ scope_id: 'scope', scope_kind: 'principal', key_id: null, period_start: '2026-03-01T00:00:00Z', period_end: '2026-04-01T00:00:00Z', timezone: 'UTC', policy_version: '7', config_digest: 'abc', limit_usd: '100.000000000000', settled_usd: '3.000000000000', scope_unknown_count: '1', principal_unknown_count: '1', balance_state: 'unresolved', remaining_usd: null, blocked: true, reasons: ['unsettled'], as_of: '2026-03-10T00:00:00Z' }], buckets: { items: [], next_cursor: null, as_of: '2026-03-10T00:00:00Z' } };
+test('dashboard_separates_cost_unknown_and_global_block_without_reservations', () => {
   render(<UsageView usage={fixture} />);
   expect(screen.getByText(shownText('0.000000000001 USD'))).toBeTruthy();
-  expect(screen.getByText(shownText('1.200000000000 USD'))).toBeTruthy();
   expect(screen.getByText('확인 불가 (미정산)')).toBeTruthy();
   expect(screen.getByText(/전체 기간 미정산: 1/)).toBeTruthy();
-  expect(screen.getByText(/하드캡 보장이 아닙니다/)).toBeTruthy();
+  // 예약은 없다. 예산은 확정 비용만 보고, 처리 중인 요청 때문에 조금 넘을 수 있다.
+  expect(screen.queryByText('유지 예약')).toBeNull();
+  expect(screen.queryByText('현재 예약액')).toBeNull();
+  expect(screen.getByText('처리 중인 요청 때문에 한도를 조금 넘을 수 있습니다.')).toBeTruthy();
   expect(screen.getByText(/그룹별 사용량이 없습니다/)).toBeTruthy();
   expect(screen.queryByText(shownText('0.000000000000 USD'))).toBeNull();
 });

@@ -380,18 +380,6 @@ pub async fn validate(body: &[u8], profile: &ModelProfile) -> Result<RequestMeta
         stream: v.stream,
     })
 }
-pub fn verified_input_bound(p: &ModelProfile) -> Option<u64> {
-    let c = p.input_bound_contract.as_ref()?;
-    (p.api == ApiKind::DeepseekChat
-        && c.kind == "deepseek_chat_context_v1"
-        && c.context_tokens == p.max_input_tokens
-        && c.context_tokens > 0
-        && c.context_tokens <= 1_000_000_000
-        && c.input_categories == ["messages"]
-        && !p.profile_version.is_empty()
-        && !p.fixture_version.is_empty())
-    .then_some(c.context_tokens)
-}
 pub(super) const FIELDS: &[&str] = &[
     "error.**",
     "object",

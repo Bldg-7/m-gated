@@ -12,7 +12,6 @@ pub struct PolicyLimits {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetLimit {
-    pub mode: String,
     pub limit_usd: String,
     pub period: BudgetPeriod,
 }
@@ -31,7 +30,7 @@ impl PolicyLimits {
         ceiling.validate()?;
         let budget = match (&self.budget, &ceiling.budget) {
             (Some(a), Some(b)) => {
-                if a.mode != b.mode || a.period.kind != b.period.kind {
+                if a.period.kind != b.period.kind {
                     return Err(LedgerError::ConfigurationConflict);
                 }
                 let mut result = a.clone();
@@ -113,8 +112,7 @@ impl PolicyLimits {
             return Err(LedgerError::InvalidSnapshot);
         }
         if let Some(budget) = &self.budget
-            && (!["actual", "reserved"].contains(&budget.mode.as_str())
-                || budget.period.kind != "calendar_month"
+            && (budget.period.kind != "calendar_month"
                 || budget.limit_usd.parse::<Amount>().is_err()
                 || budget.period.timezone.len() > 100
                 || (!budget.period.timezone.is_empty()
@@ -127,29 +125,20 @@ impl PolicyLimits {
 }
 /// 호출자는 principal→key→policy 순서의 업무 잠금을 먼저 보유한다.
 /// S5 정책 명령은 반환된 정규값과 command/audit를 같은 transaction에 저장한다.
+/// 가상 키의 정책은 이 명령으로 바꾸지 않는다.
 pub async fn validate_policy_transition(
     connection: &mut sqlx::PgConnection,
     scope: uuid::Uuid,
     proposed: &PolicyLimits,
     ceiling: &PolicyLimits,
 ) -> Result<PolicyLimits, LedgerError> {
-    use sqlx::Row;
     let normalized = proposed.effective(ceiling)?;
-    let policy = sqlx::query("SELECT key_id,budget_mode FROM gw_policies WHERE id=$1")
+    let key: Option<uuid::Uuid> = sqlx::query_scalar("SELECT key_id FROM gw_policies WHERE id=$1")
         .bind(scope)
         .fetch_one(&mut *connection)
         .await?;
-    if policy.get::<Option<uuid::Uuid>, _>("key_id").is_some() {
+    if key.is_some() {
         return Err(LedgerError::Conflict);
-    }
-    // 예산 기간의 시간대는 관리자 설정 하나로 정하므로 정책마다 바뀔 일이 없다. 모드만 확인한다.
-    if let Some(budget) = &normalized.budget
-        && budget.mode != policy.get::<String, _>("budget_mode")
-    {
-        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gw_request_budgets WHERE scope_id=$1 AND (state<>'settled' OR remaining_reservation_usd<>0 OR remaining_reserved_tokens<>0)) OR EXISTS(SELECT 1 FROM gw_usage_totals WHERE scope_id=$1 AND (reserved_usd<>0 OR unknown_count<>0))").bind(scope).fetch_one(&mut *connection).await?;
-        if active {
-            return Err(LedgerError::Conflict);
-        }
     }
     Ok(normalized)
 }

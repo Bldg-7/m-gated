@@ -287,7 +287,6 @@ function api(state: MockState) {
     const rows = state.usage.filter(u => u.at >= from && u.at < to && matches(u));
     const open = state.requests.filter(r => matches(r));
     const inRange = (r: { admitted_at: string }) => { const t = new Date(r.admitted_at).getTime(); return t >= from && t < to; };
-    const held = (list: typeof open) => list.filter(r => r.accounting_state === 'pending').reduce((sum, r) => sum + pico(text((r.budgets[0] as Json | undefined)?.remaining_reservation_usd) || '0'), 0n);
     const sum = (list: typeof rows) => list.reduce((total, u) => total + u.cost, 0n);
     const groupOf = (x: { key_id: string | null; provider: string; model: string }): Bucket['group'] | null => groupBy === 'provider' ? { kind: 'provider', provider: x.provider } : groupBy === 'model' ? { kind: 'model', provider: x.provider, model: x.model } : groupBy === 'key' ? { kind: 'key', key_id: x.key_id } : null;
     const groups = new Map<string, Bucket['group']>();
@@ -296,20 +295,20 @@ function api(state: MockState) {
       const mine = rows.filter(u => JSON.stringify(groupOf(u)) === id), requests = open.filter(r => inRange(r) && JSON.stringify(groupOf(r)) === id);
       const unknown = requests.filter(r => r.accounting_state === 'unknown').length;
       // 미정산이 남은 그룹은 token 합계를 단정할 수 없다.
-      return { group, settled_usd: usd(sum(mine)), held_reservation_usd: usd(held(requests)), unknown_count: String(unknown), input_tokens: unknown ? null : String(mine.reduce((n, u) => n + u.input, 0)), output_tokens: unknown ? null : String(mine.reduce((n, u) => n + u.output, 0)), tokens_complete: unknown === 0 };
+      return { group, settled_usd: usd(sum(mine)), unknown_count: String(unknown), input_tokens: unknown ? null : String(mine.reduce((n, u) => n + u.input, 0)), output_tokens: unknown ? null : String(mine.reduce((n, u) => n + u.output, 0)), tokens_complete: unknown === 0 };
     }).sort((a, b) => Number(b.settled_usd) - Number(a.settled_usd));
     const owner = principalId ? principal(principalId) : null, key = keyId ? state.keys.find(k => k.id === keyId) : undefined;
     const balance = (scope: { scope_id: string; kind: 'principal' | 'key'; key_id: string | null; limits: Limits; policy_version: number }, p: MockPrincipal): Balance => {
       const scoped = (x: { principal_id: string; key_id: string | null }) => x.principal_id === p.id && (scope.kind === 'principal' || x.key_id === scope.key_id);
-      const settled = sum(state.usage.filter(u => u.at >= periodStart && u.at < periodEnd && scoped(u))), reserved = held(state.requests.filter(scoped));
-      const unknown = state.requests.filter(r => r.accounting_state === 'unknown' && scoped(r)).length, limit = scope.limits.budget ? pico(scope.limits.budget.limit_usd) : null, mode = scope.limits.budget?.mode ?? 'actual';
-      const state_ = limit === null ? 'unlimited' : unknown ? 'unresolved' : 'limited', rest = limit === null ? null : limit - settled - (mode === 'reserved' ? reserved : 0n);
+      const settled = sum(state.usage.filter(u => u.at >= periodStart && u.at < periodEnd && scoped(u)));
+      const unknown = state.requests.filter(r => r.accounting_state === 'unknown' && scoped(r)).length, limit = scope.limits.budget ? pico(scope.limits.budget.limit_usd) : null;
+      const state_ = limit === null ? 'unlimited' : unknown ? 'unresolved' : 'limited', rest = limit === null ? null : limit - settled;
       const reasons = [...block(p).reasons, ...(state_ === 'limited' && rest !== null && rest <= 0n ? ['budget_exhausted'] : [])];
-      return { scope_id: scope.scope_id, scope_kind: scope.kind, key_id: scope.key_id, period_start: iso(periodStart), period_end: iso(periodEnd), timezone: zone, policy_version: String(scope.policy_version), config_digest: 'mock0f3a9c1e', mode, limit_usd: limit === null ? null : usd(limit), settled_usd: usd(settled), reserved_usd: usd(reserved), scope_unknown_count: String(unknown), principal_unknown_count: block(p).global_unknown_count, balance_state: state_, remaining_usd: state_ === 'limited' && rest !== null ? usd(rest > 0n ? rest : 0n) : null, blocked: reasons.length > 0, reasons, as_of: iso(at) };
+      return { scope_id: scope.scope_id, scope_kind: scope.kind, key_id: scope.key_id, period_start: iso(periodStart), period_end: iso(periodEnd), timezone: zone, policy_version: String(scope.policy_version), config_digest: 'mock0f3a9c1e', limit_usd: limit === null ? null : usd(limit), settled_usd: usd(settled), scope_unknown_count: String(unknown), principal_unknown_count: block(p).global_unknown_count, balance_state: state_, remaining_usd: state_ === 'limited' && rest !== null ? usd(rest > 0n ? rest : 0n) : null, blocked: reasons.length > 0, reasons, as_of: iso(at) };
     };
     const balances = owner ? [balance({ scope_id: owner.scope_id, kind: 'principal', key_id: null, limits: owner.policy.limits, policy_version: owner.policy.version }, owner), ...(key && key.principal_id === owner.id ? [balance({ scope_id: key.scope_id, kind: 'key', key_id: key.id, limits: key.limits, policy_version: owner.policy.version }, owner)] : [])] : [];
     const scopeBlock = block(owner);
-    return { currency: 'USD', from: iso(from), to: iso(to), as_of: iso(at), detail_available_from: iso(at - 59 * 86400000), aggregation: 'detail', settled_usd: usd(sum(rows)), held_reservation_usd: usd(held(open.filter(inRange))), period_unknown_count: String(open.filter(r => inRange(r) && r.accounting_state === 'unknown').length), global_unknown_count: scopeBlock.global_unknown_count, global_expired_dispatch_count: scopeBlock.expired_dispatch_count, block_state: owner ? scopeBlock : null, balance_context: !owner ? 'aggregate_no_balance' : balances.length > 1 ? 'current_principal_and_key' : 'current_principal', budget_balances: balances, buckets: { items: buckets, next_cursor: null, as_of: iso(at) } };
+    return { currency: 'USD', from: iso(from), to: iso(to), as_of: iso(at), detail_available_from: iso(at - 59 * 86400000), aggregation: 'detail', settled_usd: usd(sum(rows)), period_unknown_count: String(open.filter(r => inRange(r) && r.accounting_state === 'unknown').length), global_unknown_count: scopeBlock.global_unknown_count, global_expired_dispatch_count: scopeBlock.expired_dispatch_count, block_state: owner ? scopeBlock : null, balance_context: !owner ? 'aggregate_no_balance' : balances.length > 1 ? 'current_principal_and_key' : 'current_principal', budget_balances: balances, buckets: { items: buckets, next_cursor: null, as_of: iso(at) } };
   };
 
   // ── 모델·가격 카탈로그 ──
@@ -345,6 +344,15 @@ function api(state: MockState) {
   };
 
   // ── 설정 ──
+  const cutoffRuleView = () => ({ provider: 'anthropic', cutoff_rule: state.cutoffRule.cutoff_rule, version: String(state.cutoffRule.version) });
+  const setCutoffRule = (body: Json, commandId: string): Reply => {
+    expect(body.expected_version, state.cutoffRule.version);
+    const rule = text(body.cutoff_rule);
+    if (text(body.provider) !== 'anthropic' || (rule !== 'received' && rule !== 'max_tokens')) fail(400, 'invalid_request');
+    const changed = rule !== state.cutoffRule.cutoff_rule;
+    if (changed) Object.assign(state.cutoffRule, { cutoff_rule: rule, version: state.cutoffRule.version + 1 });
+    return { status: 200, body: ack(commandId, 'set_settlement_rule', 'settings', '00000000-0000-0000-0000-000000000000', state.cutoffRule.version, changed, { cutoff_rule: cutoffRuleView() }) };
+  };
   const setTimezone = (body: Json, commandId: string): Reply => {
     expect(body.expected_version, state.timezone.version);
     const zone = text(body.timezone);
@@ -386,8 +394,8 @@ function api(state: MockState) {
       case 'PUT /api/admin/requests': if (s[4] === 'settlement') return settle(s[3], body, commandId); break;
       case 'GET /api/admin/model-catalog': if (s.length === 3) return ok(catalogView()); break;
       case 'POST /api/admin/model-catalog': if (s[3] === 'sync') return syncCatalog(commandId); if (s[3] === 'approve') return approveCatalog(body, commandId); break;
-      case 'GET /api/admin/settings': if (s.length === 3) return ok({ budget_timezone: timezoneView() }); break;
-      case 'PUT /api/admin/settings': if (s[3] === 'budget-timezone') return setTimezone(body, commandId); break;
+      case 'GET /api/admin/settings': if (s.length === 3) return ok({ budget_timezone: timezoneView(), cutoff_rule: cutoffRuleView() }); break;
+      case 'PUT /api/admin/settings': if (s[3] === 'budget-timezone') return setTimezone(body, commandId); if (s[3] === 'cutoff-rule') return setCutoffRule(body, commandId); break;
     }
     return fail(404, 'resource_not_found');
   };

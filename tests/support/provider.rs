@@ -16,26 +16,21 @@ pub struct Captured {
 }
 pub struct Provider {
     pub calls: Mutex<Vec<Captured>>,
-    input_hardcap: Mutex<Option<usize>>,
     response_wait: Mutex<
         Option<(
             tokio::sync::oneshot::Sender<()>,
             tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
-    responses_contract: Mutex<Option<(u64, u64)>>,
-    count_wait: Mutex<
-        Option<(
-            tokio::sync::oneshot::Sender<()>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
-    >,
     count_response: Mutex<Option<(StatusCode, HeaderMap, Bytes)>>,
+    count_by_content: Mutex<bool>,
     response: Mutex<(StatusCode, HeaderMap, Bytes, bool)>,
     streaming: Mutex<Option<StreamingResponse>>,
 }
 struct StreamingResponse {
     messages_only: bool,
+    /// sender를 닫으면 chunked 종료 없이 연결을 끊는다.
+    broken: bool,
     receiver: tokio::sync::mpsc::Receiver<Bytes>,
     stopped: tokio::sync::oneshot::Sender<()>,
     content_type: &'static str,
@@ -51,12 +46,7 @@ impl Drop for Server {
 }
 impl Provider {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self{response_wait:Mutex::new(None),responses_contract:Mutex::new(None),input_hardcap:Mutex::new(None),count_wait:Mutex::new(None),count_response:Mutex::new(None),streaming:Mutex::new(None),calls:Mutex::new(Vec::new()),response:Mutex::new((StatusCode::OK,HeaderMap::from_iter([("content-type".parse().unwrap(),"application/json".parse().unwrap()),("request-id".parse().unwrap(),"provider-synthetic-id".parse().unwrap())]),Bytes::from_static(br#"{"id":"msg_fixture","type":"message","role":"assistant","model":"synthetic-text","content":[{"type":"text","text":"synthetic response"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20}}"#),false))})
-    }
-    /// 합성 모델은 입력 bytes 전체(옵션/이미지/tool overhead 포함)를 context token 상한 안으로 강제한다.
-    #[allow(dead_code)]
-    pub async fn responses_contract(&self, context: u64, output: u64) {
-        *self.responses_contract.lock().await = Some((context, output));
+        Arc::new(Self{response_wait:Mutex::new(None),count_response:Mutex::new(None),count_by_content:Mutex::new(false),streaming:Mutex::new(None),calls:Mutex::new(Vec::new()),response:Mutex::new((StatusCode::OK,HeaderMap::from_iter([("content-type".parse().unwrap(),"application/json".parse().unwrap()),("request-id".parse().unwrap(),"provider-synthetic-id".parse().unwrap())]),Bytes::from_static(br#"{"id":"msg_fixture","type":"message","role":"assistant","model":"synthetic-text","content":[{"type":"text","text":"synthetic response"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20}}"#),false))})
     }
     #[allow(dead_code)]
     pub async fn hold_response(
@@ -70,22 +60,15 @@ impl Provider {
         *self.response_wait.lock().await = Some((ready, wait));
         (started, release)
     }
-    pub async fn hardcap(&self, bytes: usize) {
-        *self.input_hardcap.lock().await = Some(bytes);
-    }
-    pub async fn hold_count(
-        &self,
-    ) -> (
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
-        let (ready, started) = tokio::sync::oneshot::channel();
-        let (release, wait) = tokio::sync::oneshot::channel();
-        *self.count_wait.lock().await = Some((ready, wait));
-        (started, release)
-    }
     pub async fn set_count(&self, status: StatusCode, headers: HeaderMap, body: Bytes) {
         *self.count_response.lock().await = Some((status, headers, body));
+    }
+    /// count_tokens에 본문으로 답한다. 첫 메시지 내용의 글자 수에 7을 더해 `input_tokens`로 낸다.
+    /// 끊긴 요청의 `received` 정산은 받은 내용과 기준 메시지(".")를 함께 세서 차이에 1을 더하므로,
+    /// 받은 내용의 글자 수가 그대로 출력 토큰이 된다.
+    #[allow(dead_code)]
+    pub async fn count_by_content(&self) {
+        *self.count_by_content.lock().await = true;
     }
     pub async fn set(&self, status: StatusCode, headers: HeaderMap, body: Bytes) {
         *self.response.lock().await = (status, headers, body, false);
@@ -121,6 +104,7 @@ impl Provider {
         let (stopped, closed) = tokio::sync::oneshot::channel();
         *self.streaming.lock().await = Some(StreamingResponse {
             messages_only: false,
+            broken: false,
             receiver: rx,
             stopped,
             content_type,
@@ -139,21 +123,33 @@ impl Provider {
         self.streaming.lock().await.as_mut().unwrap().messages_only = true;
         result
     }
+    /// `stream_messages`와 같지만, sender를 닫으면 정상 종료 대신 연결이 끊긴다(chunked 종료 없음).
+    #[allow(dead_code)]
+    pub async fn stream_broken(
+        &self,
+    ) -> (
+        tokio::sync::mpsc::Sender<Bytes>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let result = self.stream_messages().await;
+        self.streaming.lock().await.as_mut().unwrap().broken = true;
+        result
+    }
     pub async fn serve(self: &Arc<Self>) -> Server {
         async fn handler(State(p): State<Arc<Provider>>, r: Request) -> Response {
             let (parts, body) = r.into_parts();
             let count = parts.uri.path().ends_with("/count_tokens");
             let body = axum::body::to_bytes(body, 8 * 1024 * 1024).await.unwrap();
-            let input_bytes = body.len();
-            let contract_valid = if let Some((context, output)) = *p.responses_contract.lock().await
-            {
-                let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                input_bytes as u64 <= context
-                    && v["max_output_tokens"]
-                        .as_u64()
-                        .is_some_and(|n| n > 0 && n <= output)
+            let counted = if count && *p.count_by_content.lock().await {
+                serde_json::from_slice::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        v["messages"][0]["content"]
+                            .as_str()
+                            .map(|s| s.chars().count() + 7)
+                    })
             } else {
-                true
+                None
             };
             p.calls.lock().await.push(Captured {
                 method: parts.method.to_string(),
@@ -165,19 +161,11 @@ impl Provider {
                 let _ = ready.send(());
                 let _ = wait.await;
             }
-            if !contract_valid {
-                return Response::builder().status(400).header("content-type","application/json").body(Body::from(r#"{"error":{"message":"Synthetic native context contract exceeded","type":"invalid_request_error","param":null,"code":"context_length_exceeded"}}"#)).unwrap();
-            }
-            if count && let Some((ready, wait)) = p.count_wait.lock().await.take() {
-                let _ = ready.send(());
-                let _ = wait.await;
-            }
-            if p.input_hardcap
-                .lock()
-                .await
-                .is_some_and(|max| input_bytes > max)
-            {
-                return Response::builder().status(400).header("content-type","application/json").body(Body::from(r#"{"type":"error","error":{"type":"invalid_request_error","message":"Fixture context bound exceeded"}}"#)).unwrap();
+            if let Some(n) = counted {
+                return Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!("{{\"input_tokens\":{n}}}")))
+                    .unwrap();
             }
             let (mut status, mut headers, mut body, chunked) = p.response.lock().await.clone();
             if count && let Some((s, h, b)) = p.count_response.lock().await.clone() {
@@ -197,6 +185,7 @@ impl Provider {
                 receiver,
                 stopped,
                 content_type,
+                broken,
                 ..
             }) = streaming
             {
@@ -205,6 +194,7 @@ impl Provider {
                     .body(Body::new(ControlledStream {
                         receiver,
                         stopped: Some(stopped),
+                        broken,
                     }))
                     .unwrap();
             }
@@ -283,6 +273,7 @@ impl http_body::Body for Chunked {
 struct ControlledStream {
     receiver: tokio::sync::mpsc::Receiver<Bytes>,
     stopped: Option<tokio::sync::oneshot::Sender<()>>,
+    broken: bool,
 }
 impl Drop for ControlledStream {
     fn drop(&mut self) {
@@ -293,13 +284,16 @@ impl Drop for ControlledStream {
 }
 impl http_body::Body for ControlledStream {
     type Data = Bytes;
-    type Error = std::convert::Infallible;
+    type Error = std::io::Error;
     fn poll_frame(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
-        self.receiver
-            .poll_recv(cx)
-            .map(|chunk| chunk.map(|bytes| Ok(http_body::Frame::data(bytes))))
+        let broken = self.broken;
+        self.receiver.poll_recv(cx).map(|chunk| match chunk {
+            Some(bytes) => Some(Ok(http_body::Frame::data(bytes))),
+            None if broken => Some(Err(std::io::Error::other("합성 연결 끊김"))),
+            None => None,
+        })
     }
 }

@@ -112,7 +112,7 @@ impl PgLedger {
             .await?;
         sqlx::query("SELECT request_id FROM gw_request_budgets WHERE request_id=ANY($1) ORDER BY request_id,scope_id FOR UPDATE").bind(&ids).fetch_all(&mut *tx).await?;
         let months = policy.ledger.and_then(|p| p.months()).unwrap_or(0) as i32;
-        let eligible: Vec<Uuid>=sqlx::query_scalar("SELECT r.id FROM gw_requests r WHERE r.id=ANY($1) AND NOT EXISTS(SELECT 1 FROM gw_requests f WHERE (f.id=r.id OR f.parent_request_id=r.id) AND (f.phase<>'finished' OR f.accounting_state<>'settled' OR EXISTS(SELECT 1 FROM gw_request_budgets b WHERE b.request_id=f.id AND (b.state<>'settled' OR b.remaining_reservation_usd<>0 OR b.remaining_reserved_tokens<>0)) OR EXISTS(SELECT 1 FROM gw_principals p WHERE p.inference_pause_request_id=f.id))) AND ((GREATEST((SELECT max(f.finished_at) FROM gw_requests f WHERE f.id=r.id OR f.parent_request_id=r.id),(SELECT max(e.observed_at) FROM gw_usage_events e JOIN gw_requests f ON f.id=e.request_id WHERE f.id=r.id OR f.parent_request_id=r.id)) AT TIME ZONE 'UTC')+make_interval(months=>$2)) AT TIME ZONE 'UTC'<=clock_timestamp() ORDER BY r.id").bind(&roots).bind(months).fetch_all(&mut *tx).await?;
+        let eligible: Vec<Uuid>=sqlx::query_scalar("SELECT r.id FROM gw_requests r WHERE r.id=ANY($1) AND NOT EXISTS(SELECT 1 FROM gw_requests f WHERE (f.id=r.id OR f.parent_request_id=r.id) AND (f.phase<>'finished' OR f.accounting_state<>'settled' OR EXISTS(SELECT 1 FROM gw_request_budgets b WHERE b.request_id=f.id AND b.state<>'settled') OR EXISTS(SELECT 1 FROM gw_principals p WHERE p.inference_pause_request_id=f.id))) AND ((GREATEST((SELECT max(f.finished_at) FROM gw_requests f WHERE f.id=r.id OR f.parent_request_id=r.id),(SELECT max(e.observed_at) FROM gw_usage_events e JOIN gw_requests f ON f.id=e.request_id WHERE f.id=r.id OR f.parent_request_id=r.id)) AT TIME ZONE 'UTC')+make_interval(months=>$2)) AT TIME ZONE 'UTC'<=clock_timestamp() ORDER BY r.id").bind(&roots).bind(months).fetch_all(&mut *tx).await?;
         let deleted: Vec<Uuid> = sqlx::query_scalar(
             "SELECT id FROM gw_requests WHERE id=ANY($1) OR parent_request_id=ANY($1) ORDER BY id",
         )
@@ -136,7 +136,7 @@ impl PgLedger {
             .bind(&deleted)
             .execute(&mut *tx)
             .await?;
-        // 명령의 작은 Ack는 idempotency tombstone이다. 키 발급/회수·정산·handoff 재사용 효과를 막기 위해 보존한다.
+        // 명령의 작은 Ack는 idempotency tombstone이다. 키 발급/회수·정산 재사용 효과를 막기 위해 보존한다.
         // human 명령 감사도 rollback/삭제 추적과 replay 결과의 참조이므로 함께 보호한다.
         if let Some(months) = policy.audit.and_then(|p| p.months()) {
             sqlx::query("DELETE FROM gw_audit_events WHERE id IN(SELECT a.id FROM gw_audit_events a WHERE a.actor_kind='system' AND ((a.occurred_at AT TIME ZONE 'UTC')+make_interval(months=>$1)) AT TIME ZONE 'UTC'<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM gw_requests r WHERE r.id=a.request_id) AND NOT EXISTS(SELECT 1 FROM gw_principals p WHERE p.inference_pause_request_id=a.request_id) ORDER BY a.occurred_at,a.id LIMIT 100)").bind(months as i32).execute(&mut *tx).await?;
