@@ -1,0 +1,195 @@
+/// m-gated Provider 어댑터 인터페이스(결정 0009). 본체의 Provider port를 따른다.
+///
+/// 컴포넌트는 import를 하나도 가질 수 없다. 본체는 import가 있는 컴포넌트를 시작할 때 거절한다.
+/// 키(secret)는 컴포넌트에 넘기지 않는다. 키 접두사 규칙은 `describe`로 알리고 본체가 검사한다.
+package m-gated:adapter@0.1.0;
+
+interface provider {
+    /// 요청 검사 실패.
+    enum api-error {
+        invalid-request,
+        unsupported-option,
+        unsupported-model,
+    }
+    /// 요청 검사가 알려 주는 값.
+    record request-metadata {
+        model: string,
+        output-limit: option<u64>,
+        %stream: bool,
+    }
+    /// 게이트웨이가 직접 만든 오류 응답의 형식.
+    enum error-format {
+        anthropic,
+        openai,
+        detail,
+    }
+    /// 응답을 읽지 못한 까닭.
+    enum read-error {
+        protocol,
+        stream-limit,
+        too-large,
+    }
+    /// Provider가 알린 사용량.
+    record usage {
+        actual-model: string,
+        input-tokens: u64,
+        output-tokens: u64,
+        cache-read-tokens: u64,
+        cache-write-tokens: u64,
+        reasoning-tokens: option<u64>,
+    }
+    /// 비스트림 응답을 읽은 결과.
+    record reading {
+        usage: option<usage>,
+        failed: bool,
+    }
+    /// 설정 파일의 model profile이 켠 Provider 기능.
+    enum feature {
+        client-tools,
+        thinking,
+        cache,
+        json-schema,
+        inline-png,
+    }
+    /// 어댑터가 보는 model profile.
+    record profile {
+        model: string,
+        features: list<feature>,
+        approved-beta: list<string>,
+        max-output-tokens: option<u64>,
+        /// 가격 항목 이름.
+        rates: list<string>,
+    }
+    /// profile 규칙 위반.
+    enum profile-error {
+        invalid-price,
+        invalid-profile,
+    }
+    /// 클라이언트 요청 헤더 하나. 이름은 소문자다.
+    record header {
+        name: string,
+        value: list<u8>,
+    }
+
+    /// 업스트림 인증 헤더의 형식.
+    enum auth-scheme {
+        /// `authorization: Bearer <key>`
+        bearer,
+    }
+    /// 응답 헤더 값의 규칙.
+    enum header-rule {
+        /// 1–256바이트, 제어 문자 없음.
+        id,
+        /// 10진 숫자만.
+        number,
+    }
+    /// 클라이언트에 그대로 넘기는 응답 헤더.
+    record response-header {
+        name: string,
+        rule: header-rule,
+    }
+    /// Provider의 API 하나.
+    record api-info {
+        /// 본체의 API 이름(예: `deepseek_chat`). 다른 함수에 이 이름을 넘긴다.
+        kind: string,
+        /// 게이트웨이가 받는 경로.
+        routes: list<string>,
+        /// 업스트림 경로(`base_url` 기준 상대 경로).
+        upstream-path: string,
+        error-format: error-format,
+        /// 가격표 snapshot에 남기는 토큰 포함 규칙 이름.
+        token-rule: string,
+        /// 스트림 응답을 읽을 수 있는지.
+        %stream: bool,
+    }
+    /// 시작할 때 한 번 읽는 Provider의 고정 사실.
+    record description {
+        /// Provider 이름. 본체가 아는 이름이어야 한다.
+        name: string,
+        /// 업스트림 주소.
+        origin: string,
+        auth: auth-scheme,
+        /// 키는 이 접두사로 시작해야 한다.
+        key-prefix: string,
+        /// 키가 이 접두사로 시작하면 받지 않는다.
+        refused-key-prefixes: list<string>,
+        /// 키 확인 경로(과금 없는 GET).
+        verify-path: string,
+        /// 응답에서 Provider 요청 id를 읽을 헤더. 앞의 것이 먼저다.
+        request-id-headers: list<string>,
+        response-headers: list<response-header>,
+        apis: list<api-info>,
+    }
+
+    /// 스트림 event에서 읽은 값 하나.
+    variant scalar {
+        object,
+        array,
+        %string(string),
+        /// 문자열이지만 내용은 받지 않았다.
+        string-shape,
+        /// 원문 그대로의 숫자.
+        number(string),
+        %bool(bool),
+        null,
+    }
+    /// 스트림 event 하나. `values`의 키는 필드 경로다.
+    record event {
+        name: string,
+        values: list<tuple<string, scalar>>,
+        wire-bytes: u64,
+    }
+    /// 본체가 스트림을 event로 나눌 때 쓰는 규칙.
+    record decoder {
+        /// `data: [DONE]`을 끝 event로 받는지.
+        chat: bool,
+        /// event에서 읽을 필드 경로.
+        fields: list<string>,
+        /// 내용 없이 문자열인지만 알릴 필드 경로.
+        string-shapes: list<string>,
+        /// 끊긴 요청 정산에 쓰려고 내용을 모을 필드 경로.
+        content: list<string>,
+    }
+    /// 스트림 event 하나를 읽은 결과.
+    record step {
+        terminal: bool,
+        error: bool,
+        /// 출력 내용 조각. none은 조각이 상한을 넘어 받지 못한 것이다.
+        content: list<option<string>>,
+    }
+    /// 스트림이 끝났을 때의 사용량과 실패 여부.
+    record closing {
+        usage: option<usage>,
+        failed: bool,
+    }
+
+    /// 시작할 때 한 번 부른다.
+    describe: func() -> description;
+    /// 이 Provider에만 있는 profile 규칙.
+    check-profile: func(api: string, profile: profile) -> result<_, profile-error>;
+    /// 요청 본문을 검사한다.
+    validate: func(api: string, body: list<u8>, profile: profile) -> result<request-metadata, api-error>;
+    /// 업스트림에 보낼 클라이언트 헤더의 이름을 고른다. `content-type`은 반드시 들어 있다.
+    approved-headers: func(api: string, headers: list<header>) -> result<list<string>, api-error>;
+    /// 비스트림 응답 본문을 읽는다. 본체가 상태 코드, 인코딩, content-type, 크기를 먼저 확인한다.
+    read: func(api: string, status: u16, body: list<u8>, profile: profile) -> result<reading, read-error>;
+
+    /// 스트림 응답 하나를 읽는 상태 기계. 요청마다 하나 만든다.
+    resource stream-reader {
+        constructor(api: string, profile: profile);
+        decoder: func() -> decoder;
+        /// event 하나를 받는다. 오류 뒤로는 사용량을 알려 주지 않는다.
+        accept: func(event: event) -> result<step, read-error>;
+        /// 끝 event를 받은 뒤 정산에 쓸 사용량.
+        final-usage: func() -> option<usage>;
+        /// Provider가 실패를 알렸는지.
+        provider-error: func() -> bool;
+        /// 끝 event 없이 끝났으면 오류다.
+        close: func() -> result<closing, read-error>;
+    }
+}
+
+/// 어댑터 컴포넌트. import가 없다.
+world adapter {
+    export provider;
+}

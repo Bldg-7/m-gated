@@ -9,7 +9,7 @@ repository = "https://github.com/Bldg-7/m-gated"
 publish = false
 
 [workspace]
-members = ["crates/adapter-kit", "adapters/deepseek"]
+members = ["crates/adapter-kit", "adapters/deepseek", "adapters/deepseek/component"]
 
 [dependencies]
 axum = { version = "=0.8.8", default-features = false, features = ["http1", "json", "tokio"] }

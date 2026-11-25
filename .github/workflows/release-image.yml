@@ -68,6 +68,14 @@ jobs:
           # are #[ignore]d and run locally with the scripts/ helpers.
           cargo test --locked --workspace
 
+      # The DeepSeek WASM adapter (decision 0009). Its code compiles only for wasm32,
+      # so the workspace clippy above does not check it.
+      - name: WASM adapter clippy and build
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo clippy --locked --target wasm32-unknown-unknown -p m-gated-adapter-deepseek-component -- -D warnings
+          scripts/build-adapter.sh
+
   build:
     name: build (${{ matrix.platform }})
     needs: verify

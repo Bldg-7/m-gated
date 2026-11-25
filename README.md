@@ -890,6 +890,19 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 (cd web && npm ci && npm run typecheck && npm test)  # dashboard unit tests (Vitest)
 ```
 
+The DeepSeek adapter can also be built as a WebAssembly (WASM) component. This is a trial
+([decision 0009](docs/decisions/0009-deepseek-adapter-as-wasm-trial.md)), and the gateway does not
+load the component yet. Its interface is in `crates/adapter-kit/wit/adapter.wit`. To build it:
+
+```sh
+scripts/build-adapter.sh   # writes target/adapters/deepseek.wasm and prints its SHA-256
+```
+
+The script adds the `wasm32-unknown-unknown` target, installs `wasm-tools` 1.259.0 in
+`target/tools`, and refuses a component that imports anything. The component's code compiles only
+for wasm32, so check it with
+`cargo clippy --locked --target wasm32-unknown-unknown -p m-gated-adapter-deepseek-component -- -D warnings`.
+
 The Postgres-backed suites are marked `#[ignore]`. They need a dedicated local database at exactly
 `postgres://m_gated_test@127.0.0.1:64603/m_gated_test`: no password (trust authentication), no TLS
 and no `PG*` environment variables. Each test creates and removes its own schema. Example:
@@ -947,7 +960,7 @@ alternatives were rejected, one file for each decision.
 Pushing a `vX.Y.Z` tag runs [`.github/workflows/release-image.yml`](.github/workflows/release-image.yml):
 
 1. `verify`: dashboard tests and build, `cargo fmt`, `clippy` and `cargo test` (the `#[ignore]`d
-   suites above are not run in CI).
+   suites above are not run in CI), and the WASM adapter's clippy and build.
 2. `build`: the image is built natively on amd64 and arm64 runners, pushed by digest, and checked
    with `scripts/test-package.sh` (non-root, no Node/npm/cargo in the runtime layer, read-only root,
    refuses to start without a valid config).

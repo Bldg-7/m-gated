@@ -37,15 +37,31 @@ and puts it behind the port. In the rest of this record, "component" means this 
    - The component gets the request body and the non-streamed response body whole. For a stream,
      it gets one event at a time, and each event holds only the fields that the component named
      in `decoder` (rule 3). The component is called once per event, not once per byte.
-3. The interface is written in WIT and follows the port:
+3. The interface is written in WIT and follows the port. It is the package
+   `m-gated:adapter@0.1.0` in `crates/adapter-kit/wit/adapter.wit`:
+   - All functions and types are in one interface, `provider`. The component exports it. If the
+     types were in a second interface, the component would import that interface, and rule 4
+     refuses any import.
    - `describe()` is called once at start. It returns the fixed facts: provider name, upstream
      address, key check path, response headers to pass, and the APIs with their routes, upstream
      paths, error formats and token rules.
+   - API keys never go into the component. `describe()` also returns the authentication header
+     form (only `bearer` now), the key prefix and the prefixes to refuse. The host checks the key
+     and builds the header.
    - `check-profile` checks the provider's rules for a model profile in the config. `validate`
-     checks a request body. `approved-headers` picks the client headers to forward. `read` reads
-     a non-streamed response body and reports the usage. These are the port's methods.
-   - A `stream-reader` resource is created for each streamed request. It has `decoder` (the
-     fields to extract), `accept`, `final-usage`, `provider-error` and `close`.
+     checks a request body. `approved-headers` gets the client headers as name and value pairs,
+     and returns the names of the headers to forward. `read` reads a non-streamed response body
+     and reports the usage. These are the port's methods. Each of them gets the API name that
+     `describe()` gave, such as `deepseek_chat`.
+   - A `stream-reader` resource is created for each streamed request. It has these methods:
+     - `decoder` names the fields to extract from each event, as dotted paths such as
+       `choices.*.delta.content`.
+     - `accept` gets one event at a time, as those paths and their values. It says if the event
+       ends the stream or is a provider error.
+     - `final-usage` returns the usage to settle, after the end event.
+     - `provider-error` says if the provider reported a failure.
+     - `close` is called when the stream ends. It returns the usage and the failure flag, or an
+       error if the stream ended without an end event.
    - `SideRequest` is not in this interface. It comes later, for adapters that need it.
 4. The host runs the component with wasmtime and the component model:
    - The component may have no imports, that is, no functions that the host lends to it. A
@@ -65,23 +81,27 @@ and puts it behind the port. In the rest of this record, "component" means this 
      use tokio. In step 1 it gets the JSON request checker (`json.rs`) and the stream decoders
      (`stream.rs`): `JsonDecoder` reads selected fields from JSON, `SseDecoder` splits a stream
      into events, `Scalar` is a selected field's value, and `Event` is one stream event. The host
-     keeps two thin async wrappers, for the JSON checker and for `SseDecoder::feed`, that give
-     control back to tokio during long work.
+     keeps two thin async wrappers: one for the JSON checker and one for `SseDecoder::feed`. Both
+     give control back to tokio during long work.
    - In step 2, `adapter-kit` also gets the values that pass between the port and an adapter.
      These values do not depend on HTTP, the config or the ledger:
-     - `ApiError` and `RequestMetadata`: the result of a request check. It is a refusal reason,
-       or the model, the output limit and whether the client asked for a stream.
+     - `ApiError`: why a request check refused a request.
+     - `RequestMetadata`: what a request check found in an accepted request: the model, the
+       output limit and whether the client asked for a stream.
      - `ErrorFormat`: the shape of the error body that the gateway sends to the client.
      - `Step`: what one stream event told the reader. It says if the event ends the stream, if
        it is a provider error, and which output text it held.
      - `Usage`: the token counts that a response reports.
      - `ReadError`: why a response could not be read: a wrong shape, a stream event over its
-       limit, or a body over its limit. The host turns each one into its own upstream error and
-       settles the request by its usual rules.
+       limit, or a body over its limit. If the response was a success, the request becomes
+       `unknown`. If it was an error response, the request is settled at 0 USD (decision 0005).
      - `Profile`: the part of a model profile that an adapter sees. This is the model name, the
-       features, the beta names, the output limit and the names of the prices.
+       provider features that the profile turns on (for example tools or thinking), the provider
+       beta header values that it allows, the output limit, and the names of its prices (for
+       example `input` and `cache_read`). An adapter checks which prices exist, not their amounts.
      - `Header`: one client header, as a name and a value.
-   - The port uses the first three groups of values without change, so it re-exports them. The
+   - The port uses `ApiError`, `RequestMetadata`, `ErrorFormat` and `Step` without change, so it
+     re-exports them. The
      host converts the other values to its own types. `Usage` becomes the ledger's `FinalUsage`.
      `FinalUsage` stays in the ledger, because the ledger stores it as JSON and calculates prices
      from it.
@@ -90,16 +110,22 @@ and puts it behind the port. In the rest of this record, "component" means this 
    - Some code is shared between adapters. It moves to `adapter-kit`, and `openai.rs` uses it from
      there:
      - DeepSeek and OpenAI accept only keys that start with `sk-`.
-     - DeepSeek and OpenAI refuse a model profile with beta names. They also refuse a profile
+     - DeepSeek and OpenAI refuse a model profile that allows beta header values. They also refuse a profile
        that turns on the cache but has no cache read price.
      - DeepSeek and OpenAI read a Chat Completions response and an error body in the same way.
      - DeepSeek, OpenAI and TypeSafe forward only one client header, a JSON `content-type`.
    - `adapters/deepseek` is an ordinary Rust crate, so its unit tests run natively.
-   - The component is built for `wasm32-unknown-unknown` with wit-bindgen and wrapped with
-     `wasm-tools component new`. A WASI target is not used. WASI is the standard set of system
-     functions for WASM, so a build for it could add imports, and rule 4 refuses a component with
-     any import.
-6. The work goes in five steps. The full test suite runs after each step.
+   - The component is the crate `adapters/deepseek/component`. It only converts between the WIT
+     types and the types of `adapters/deepseek`. Its code compiles only for wasm32, because on
+     other targets the code that wit-bindgen makes has nothing to link to.
+   - `scripts/build-adapter.sh` builds the component for `wasm32-unknown-unknown` with
+     wit-bindgen 0.62.0 and wraps it with `wasm-tools component new`. It uses wasm-tools 1.259.0,
+     which came out on the same day as wit-bindgen 0.62.0 and uses the same component encoding
+     library (wit-component 0.259.0). The script refuses a component that
+     imports anything, and prints the component's SHA-256. The release workflow runs it.
+   - A WASI target is not used. WASI is the standard set of system functions for WASM, so a
+     build for it could add imports, and rule 4 refuses a component with any import.
+6. The work goes in five steps. The full test suite runs after each step. Steps 1 to 3 are done.
    1. Create the workspace and `adapter-kit`, and make the host use it. Behavior does not change.
    2. Move the DeepSeek logic into `adapters/deepseek`, and link it into the host directly.
       Behavior does not change.

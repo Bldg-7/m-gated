@@ -9,9 +9,16 @@ use std::collections::BTreeMap;
 /// 읽은 필드 값. 키는 필드 경로다.
 pub type Values = BTreeMap<String, Scalar>;
 
+/// OpenAI 호환 키의 접두사.
+pub const SK_KEY_PREFIX: &str = "sk-";
+/// OpenAI 호환 키로 받지 않는 접두사. Anthropic 키다.
+pub const SK_REFUSED_KEY_PREFIXES: &[&str] = &["sk-ant-"];
 /// `sk-`로 시작하는 키만 받는다. Anthropic 키(`sk-ant-`)는 받지 않는다.
 pub fn accepts_sk_key(secret: &str) -> bool {
-    secret.starts_with("sk-") && !secret.starts_with("sk-ant-")
+    secret.starts_with(SK_KEY_PREFIX)
+        && !SK_REFUSED_KEY_PREFIXES
+            .iter()
+            .any(|p| secret.starts_with(p))
 }
 /// OpenAI 호환 Provider의 profile 규칙.
 pub fn check_compatible_profile(profile: &Profile) -> Result<(), ProfileError> {

@@ -48,14 +48,16 @@ impl Cooperate for NoYield {
 }
 /// 실행을 넘기지 않고 한 번에 검사한다.
 pub fn scan(bytes: &[u8], visitor: &mut impl Visitor) -> Result<(), JsonError> {
-    let mut future = pin!(scan_with(bytes, visitor, NoYield));
-    match future
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        Poll::Ready(result) => result,
-        // NoYield는 늘 준비돼 있어 여기에 오지 않는다.
-        Poll::Pending => Err(JsonError),
+    ready(scan_with(bytes, visitor, NoYield))
+}
+/// [`NoYield`]만 기다리는 future를 한 번 poll해 끝낸다. 실행기가 없는 곳(WASM 어댑터)에서 쓴다.
+///
+/// # Panics
+/// future가 다른 것을 기다리면 panic한다.
+pub fn ready<F: Future>(future: F) -> F::Output {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("NoYield 말고 다른 것을 기다리는 future"),
     }
 }
 /// 64 KiB마다 `cooperate`를 기다리며 검사한다.

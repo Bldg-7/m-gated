@@ -20,6 +20,14 @@ pub const NAME: &str = "deepseek";
 pub const ORIGIN: &str = "https://api.deepseek.com";
 /// 키 확인 경로.
 pub const VERIFY_PATH: &str = "models";
+/// 키는 이 접두사로 시작해야 한다.
+pub const KEY_PREFIX: &str = openai::SK_KEY_PREFIX;
+/// 키가 이 접두사로 시작하면 받지 않는다.
+pub const REFUSED_KEY_PREFIXES: &[&str] = openai::SK_REFUSED_KEY_PREFIXES;
+/// 응답에서 Provider 요청 id를 읽을 헤더. 앞의 것이 먼저다.
+pub const REQUEST_ID_HEADERS: &[&str] = &["x-request-id"];
+/// 클라이언트에 그대로 넘기는 요청 id 응답 헤더.
+pub const RESPONSE_ID_HEADERS: &[&str] = &["request-id", "x-request-id"];
 /// 게이트웨이가 받는 경로.
 pub const ROUTE: &str = "/deepseek/v1/chat/completions";
 /// 업스트림 경로.
@@ -692,7 +700,10 @@ impl Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use m_gated_adapter_kit::{json::NoYield, stream::RETAINED_BYTES};
+    use m_gated_adapter_kit::{
+        json::{NoYield, ready as now},
+        stream::RETAINED_BYTES,
+    };
     use serde_json::{Value, json};
     fn usage() -> Value {
         json!({"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":60,"completion_tokens_details":{"reasoning_tokens":10}})
@@ -711,14 +722,6 @@ mod tests {
         p.finish().map_err(|_| ReadError::Protocol)?;
         assert!(p.retained_peak() <= RETAINED_BYTES);
         r.close().map(|(usage, _)| usage)
-    }
-    /// `NoYield`는 기다리지 않으므로 한 번 poll하면 끝난다.
-    fn now<F: Future>(f: F) -> F::Output {
-        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        match std::pin::pin!(f).poll(&mut cx) {
-            std::task::Poll::Ready(v) => v,
-            std::task::Poll::Pending => panic!("NoYield는 기다리지 않는다"),
-        }
     }
     fn profile() -> Profile {
         Profile {
