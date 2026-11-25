@@ -14,8 +14,15 @@ Key properties:
 - **Allow-list only.** A model can be used only if the operator declared a *profile* for it,
   with exact fields, limits and rates. m-gated ships **no price table**. All rates come from the
   operator.
-- **Fail-closed accounting.** If the gateway cannot verify the final usage of a request, the cost is
-  recorded as `unknown` and the user cannot make paid calls until an admin settles that request.
+- **Fail-closed accounting.** The gateway settles a request from the usage in the provider's
+  response. If it cannot verify that usage, it records the cost as `unknown`, never as 0, and the
+  user cannot make paid calls until an admin settles that request. Two kinds of request are
+  exceptions (details in [Cost ledger](#cost-ledger)):
+  - An Anthropic stream cut off after its `message_start` event is settled by the cut-off rule
+    that the admin chose (`received` or `max_tokens`).
+  - A request is settled at 0 USD if the provider answered with an HTTP error, or if it was cut off
+    before `message_start` in an Anthropic stream, before the first event in another stream, or
+    before the full response when not streaming.
 - **SSO identity.** Users authenticate with RS256 JWTs from an external SSO (verified against a
   JWKS) to use the dashboard. From the dashboard they issue scoped virtual keys, which are the only
   credentials accepted for inference.
