@@ -23,6 +23,8 @@ pub struct Dependencies {
     ui: Option<Arc<crate::dashboard::UiBundle>>,
     credentials: Option<Arc<crate::credentials::CredentialService>>,
     catalog: Option<Arc<crate::catalog::CatalogService>>,
+    /// 토큰 대조와 사후 보정. Admin API 키가 있을 때만 있다.
+    token_check: Option<Arc<crate::token_check::TokenCheck>>,
 }
 impl Dependencies {
     pub fn unassembled() -> Self {
@@ -38,7 +40,12 @@ impl Dependencies {
             ui: None,
             credentials: None,
             catalog: None,
+            token_check: None,
         }
+    }
+    pub fn with_token_check(mut self, token_check: Arc<crate::token_check::TokenCheck>) -> Self {
+        self.token_check = Some(token_check);
+        self
     }
     /// 상태 점검 주기마다 승인된 카탈로그 버전을 캐시에 반영한다. 준비 상태(ready)에는 영향을 주지 않는다.
     pub fn with_catalog(mut self, catalog: Arc<crate::catalog::CatalogService>) -> Self {
@@ -92,6 +99,8 @@ impl Dependencies {
             .refresh()
             .await
             .map_err(|_| StartupError::SchemaUnavailable)?;
+        let token_check =
+            crate::token_check::TokenCheck::new(config, ledger.clone(), credentials.clone());
         let inference = Arc::new(
             crate::gateway::InferenceGateway::new(
                 config,
@@ -107,12 +116,16 @@ impl Dependencies {
                 .with_credentials(credentials.clone())
                 .with_catalog(catalog.clone()),
         );
-        Ok(Self::unassembled()
+        let assembled = Self::unassembled()
             .with_dashboard(dashboard)
             .with_authentication(auth)
             .with_inference(inference)
             .with_credentials(credentials)
-            .with_catalog(catalog))
+            .with_catalog(catalog);
+        Ok(match token_check {
+            Some(token_check) => assembled.with_token_check(token_check),
+            None => assembled,
+        })
     }
     pub fn with_ui(mut self, ui: Arc<crate::dashboard::UiBundle>) -> Self {
         self.ui = Some(ui);
@@ -241,7 +254,13 @@ impl RunningApp {
             }
             Ok::<_, crate::runtime::AdmissionError>(())
         };
-        let (result, health, recovery) = tokio::join!(serve, monitor, reaper);
+        let checking = async {
+            if let Some(check) = &self.dependencies.token_check {
+                check.clone().run(runtime.clone()).await?;
+            }
+            Ok::<_, crate::runtime::AdmissionError>(())
+        };
+        let (result, health, recovery, _) = tokio::join!(serve, monitor, reaper, checking);
         result.map_err(|_| StartupError::RuntimeFailure)?;
         recovery.map_err(|_| StartupError::RuntimeFailure)?;
         health.map_err(|_| StartupError::RuntimeFailure)

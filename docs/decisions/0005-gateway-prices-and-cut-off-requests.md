@@ -1,7 +1,7 @@
 # 0005. The catalog is the gateway's own price list; cut-off requests are settled at once; reservations are removed
 
 - Date: 2026-11-24
-- Status: Implemented, except the token check and correction (items 11 and 23 to 27)
+- Status: Implemented
 
 ## Context
 
@@ -100,12 +100,29 @@ bill, so its budgets do not have to follow that bill either.
     - `max_tokens` never counts less than the provider bills, but it can charge more than was used.
 11. Each provider also has a **correction** switch, off by default. When it is on, the gateway
     later replaces the output of a cut-off request with the tokens from the provider's usage report.
-    For this it reads the report in one-minute buckets. It corrects a request only when that request
-    is the only cut-off request on its provider key in that minute, so the difference between the
-    report and the gateway's own count can belong to it alone. The correction is applied to the
-    request's original budget period, the request is marked as corrected, and the change is
-    audited. The switch can be turned on only for a provider whose usage report the gateway supports
-    and only when an Admin API key is configured.
+    For this it reads the report in one-minute buckets, which are split by provider key and model.
+    - The provider does not document whether a bucket holds the requests that were sent in that
+      minute or the requests that ended in it (the bucket assignment). With the wrong assignment,
+      what is left of a bucket after the other requests are subtracted can be another request with
+      the same input, for example a retry of the same prompt. So the gateway first learns the
+      assignment from minutes in which every request was settled with the usage that the provider
+      sent in its response. It corrects nothing until at least 3 minutes count for one assignment
+      and the other assignment has no more than a tenth of that number.
+    - It corrects a request only when every other request that the assignment puts in the same
+      minute, with the same provider key and model, was settled with the usage that the provider
+      sent, so that no other cut-off request shares the bucket. The bucket's input and cache tokens,
+      minus those of the other requests, must also equal the request's own. The rest of the bucket's
+      output then belongs to the request alone.
+    - A request within 5 seconds of a minute boundary is not corrected, because the gateway's and
+      the provider's clocks can put it in different minutes.
+    - The new output never exceeds the request's `max_tokens`. The gateway tries each cut-off
+      request from 10 minutes to 2 hours after it ended. The report usually arrives within minutes,
+      so a request that cannot be corrected by then is left as it is.
+    - The correction is applied to the request's original budget period, the request is marked as
+      corrected, and the change is audited.
+
+    The switch can be turned on only for a provider whose usage report the gateway supports and only
+    when an Admin API key is configured.
 12. The following requests are settled at 0 USD and do not block the principal. The provider's
     documentation does not say whether they are billed. If they were, the token check (item 23)
     shows their tokens as a difference.
@@ -153,7 +170,8 @@ bill, so its budgets do not have to follow that bill either.
     set only in the environment. Without it, the gateway does not poll, the token check screen says
     that the check is off, and the correction switch cannot be turned on.
 24. One instance at a time polls the legacy usage report (`/v1/organizations/usage_report/messages`)
-    every 5 minutes. It reads the last 48 hours in one-hour buckets, grouped by API key and model.
+    every 5 minutes. It reads the last 48 hours in one-hour buckets, grouped by API key and model,
+    and also reads any hours it missed in the last 30 days. Only the hours it has read are compared.
     In this stage only Anthropic is supported.
 25. The usage report names API keys by Anthropic's own key ID, not by the key itself. The gateway
     finds the ID of each provider key in the Admin API's list of API keys, which shows the first and
@@ -161,11 +179,18 @@ bill, so its budgets do not have to follow that bill either.
 26. The gateway compares tokens per provider key, model, token type and hour. It skips the last 10
     minutes and checks recent hours again, because the provider's data can arrive late.
 27. A difference is not an alert and sends no notification. The admin dashboard always shows the
-    total difference, priced at the current catalog prices, and a chart of its share by reason:
+    tokens that the provider counted more than the gateway and the tokens that the gateway counted
+    more, priced at the current catalog prices. The tokens that the provider counted more are the
+    cost that no user was charged for, and a chart shows their share by reason. Each hour's
+    difference gets the first of these reasons that applies:
+    - use of the provider key outside the gateway (no gateway request with that key in that hour),
     - cut-off requests in that hour,
-    - use of the provider key outside the gateway (no gateway request in that hour),
-    - data not yet arrived (the difference disappears on a later poll),
+    - requests with unknown usage in that hour,
     - unexplained.
+
+    Late provider data is not one of these reasons. It makes the provider count less, not more, so
+    it shows up among the tokens that the gateway counted more, together with cut-off requests
+    settled by the `max_tokens` rule.
 
 ## Rejected alternatives
 
@@ -210,8 +235,10 @@ cut-off requests). A standing summary is more useful than alerts.
   check shows how large this is.
 - OpenAI and DeepSeek cut-offs still block the principal until their input tokens can be counted.
 - Whether the company's Anthropic organization can issue an Admin API key is not yet confirmed.
-  Two facts can be checked only with a real key: whether a usage bucket is assigned by the start or
-  the end of a request, and whether every provider key matches one API key by its hint.
+  Only a real key can show whether each provider key is found in the Admin API's list of API keys
+  by the first and last characters that the list shows. Whether a one-minute bucket holds the
+  requests that were sent or that ended in it is learned from data once correction is on
+  (item 11).
 - To change: the ledger (settlement rules, zero-cost cases, removal of reservations, correction),
   the database migrations, the configuration schema, the Settings screen, the usage screens, a new
   token check screen, the Cost ledger and configuration sections of `README.md`, and principle 6 of

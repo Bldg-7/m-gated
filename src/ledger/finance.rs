@@ -622,6 +622,14 @@ impl PgLedger {
     pub fn database(&self) -> &Arc<PgIdentityStore> {
         &self.database
     }
+    /// 이 프로세스의 실행자 ID. 시스템 감사 기록에 남긴다.
+    pub(crate) fn executor_id(&self) -> Uuid {
+        self.executor_id
+    }
+    /// 실행 설정의 지문. 감사 기록에 남긴다.
+    pub(crate) fn auth_digest(&self) -> [u8; 32] {
+        self.auth_digest
+    }
     pub async fn admit_request(
         &self,
         human: &CurrentHuman,

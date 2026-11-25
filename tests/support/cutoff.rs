@@ -729,7 +729,7 @@ async fn cutoff_rule_setting_is_versioned_replayed_audited_and_fixed_at_admissio
     assert_eq!(status, 200, "{view}");
     assert_eq!(
         view["cutoff_rule"],
-        json!({"provider":"anthropic","cutoff_rule":"received","version":"1"})
+        json!({"provider":"anthropic","cutoff_rule":"received","correction":false,"correction_available":false,"version":"1"})
     );
     assert!(view["budget_timezone"].is_object());
     // 이번 단계에서는 Anthropic 규칙만, 두 규칙 중 하나로만 바꾼다.
@@ -783,7 +783,7 @@ async fn cutoff_rule_setting_is_versioned_replayed_audited_and_fixed_at_admissio
     assert_eq!(changed["result_version"], "2");
     assert_eq!(
         changed["cutoff_rule"],
-        json!({"provider":"anthropic","cutoff_rule":"max_tokens","version":"2"})
+        json!({"provider":"anthropic","cutoff_rule":"max_tokens","correction":false,"version":"2"})
     );
     // 같은 명령 id를 다시 보내면 결과를 재생하고 다시 바꾸지 않는다. 같은 id로 다른 입력은 충돌이다.
     let (status, replayed, again) =
@@ -821,7 +821,7 @@ async fn cutoff_rule_setting_is_versioned_replayed_audited_and_fixed_at_admissio
     let (_, _, view) = get().await;
     assert_eq!(
         view["cutoff_rule"],
-        json!({"provider":"anthropic","cutoff_rule":"max_tokens","version":"2"})
+        json!({"provider":"anthropic","cutoff_rule":"max_tokens","correction":false,"correction_available":false,"version":"2"})
     );
 
     // 바꾸기 전에 받은 요청은 받을 때의 규칙(`received`)으로 정산한다.
@@ -860,8 +860,8 @@ async fn cutoff_rule_setting_is_versioned_replayed_audited_and_fixed_at_admissio
     assert_eq!(
         audit,
         vec![(
-            json!({"provider":"anthropic","cutoff_rule":"received","version":"1"}),
-            json!({"provider":"anthropic","cutoff_rule":"max_tokens","version":"2"})
+            json!({"provider":"anthropic","cutoff_rule":"received","correction":false,"version":"1"}),
+            json!({"provider":"anthropic","cutoff_rule":"max_tokens","correction":false,"version":"2"})
         )]
     );
     let commands: i64 = sqlx::query_scalar(

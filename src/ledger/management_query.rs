@@ -166,7 +166,7 @@ pub(crate) async fn request_detail(
         budgets.push(json!({"scope_id":b.get::<Uuid,_>("scope_id"),"policy_version":b.get::<i64,_>("policy_version").to_string(),"period_start":b.get::<String,_>("start"),"period_end":b.get::<String,_>("finish"),"state":b.get::<String,_>("state")}));
     }
     let events=sqlx::query("SELECT kind,normalized_usage,pricing_resolution FROM gw_usage_events WHERE request_id=$1 ORDER BY kind LIMIT 5").bind(id).fetch_all(&mut *c).await?;
-    let mut usage = json!({"partial":null,"final":null,"late_final":null});
+    let mut usage = json!({"partial":null,"final":null,"late_final":null,"correction":null});
     let mut settlement = Value::Null;
     for e in events {
         let kind: String = e.get("kind");

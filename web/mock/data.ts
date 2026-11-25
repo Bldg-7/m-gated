@@ -21,7 +21,7 @@ export type MockState = {
   proposals: Map<string, CatalogProposal>;
   timezone: { timezone: string; pending: string | null; version: number };
   /** 끊긴 요청의 정산 규칙(Anthropic). */
-  cutoffRule: { cutoff_rule: 'received' | 'max_tokens'; version: number };
+  cutoffRule: { cutoff_rule: 'received' | 'max_tokens'; correction: boolean; version: number };
   authorizationVersion: number;
 };
 
@@ -156,12 +156,12 @@ export function createState(): MockState {
 
   // ── 요청: 미정산·정산 대기·확정, 완료·실패·거절·취소가 섞여 있다 ──
   const periodStart = iso(monthStart('Asia/Seoul', now)), periodEnd = iso(monthStart('Asia/Seoul', now, 1));
-  type Seed = { n: number; principal: string; key: string | null; provider: string; model: string; api: string; minutes: number; phase: string; outcome: string | null; accounting: string; tokens?: [number, number]; reason?: string; stopped?: boolean; http?: number | null; parent?: number; manual?: boolean; credential?: string | null; settledBy?: 'cutoff_received' | 'cutoff_max_tokens' | 'no_response' };
+  type Seed = { n: number; principal: string; key: string | null; provider: string; model: string; api: string; minutes: number; phase: string; outcome: string | null; accounting: string; tokens?: [number, number]; reason?: string; stopped?: boolean; http?: number | null; parent?: number; manual?: boolean; credential?: string | null; settledBy?: 'cutoff_received' | 'cutoff_max_tokens' | 'no_response'; /** 사후 보정한 출력 토큰. */ corrected?: number };
   const request = (s: Seed): RequestDetail => {
     const admitted = now - s.minutes * 60000, finished = s.phase === 'finished' ? iso(admitted + 4200) : null;
     const credentialId = s.credential === undefined ? keys.find(k => k.id === s.key)?.bindings[s.provider] ?? null : s.credential, bound = credentials.find(c => c.id === credentialId);
     const owner = principals.find(p => p.id === s.principal)!, [input, output] = s.tokens ?? [0, 0];
-    const cost = s.accounting !== 'settled' ? null : s.outcome === 'completed' || s.manual || s.settledBy?.startsWith('cutoff') ? usd(price(s.provider, s.model, input, output)) : usd(0n);
+    const cost = s.accounting !== 'settled' ? null : s.outcome === 'completed' || s.manual || s.settledBy?.startsWith('cutoff') ? usd(price(s.provider, s.model, input, s.corrected ?? output)) : usd(0n);
     const observed = (source: string) => ({ source, actual_model: s.model, input_tokens: String(input), output_tokens: String(output), cache_read_tokens: '0', cache_write_tokens: '0', reasoning_tokens: null, counted_input_tokens: null });
     return {
       id: uid(4, s.n), parent_request_id: s.parent ? uid(4, s.parent) : null, purpose: s.parent ? 'internal_count' : 'root', principal_id: s.principal, key_id: s.key, provider: s.provider, model: s.model, api: s.api,
@@ -171,7 +171,7 @@ export function createState(): MockState {
       pricing_snapshot: { catalog_version: '4', currency: 'USD', unit: 'per_1m_tokens', rates: approved.find(e => e.provider === s.provider && e.model === s.model)?.rates ?? {} },
       execution_snapshot: { policy_version: String(owner.policy.version), max_output_tokens: 8000, stream: s.api !== 'count_tokens' },
       budgets: owner.policy.limits.budget ? [{ scope_id: owner.scope_id, policy_version: String(owner.policy.version), period_start: periodStart, period_end: periodEnd, state: s.accounting === 'settled' ? 'settled' : s.accounting === 'unknown' ? 'unknown' : 'active' }] : [],
-      usage: { partial: s.tokens && s.accounting === 'unknown' ? observed('provider') : null, final: s.outcome === 'completed' ? observed('provider') : s.settledBy ? { ...observed(s.settledBy), cutoff_rule: s.settledBy === 'cutoff_received' ? 'received' : s.settledBy === 'cutoff_max_tokens' ? 'max_tokens' : null, cutoff_fallback_reason: null } : null, late_final: null },
+      usage: { partial: s.tokens && s.accounting === 'unknown' ? observed('provider') : null, final: s.outcome === 'completed' ? observed('provider') : s.settledBy ? { ...observed(s.settledBy), cutoff_rule: s.settledBy === 'cutoff_received' ? 'received' : s.settledBy === 'cutoff_max_tokens' ? 'max_tokens' : null, cutoff_fallback_reason: null } : null, late_final: null, correction: s.corrected === undefined ? null : { ...observed('provider_report'), output_tokens: String(s.corrected), previous_output_tokens: String(output), previous_source: s.settledBy ?? 'provider' } },
       executor_id: uid(7, (s.n % 3) + 1), execution_stopped_at: s.stopped ?? s.phase === 'finished' ? finished ?? iso(admitted + 9000) : null,
       settlement: s.manual ? { source: 'manual_entry', decision: 'charged', cost_usd: cost!, reason: '공급사 사용량 화면에서 확인한 금액을 반영했습니다.', actor_principal_id: P.admin, settled_at: iso(admitted + 6 * 3600000), executor_id: uid(7, (s.n % 3) + 1), execution_stop_source: 'runtime' } : null,
     };
@@ -197,7 +197,8 @@ export function createState(): MockState {
     request({ n: 18, principal: P.admin, key: K.local, provider: 'anthropic', model: OPUS, api: 'count_tokens', minutes: 20, phase: 'finished', outcome: 'completed', accounting: 'settled', tokens: [52340, 0] }),
     request({ n: 19, principal: P.backend, key: K.backend, provider: 'anthropic', model: OPUS, api: 'messages', minutes: 35, phase: 'finished', outcome: 'cancelled', accounting: 'settled', tokens: [24000, 1200], reason: 'client_cancelled', settledBy: 'cutoff_received' }),
     request({ n: 20, principal: P.qa, key: null, provider: 'anthropic', model: HAIKU, api: 'messages', minutes: 50, phase: 'finished', outcome: 'failed', accounting: 'settled', reason: 'provider_error', http: 529, settledBy: 'no_response' }),
+    request({ n: 21, principal: P.backend, key: K.backend, provider: 'anthropic', model: OPUS, api: 'messages', minutes: 95, phase: 'finished', outcome: 'cancelled', accounting: 'settled', tokens: [31000, 640], reason: 'client_cancelled', settledBy: 'cutoff_received', corrected: 2210 }),
   ];
 
-  return { principals, credentials, authorizations, keys, requests, usage, catalog: { version: 4, approved_at: ago(12), approved_by_email: 'admin@example.test', entries: approved.map(e => ({ ...e })) }, proposals: new Map(), timezone: { timezone: 'Asia/Seoul', pending: null, version: 3 }, cutoffRule: { cutoff_rule: 'received', version: 1 }, authorizationVersion: 20 };
+  return { principals, credentials, authorizations, keys, requests, usage, catalog: { version: 4, approved_at: ago(12), approved_by_email: 'admin@example.test', entries: approved.map(e => ({ ...e })) }, proposals: new Map(), timezone: { timezone: 'Asia/Seoul', pending: null, version: 3 }, cutoffRule: { cutoff_rule: 'received', correction: false, version: 1 }, authorizationVersion: 20 };
 }

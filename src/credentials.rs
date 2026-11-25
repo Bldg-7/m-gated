@@ -190,6 +190,20 @@ impl CredentialCache {
             _ => None,
         }
     }
+    /// Provider의 사용 중인 키 전체(복호화된 것만). 토큰 대조에서 키 목록과 짝지을 때 쓴다.
+    pub fn active(&self, provider: ProviderId) -> Vec<ActiveCredential> {
+        let Ok(snapshot) = self.entries.read() else {
+            return Vec::new();
+        };
+        snapshot
+            .by_id
+            .values()
+            .filter_map(|(p, entry)| match entry {
+                Entry::Active(active) if *p == provider => Some(active.clone()),
+                _ => None,
+            })
+            .collect()
+    }
     /// Provider의 상태: 사용 중인 키가 없으면 Missing, 풀 수 없는 키가 하나라도 있으면 Undecryptable.
     pub fn status(&self, provider: ProviderId) -> CredentialStatus {
         let Ok(snapshot) = self.entries.read() else {

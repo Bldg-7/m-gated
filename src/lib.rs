@@ -22,3 +22,4 @@ pub mod admin;
 pub mod maintenance;
 
 pub mod telemetry;
+pub mod token_check;

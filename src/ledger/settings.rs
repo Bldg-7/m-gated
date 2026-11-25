@@ -75,13 +75,14 @@ pub async fn budget_timezone_view(c: &mut PgConnection) -> Result<Value, sqlx::E
 /// 끊긴 요청의 정산 규칙(결정 0005). 이번 단계에서는 Anthropic 규칙만 쓴다.
 pub async fn cutoff_rule_view(c: &mut PgConnection) -> Result<Value, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT cutoff_rule,version FROM gw_settlement_rules WHERE provider='anthropic'",
+        "SELECT cutoff_rule,correction,version FROM gw_settlement_rules WHERE provider='anthropic'",
     )
     .fetch_one(&mut *c)
     .await?;
     Ok(json!({
         "provider": "anthropic",
         "cutoff_rule": row.get::<String, _>("cutoff_rule"),
+        "correction": row.get::<bool, _>("correction"),
         "version": row.get::<i64, _>("version").to_string(),
     }))
 }
@@ -105,19 +106,20 @@ impl PgIdentityStore {
         .map_err(|_| ManagementError::Database)?
     }
 
-    /// 끊긴 요청의 정산 규칙을 바꾼다. 바꾼 뒤에 받는 요청부터 적용한다.
+    /// 끊긴 요청의 정산 규칙과 사후 보정 스위치를 바꾼다. 바꾼 뒤에 받는 요청부터 적용한다.
+    /// `correction`이 None이면 사후 보정 스위치는 지금 값을 그대로 둔다.
     pub async fn set_cutoff_rule(
         &self,
         ctx: &CommandContext<'_>,
         provider: &str,
         rule: &str,
+        correction: Option<bool>,
         expected: i64,
     ) -> Result<CommandResult, ManagementError> {
         if provider != "anthropic" || !["received", "max_tokens"].contains(&rule) {
             return Err(ManagementError::Invalid);
         }
-        let input =
-            json!({"provider":provider,"cutoff_rule":rule,"expected_version":expected.to_string()});
+        let input = json!({"provider":provider,"cutoff_rule":rule,"correction":correction,"expected_version":expected.to_string()});
         let digest = management::input_digest(ctx.method, ctx.path, &input);
         let _gate = self
             .gate
@@ -131,7 +133,7 @@ impl PgIdentityStore {
                 return Ok(result);
             }
             let row = sqlx::query(
-                "SELECT cutoff_rule,version FROM gw_settlement_rules WHERE provider=$1 FOR UPDATE",
+                "SELECT cutoff_rule,correction,version FROM gw_settlement_rules WHERE provider=$1 FOR UPDATE",
             )
             .bind(provider)
             .fetch_one(&mut *tx)
@@ -141,12 +143,15 @@ impl PgIdentityStore {
                 return Err(ManagementError::Version(version));
             }
             let before = cutoff_rule_view(&mut tx).await?;
-            let changed = row.get::<String, _>("cutoff_rule") != rule;
+            let correction = correction.unwrap_or(row.get::<bool, _>("correction"));
+            let changed = row.get::<String, _>("cutoff_rule") != rule
+                || row.get::<bool, _>("correction") != correction;
             if changed {
-                sqlx::query("UPDATE gw_settlement_rules SET cutoff_rule=$2,version=version+1,updated_by=$3,updated_at=clock_timestamp() WHERE provider=$1")
+                sqlx::query("UPDATE gw_settlement_rules SET cutoff_rule=$2,correction=$4,version=version+1,updated_by=$3,updated_at=clock_timestamp() WHERE provider=$1")
                     .bind(provider)
                     .bind(rule)
                     .bind(ctx.actor)
+                    .bind(correction)
                     .execute(&mut *tx)
                     .await?;
             }
@@ -183,6 +188,24 @@ impl PgIdentityStore {
         })
         .await
         .map_err(|_| ManagementError::Busy)?
+    }
+
+    /// 토큰 대조 화면 값. 관리자만 본다.
+    pub async fn token_check_view(
+        &self,
+        ctx: &CommandContext<'_>,
+        ledger: &super::PgLedger,
+        hours: i64,
+        prices: &super::token_check::Prices,
+    ) -> Result<Value, ManagementError> {
+        {
+            let mut c = self.pool().acquire().await?;
+            management::check_actor(&mut c, ctx.actor, ctx.settings, true).await?;
+        }
+        ledger
+            .token_check_view(hours, prices)
+            .await
+            .map_err(|_| ManagementError::Database)
     }
 
     /// 예산 시간대를 바꾼다. 다음 예산 기간부터 적용한다.

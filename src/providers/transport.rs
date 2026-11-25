@@ -31,6 +31,14 @@ enum KeySource {
         secret: Arc<zeroize::Zeroizing<String>>,
     },
 }
+/// Admin API 호출 결과. 원문 응답은 보관하지 않는다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdminError {
+    /// Admin API 키가 거절됐다(401·403).
+    Rejected,
+    /// 연결·시간 초과·응답 형식 오류 등 그 밖의 실패.
+    Unavailable,
+}
 /// 등록 확인 결과. 원문 응답은 보관하지 않는다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifyError {
@@ -371,6 +379,50 @@ impl NativeClient {
         };
         let (base, full) = tokio::join!(one("."), one(text));
         Ok(full?.saturating_sub(base?).saturating_add(1))
+    }
+    /// Anthropic Admin API에 GET을 한 번 보낸다(토큰 대조, 결정 0005). Provider 키가 아니라 Admin API 키를 쓴다.
+    /// 재시도하지 않고, 응답은 `limit` 바이트까지만 읽는다. 401·403은 [`AdminError::Rejected`]다.
+    pub async fn admin_get(
+        &self,
+        path_and_query: &str,
+        admin_key: &str,
+        limit: usize,
+    ) -> Result<serde_json::Value, AdminError> {
+        if self.provider != ProviderId::Anthropic {
+            return Err(AdminError::Unavailable);
+        }
+        let url = self
+            .base
+            .join(path_and_query)
+            .map_err(|_| AdminError::Unavailable)?;
+        let request = self
+            .client
+            .get(url)
+            .header("x-api-key", admin_key)
+            .header("anthropic-version", "2023-06-01");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut response = tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| AdminError::Unavailable)?
+            .map_err(|_| AdminError::Unavailable)?;
+        match response.status().as_u16() {
+            200 => {}
+            401 | 403 => return Err(AdminError::Rejected),
+            _ => return Err(AdminError::Unavailable),
+        }
+        if response.content_length().is_some_and(|n| n > limit as u64) {
+            return Err(AdminError::Unavailable);
+        }
+        let mut bytes = crate::runtime::BoundedBuffer::new(limit);
+        loop {
+            let chunk = tokio::time::timeout_at(deadline, response.chunk())
+                .await
+                .map_err(|_| AdminError::Unavailable)?
+                .map_err(|_| AdminError::Unavailable)?;
+            let Some(chunk) = chunk else { break };
+            bytes.extend(&chunk).map_err(|_| AdminError::Unavailable)?;
+        }
+        serde_json::from_slice(&bytes.freeze()).map_err(|_| AdminError::Unavailable)
     }
     /// 등록 직전 후보 키를 과금 없는 모델 목록 API로 확인한다. 응답 본문은 읽지 않는다.
     pub async fn verify_credential(&self, secret: &str) -> Result<(), VerifyError> {

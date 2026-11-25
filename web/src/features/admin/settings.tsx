@@ -20,8 +20,9 @@ export function timezones(): string[] {
 let carried: { text: string; at: number } | null = null;
 function carriedText() { return carried && Date.now() - carried.at < 10000 ? carried.text : null; }
 
-/** 끊긴 요청의 정산 규칙. 이번 단계에서는 Anthropic 규칙만 쓴다. */
-type CutoffRule = { provider: 'anthropic'; cutoff_rule: 'received' | 'max_tokens'; version: string };
+/** 끊긴 요청의 정산 규칙과 사후 보정 스위치. 이번 단계에서는 Anthropic 규칙만 쓴다.
+ * correction_available: 이 서버에 Admin API 키가 있어 사후 보정을 켤 수 있는지. */
+type CutoffRule = { provider: 'anthropic'; cutoff_rule: 'received' | 'max_tokens'; correction: boolean; correction_available: boolean; version: string };
 
 /** 게이트웨이 전체 설정. 월 예산의 기준 시간대와 끊긴 요청의 정산 규칙이다. */
 export function SettingsScreen() {
@@ -79,7 +80,7 @@ function BudgetTimezoneForm({ current, onSaved, setStatus }: { current: BudgetTi
 
 function CutoffRuleForm({ current, onSaved, setStatus }: { current: CutoffRule; onSaved: () => Promise<void>; setStatus: (text: string | null) => void }) {
   const { t } = useTranslation();
-  const [value, setValue] = useState(current.cutoff_rule), [busy, setBusy] = useState(false);
+  const [value, setValue] = useState(current.cutoff_rule), [correction, setCorrection] = useState(current.correction), [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const save = async () => {
@@ -87,7 +88,7 @@ function CutoffRuleForm({ current, onSaved, setStatus }: { current: CutoffRule; 
     const live = () => mounted.current && session.snapshot().epoch === epoch;
     setBusy(true); setStatus(null);
     try {
-      await session.write('/api/admin/settings/cutoff-rule', 'PUT', commandId, { provider: current.provider, cutoff_rule: value, expected_version: current.version });
+      await session.write('/api/admin/settings/cutoff-rule', 'PUT', commandId, { provider: current.provider, cutoff_rule: value, correction, expected_version: current.version });
       if (!live()) return;
       setStatus(t('정산 규칙을 저장했습니다. 지금부터 받는 요청에 적용합니다.'));
       await onSaved();
@@ -108,7 +109,8 @@ function CutoffRuleForm({ current, onSaved, setStatus }: { current: CutoffRule; 
       <legend>{t('출력 토큰을 세는 방법')}</legend>
       {choices.map(c => <label key={c.value}><input type="radio" name="cutoff_rule" value={c.value} checked={value === c.value} onChange={() => setValue(c.value)} /><span className="stack-sm"><strong>{c.label}</strong><span className="meta">{c.note}</span></span></label>)}
       <p className="meta">{t('받은 내용을 세지 못하면 최대 출력으로 정산합니다. 바꾸면 그 뒤에 받는 요청부터 적용합니다.')}</p>
-      <div className="actions"><button className="btn-primary" disabled={value === current.cutoff_rule}>{t('정산 규칙 저장')}</button></div>
+      <label><input type="checkbox" name="correction" checked={correction} disabled={!current.correction_available && !correction} onChange={e => setCorrection(e.target.checked)} /><span className="stack-sm"><strong>{t('사후 보정')}</strong><span className="meta">{t('켜면 끊긴 요청의 출력 토큰을 요청이 끝나고 10~15분 뒤 Anthropic 사용량 보고서의 1분 단위 값으로 고칩니다. 보고서가 요청을 보낸 분과 끝난 분 가운데 어디에 넣는지 먼저 확인하고, 확인한 뒤에만 고칩니다. 그 분에 같은 API 키·모델로 들어간 다른 요청의 사용량을 모두 알고, 입력 토큰이 정확히 맞을 때만 고칩니다. 고친 금액은 원래 예산 기간에 반영하고 감사 기록에 남깁니다. 끝난 지 2시간이 넘은 요청은 고치지 않습니다.')}</span>{!current.correction_available && <span className="meta">{t('이 서버에는 Admin API 키(ANTHROPIC_ADMIN_API_KEY)가 없어 켤 수 없습니다.')}</span>}</span></label>
+      <div className="actions"><button className="btn-primary" disabled={value === current.cutoff_rule && correction === current.correction}>{t('정산 규칙 저장')}</button></div>
     </fieldset>
   </form>;
 }

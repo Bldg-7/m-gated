@@ -270,6 +270,18 @@ dialog.modal::backdrop { background: rgba(24, 33, 47, 0.48); }
 .legend > span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 10px; height: 10px; border-radius: 2px; }
 .legend .meter-rest { background: var(--gray-50); box-shadow: inset 0 0 0 1px var(--gray-200); }
+/* 한 합계를 까닭별로 나눈 얇은 막대(토큰 대조). 숫자는 옆 목록에 있고, 막대 조각 사이는 2px 띄운다.
+   색 네 개는 흰 카드 위 색각 이상 검사를 통과한 범주 색이다. 노랑·청록은 대비가 낮아 이름과 숫자를 목록에 함께 쓴다. */
+.segments { display: flex; gap: 2px; height: 8px; }
+.segments > span { flex: 0 1 0; min-width: 2px; border-radius: 4px; }
+.segments > span:hover { filter: brightness(1.12); }
+.reason-1 { background: #2a78d6; } .reason-2 { background: #eb6834; } .reason-3 { background: #1baf7a; } .reason-4 { background: #eda100; }
+.reason-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.reason-list > li { display: flex; align-items: flex-start; gap: 10px; }
+.reason-list > li > i { flex: none; width: 10px; height: 10px; margin-top: 6px; border-radius: 2px; }
+.reason-figures { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.refetching { opacity: 0.5; transition: opacity 120ms; }
+.stat dd.stat-sub { font-family: var(--font-sans); font-size: 13px; line-height: 20px; color: var(--gray-500); }
 .table-wrap { overflow-x: auto; border: 1px solid var(--gray-200); border-radius: var(--radius-lg); background: var(--gray-0); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 20px; }
 th, td { padding: 12px 16px; border-bottom: 1px solid var(--gray-100); text-align: left; vertical-align: middle; }

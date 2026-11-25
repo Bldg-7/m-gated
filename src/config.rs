@@ -415,6 +415,8 @@ pub struct ValidatedConfig {
     pub(crate) database: DatabaseConfig,
     pub(crate) csrf_signing_key: Secret,
     pub(crate) credential_encryption_key: Secret,
+    /// 토큰 대조와 사후 보정에 쓰는 Anthropic Admin API 키(선택). 없으면 두 기능이 꺼진다.
+    pub(crate) anthropic_admin_api_key: Option<Secret>,
     pub(crate) providers: Vec<ProviderConfig>,
     pub(crate) limits: Limits,
     pub(crate) retention: Retention,
@@ -438,6 +440,10 @@ impl ValidatedConfig {
     }
     pub fn csrf_signing_key(&self) -> &Secret {
         &self.csrf_signing_key
+    }
+    /// 토큰 대조와 사후 보정에 쓰는 Anthropic Admin API 키. 설정하지 않았으면 None이다.
+    pub fn anthropic_admin_api_key(&self) -> Option<&Secret> {
+        self.anthropic_admin_api_key.as_ref()
     }
     pub fn csrf_signing_key_bytes(&self) -> [u8; 32] {
         hex32(self.csrf_signing_key.expose())
@@ -660,6 +666,7 @@ fn validate(
         },
         csrf_signing_key: secret(env, "CSRF_SIGNING_KEY")?,
         credential_encryption_key: secret(env, "CREDENTIAL_ENCRYPTION_KEY")?,
+        anthropic_admin_api_key: admin_api_key(env)?,
         providers: raw
             .providers
             .into_iter()
@@ -701,6 +708,22 @@ fn secret(env: &BTreeMap<String, String>, name: &str) -> Result<Secret, StartupE
     }
     Ok(Secret(value.clone()))
 }
+/// 선택 비밀값 `ANTHROPIC_ADMIN_API_KEY`. 비어 있으면 없는 것으로 본다.
+/// 일반 API 키를 잘못 넣지 않게 Admin API 키의 머리(`sk-ant-admin01-`)를 확인한다.
+fn admin_api_key(env: &BTreeMap<String, String>) -> Result<Option<Secret>, StartupError> {
+    let Some(value) = env.get("ANTHROPIC_ADMIN_API_KEY").filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    // 앞부분만 있는 값은 받지 않는다. 본문 길이는 문서에 없어 16자 이상만 요구한다.
+    if value.len() > 256
+        || value.len() < "sk-ant-admin01-".len() + 16
+        || !value.starts_with("sk-ant-admin01-")
+        || !value.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(StartupError::InvalidSecret);
+    }
+    Ok(Some(Secret(value.clone())))
+}
 fn hex32(encoded: &str) -> [u8; 32] {
     std::array::from_fn(|i| {
         u8::from_str_radix(&encoded[i * 2..i * 2 + 2], 16).expect("검증된 64자리 lowercase hex")
@@ -729,6 +752,7 @@ pub const ENV_KEYS: &[&str] = &[
     "DB_PASSWORD",
     "CSRF_SIGNING_KEY",
     "CREDENTIAL_ENCRYPTION_KEY",
+    "ANTHROPIC_ADMIN_API_KEY",
 ];
 /// Provider 키는 DB에서만 관리한다. 예전 환경변수가 남아 있으면 조용히 무시하지 않고 기동을 거부한다.
 pub const REMOVED_ENV_KEYS: &[&str] = &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"];

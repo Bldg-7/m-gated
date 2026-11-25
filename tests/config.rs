@@ -325,6 +325,67 @@ fn secret_presence_redaction_and_inactive_provider() {
 }
 
 #[test]
+fn anthropic_admin_api_key_is_an_optional_environment_secret_checked_at_startup() {
+    let load_with = |file: Option<&str>, value: Option<&str>| {
+        let mut env = support::environment();
+        if let Some(value) = value {
+            env.insert("ANTHROPIC_ADMIN_API_KEY".into(), value.into());
+        }
+        config::load(ConfigInputs {
+            yaml: support::YAML,
+            file_environment: file,
+            environment: &env,
+        })
+    };
+    // 없거나 비어 있으면 토큰 대조와 사후 보정이 꺼진다.
+    for value in [None, Some("")] {
+        assert!(
+            load_with(None, value)
+                .unwrap()
+                .anthropic_admin_api_key()
+                .is_none()
+        );
+    }
+    // Admin API 키의 머리(`sk-ant-admin01-`)로 시작하는 출력 가능한 ASCII 256바이트까지 받는다.
+    // 설정을 출력해도 값은 보이지 않는다.
+    let longest = format!("sk-ant-admin01-sentinel{}", "s".repeat(256 - 23));
+    for key in ["sk-ant-admin01-synthetic-sentinel", longest.as_str()] {
+        let config = load_with(None, Some(key)).unwrap();
+        assert_eq!(
+            config.anthropic_admin_api_key().map(|s| s.expose()),
+            Some(key)
+        );
+        assert!(!format!("{config:?}").contains("sentinel"));
+    }
+    // 일반 API 키, 대문자 머리, 머리만 있거나 본문이 16자보다 짧은 값, 앞뒤·가운데 공백, 제어 문자,
+    // ASCII 밖 문자, 256바이트를 넘는 값은 기동을 거부한다. 오류에도 값이 남지 않는다.
+    let too_long = format!("{longest}s");
+    for bad in [
+        "sk-ant-api03-synthetic-sentinel",
+        "SK-ANT-ADMIN01-synthetic-sentinel",
+        "sk-ant-admin01-",
+        "sk-ant-admin01-sentinel",
+        " sk-ant-admin01-synthetic-sentinel",
+        "sk-ant-admin01-synthetic-sentinel ",
+        "sk-ant-admin01-synthetic-sen tinel",
+        "sk-ant-admin01-synthetic-sentinel\n",
+        "sk-ant-admin01-synthetic-séntinel",
+        too_long.as_str(),
+    ] {
+        let error = load_with(None, Some(bad)).unwrap_err();
+        assert_eq!(error, StartupError::InvalidSecret, "{bad:?}");
+        assert!(!format!("{error:?} {error}").contains("sentinel"));
+    }
+    // 비밀값이라 비밀이 아닌 설정 파일에는 둘 수 없다.
+    let file = "ANTHROPIC_ADMIN_API_KEY=sk-ant-admin01-synthetic-sentinel\n";
+    assert!(config::parse_non_secret_env(file).is_err());
+    assert_eq!(
+        load_with(Some(file), None).unwrap_err(),
+        StartupError::ConfigSyntax
+    );
+}
+
+#[test]
 fn provider_key_environment_variables_are_removed_not_ignored() {
     for key in config::REMOVED_ENV_KEYS {
         let mut env = support::environment();

@@ -36,6 +36,18 @@ pub struct DashboardApi {
     origin: String,
     ledger: Arc<crate::ledger::PgLedger>,
     credentials: Option<Arc<crate::credentials::CredentialService>>,
+    /// 이 서버에 Admin API 키가 있어 토큰 대조와 사후 보정을 쓸 수 있는지.
+    token_check_enabled: bool,
+    /// 설정 파일 profile의 Anthropic 모델 가격. 토큰 대조의 차이 금액에 쓴다.
+    static_prices: crate::ledger::token_check::Prices,
+}
+/// 사용량 보고서는 Provider가 응답에 알린 모델 이름을 쓴다. profile 이름과 그 이름들 모두에 같은 가격을 둔다.
+fn model_prices(
+    profile: &crate::config::ModelProfile,
+) -> impl Iterator<Item = (String, std::collections::BTreeMap<String, String>)> + '_ {
+    std::iter::once(&profile.model)
+        .chain(profile.actual_models.iter())
+        .map(|name| (name.clone(), profile.rates.clone()))
 }
 impl DashboardApi {
     /// Provider 회사 키 관리 API를 붙인다. 없으면 해당 경로는 404다.
@@ -43,6 +55,18 @@ impl DashboardApi {
     pub fn with_catalog(mut self, service: Arc<crate::catalog::CatalogService>) -> Self {
         self.catalog = Some(service);
         self
+    }
+    /// Anthropic 모델의 지금 가격. 설정 파일 profile과 승인된 카탈로그를 합치고, 카탈로그가 우선한다.
+    fn prices(&self) -> crate::ledger::token_check::Prices {
+        let mut prices = self.static_prices.clone();
+        if let Some(catalog) = &self.catalog {
+            for (provider, profile) in &catalog.cache().snapshot().profiles {
+                if *provider == crate::config::ProviderId::Anthropic {
+                    prices.extend(model_prices(profile));
+                }
+            }
+        }
+        prices
     }
     /// 정책에 줄 수 있는 (Provider, 모델, 기능) 목록. 설정 파일 profile 과 승인된 카탈로그를 합친다.
     fn grants(&self) -> Value {
@@ -80,6 +104,20 @@ impl DashboardApi {
             auth,
             store,
             credentials: None,
+            // 조회 서비스와 같은 조건이다: Admin API 키와 Anthropic Provider가 모두 있어야 한다.
+            token_check_enabled: config.anthropic_admin_api_key().is_some()
+                && config
+                    .providers()
+                    .iter()
+                    .any(|p| p.provider == crate::config::ProviderId::Anthropic),
+            static_prices: config
+                .providers()
+                .iter()
+                .filter(|p| p.provider == crate::config::ProviderId::Anthropic)
+                .flat_map(|p| p.profiles.iter())
+                .filter(|p| p.api == crate::config::ApiKind::Messages)
+                .flat_map(model_prices)
+                .collect(),
             static_grants: grants,
             catalog: None,
             digest,
@@ -124,6 +162,7 @@ impl DashboardApi {
                 any(management::handle),
             )
             .route("/api/admin/settings/cutoff-rule", any(management::handle))
+            .route("/api/admin/token-check", any(management::handle))
             .route("/api/admin/model-catalog", any(management::handle))
             .route("/api/admin/model-catalog/sync", any(management::handle))
             .route("/api/admin/model-catalog/approve", any(management::handle))

@@ -11,6 +11,7 @@ import { RequestsScreen } from './features/admin/requests';
 import { CredentialsScreen } from './features/admin/credentials';
 import { ModelsScreen } from './features/admin/models';
 import { SettingsScreen } from './features/admin/settings';
+import { TokenCheckScreen } from './features/admin/token-check';
 import { isScreen, Link, useRoute, type Screen } from './lib/router';
 import { changeLanguage, languages, msgid } from './lib/i18n';
 import { browserTimeZone, formatTime, timeBasis, useTimeBasis } from './lib/time';
@@ -65,7 +66,8 @@ const pages: Record<Screen, { nav: string; title: string; lead?: string; back?: 
   '/dashboard/admin/usage': { nav: msgid('전체 사용량'), title: msgid('전체 사용량'), lead: msgid('사용자·키별 사용량을 조회합니다. 사용자를 지정하지 않은 전체 합계에는 예산 잔액이 없습니다.') },
   '/dashboard/admin/requests': { nav: msgid('미정산·처리 내역'), title: msgid('미정산 · 처리 내역'), lead: msgid('기본은 전체 기간 unknown입니다. pending 단독도 무기간 전체 조회이며 settled 기본은 당월입니다. 종료와 비용 확인은 별개입니다.') },
   '/dashboard/admin/models': { nav: msgid('모델·가격'), title: msgid('모델 · 가격 카탈로그'), lead: msgid('공급사 모델과 가격을 공개 가격 목록 models.dev 에서 불러옵니다. 동기화는 변경안만 만들고, 관리자가 이전 값과 비교해 승인해야 적용됩니다. 이미 기록된 요청의 금액은 바뀌지 않습니다.') },
-  '/dashboard/admin/settings': { nav: msgid('설정'), title: msgid('게이트웨이 설정'), lead: msgid('게이트웨이 전체에 한 번 정하는 설정입니다. 지금은 월 예산의 기준 시간대를 정합니다.') },
+  '/dashboard/admin/token-check': { nav: msgid('토큰 대조'), title: msgid('토큰 대조'), lead: msgid('Anthropic 사용량 보고서와 게이트웨이가 정산한 토큰을 비교합니다. 차이는 알림을 보내지 않고 이 화면에만 보입니다.') },
+  '/dashboard/admin/settings': { nav: msgid('설정'), title: msgid('게이트웨이 설정'), lead: msgid('게이트웨이 전체에 한 번 정하는 설정입니다. 월 예산의 기준 시간대와 끊긴 요청의 정산 규칙을 정합니다.') },
   '/dashboard/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 키'), lead: msgid('Provider마다 키를 등록하고 관리합니다. 사용자는 관리자가 인가한 키만 쓸 수 있습니다.') },
 };
 /** 서버가 내준 경로를 화면으로. 등록되지 않은 /dashboard/admin/* 는 전체 사용량, 그 밖은 내 사용량(기존 동작과 같음). */
@@ -120,7 +122,7 @@ export function App() {
   }, [route.href]);
   // 하위 페이지(사용자 상세)에 있을 때도 상위 메뉴를 현재 위치로 표시한다.
   const link = (path: Screen) => <Link href={path} aria-current={screen === path || screen.startsWith(`${path}/`) ? 'page' : undefined}>{t(pages[path].nav)}</Link>;
-  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? (wasAdmin.current && auth.status === 'ready' ? <div className="stack-sm"><p role="alert">{t('현재 관리자 권한이 없습니다.')} {t('입력 중이던 내용과 원문은 지웠습니다.')}</p><p><a href="/auth/login">{t('SSO 다시 로그인')}</a></p></div> : <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p>) : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/principals/key' ? <PrincipalKeyIssueScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/keys' ? <KeysScreen adminAll key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : screen === '/dashboard/keys/new' ? <KeysScreen key={`${principal.current}:new`} view="issue" /> : <UsageScreen key={principal.current} />;
+  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? (wasAdmin.current && auth.status === 'ready' ? <div className="stack-sm"><p role="alert">{t('현재 관리자 권한이 없습니다.')} {t('입력 중이던 내용과 원문은 지웠습니다.')}</p><p><a href="/auth/login">{t('SSO 다시 로그인')}</a></p></div> : <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p>) : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/principals/key' ? <PrincipalKeyIssueScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/keys' ? <KeysScreen adminAll key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/token-check' ? <TokenCheckScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : screen === '/dashboard/keys/new' ? <KeysScreen key={`${principal.current}:new`} view="issue" /> : <UsageScreen key={principal.current} />;
   return <div className="app">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark" aria-hidden="true">mg</span>m-gated</div>
@@ -131,7 +133,7 @@ export function App() {
       </section>}
       <nav aria-label={t('기본')} className="nav">
         <div className="nav-group"><span className="nav-label">{t('내 계정')}</span>{link('/dashboard/')}{link('/dashboard/keys')}</div>
-        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/dashboard/admin/principals')}{link('/dashboard/admin/keys')}{link('/dashboard/admin/usage')}{link('/dashboard/admin/requests')}{link('/dashboard/admin/credentials')}{link('/dashboard/admin/models')}{link('/dashboard/admin/settings')}</div>}
+        {auth.me?.role === 'admin' && <div className="nav-group"><span className="nav-label">{t('관리')}</span>{link('/dashboard/admin/principals')}{link('/dashboard/admin/keys')}{link('/dashboard/admin/usage')}{link('/dashboard/admin/requests')}{link('/dashboard/admin/credentials')}{link('/dashboard/admin/models')}{link('/dashboard/admin/token-check')}{link('/dashboard/admin/settings')}</div>}
       </nav>
       <div className="sidebar-foot"><TimeSwitch /><LanguageSwitch /></div>
     </aside>

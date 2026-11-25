@@ -25,6 +25,7 @@ pub const SCREENS: &[&str] = &[
     "/dashboard/admin/requests",
     "/dashboard/admin/credentials",
     "/dashboard/admin/models",
+    "/dashboard/admin/token-check",
     "/dashboard/admin/settings",
 ];
 #[derive(Deserialize)]

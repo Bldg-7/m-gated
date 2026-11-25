@@ -26,6 +26,7 @@ const PRINCIPAL_CREDENTIALS: &str = "/provider-credentials";
 const SETTINGS: &str = "/api/admin/settings";
 const BUDGET_TIMEZONE: &str = "/api/admin/settings/budget-timezone";
 const CUTOFF_RULE: &str = "/api/admin/settings/cutoff-rule";
+const TOKEN_CHECK: &str = "/api/admin/token-check";
 fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
 }
@@ -306,6 +307,9 @@ async fn execute(
     }
     if path == SETTINGS || path == BUDGET_TIMEZONE || path == CUTOFF_RULE {
         return settings(state, &head, body, human.current.id).await;
+    }
+    if path == TOKEN_CHECK {
+        return token_check(state, &head, human.current.id).await;
     }
     if path == CATALOG || path.starts_with(CATALOG) {
         return model_catalog(state, &head, body, human.current.id).await;
@@ -927,7 +931,40 @@ async fn run_credential_command(
     }
 }
 
-/// 게이트웨이 전체 설정(예산 기간의 시간대). 조회와 변경 모두 관리자만 한다.
+/// 토큰 대조 화면 값(결정 0005 23~27번). `range`는 24h, 7d, 30d 가운데 하나다(없으면 24h).
+async fn token_check(state: &ApiState, head: &axum::http::request::Parts, actor: Uuid) -> Response {
+    let hours = match head.uri.query() {
+        None | Some("range=24h") => 24,
+        Some("range=7d") => 24 * 7,
+        Some("range=30d") => 24 * 30,
+        _ => return error(ManagementError::Invalid),
+    };
+    let grants = state.api.grants();
+    let ctx = CommandContext {
+        actor,
+        command_id: Uuid::nil(),
+        method: head.method.as_str(),
+        path: head.uri.path(),
+        settings: state.api.auth.settings(),
+        grants: &grants,
+        digest: state.api.digest_bytes,
+        ceiling: &state.api.ceiling,
+        execution_running: false,
+    };
+    match state
+        .api
+        .store
+        .token_check_view(&ctx, &state.api.ledger, hours, &state.api.prices())
+        .await
+    {
+        Ok(mut v) => {
+            v["enabled"] = json!(state.api.token_check_enabled);
+            success(v)
+        }
+        Err(e) => error(e),
+    }
+}
+/// 게이트웨이 전체 설정(예산 기간의 시간대와 끊긴 요청의 정산 규칙). 조회와 변경 모두 관리자만 한다.
 async fn settings(
     state: &ApiState,
     head: &axum::http::request::Parts,
@@ -965,7 +1002,11 @@ async fn settings(
     };
     if head.method == Method::GET {
         return match state.api.store.settings_view(&ctx).await {
-            Ok(v) => success(v),
+            Ok(mut v) => {
+                // 사후 보정은 이 서버에 Admin API 키가 있을 때만 켤 수 있다.
+                v["cutoff_rule"]["correction_available"] = json!(state.api.token_check_enabled);
+                success(v)
+            }
             Err(e) => error(e),
         };
     }
@@ -1004,6 +1045,9 @@ async fn settings(
     struct SetCutoffRule {
         provider: String,
         cutoff_rule: String,
+        /// 사후 보정 스위치. 없으면 지금 값을 그대로 둔다.
+        #[serde(default)]
+        correction: Option<bool>,
         expected_version: String,
     }
     let result = if path == CUTOFF_RULE {
@@ -1013,10 +1057,20 @@ async fn settings(
         let Ok(expected) = input.expected_version.parse::<i64>() else {
             return error(ManagementError::Invalid);
         };
+        // Admin API 키가 없는 서버에서는 사후 보정을 켤 수 없다.
+        if input.correction == Some(true) && !state.api.token_check_enabled {
+            return error(ManagementError::Invalid);
+        }
         state
             .api
             .store
-            .set_cutoff_rule(&ctx, &input.provider, &input.cutoff_rule, expected)
+            .set_cutoff_rule(
+                &ctx,
+                &input.provider,
+                &input.cutoff_rule,
+                input.correction,
+                expected,
+            )
             .await
     } else {
         let Ok(input) = serde_json::from_slice::<SetTimezone>(&bytes) else {

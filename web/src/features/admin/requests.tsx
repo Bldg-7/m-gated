@@ -19,6 +19,7 @@ const settledBy: Record<string, string> = {
   no_response: msgid('응답 없음 · 0원'),
   gateway_no_dispatch: msgid('보내지 않음 · 0원'),
   profile_no_charge: msgid('무료 요청'),
+  provider_report: msgid('Anthropic 사용량 보고서(사후 보정)'),
 };
 const fallbackReasons: Record<string, string> = {
   cutoff_count_unavailable: msgid('받은 내용을 세지 못해 최대 출력으로 정산했습니다.'),
@@ -88,6 +89,7 @@ function RequestEditor({ id, onChanged }: { id: string; onChanged: () => Promise
           <dt>{t('상태')}</dt><dd>{r.phase} / {r.outcome ?? t('결과 미확인')} / {r.accounting_state}</dd>
           <dt>{t('비용')}</dt><dd><Money value={r.cost_usd} /></dd>
           {r.usage.final && settledBy[r.usage.final.source] && <><dt>{t('정산 방식')}</dt><dd>{t(settledBy[r.usage.final.source])}{r.usage.final.cutoff_fallback_reason && fallbackReasons[r.usage.final.cutoff_fallback_reason] && <span className="meta"> · {t(fallbackReasons[r.usage.final.cutoff_fallback_reason])}</span>}</dd></>}
+          {r.usage.correction && <><dt>{t('사후 보정')}</dt><dd>{t('Anthropic 사용량 보고서로 출력 토큰을 {{previous}}에서 {{output}}(으)로 고쳤습니다. 비용은 고친 값입니다.', { previous: r.usage.correction.previous_output_tokens ?? t('미확인'), output: r.usage.correction.output_tokens ?? t('미확인') })}</dd></>}
           <dt>{t('사유')}</dt><dd className="mono">{r.reason_code ?? t('없음')}</dd>
           <dt>{t('입장 · 마감')}</dt><dd><Time value={r.admitted_at} /> · {r.finished_at ? <Time value={r.finished_at} /> : t('미종료')}</dd>
           <dt>executor</dt><dd className="mono">{r.executor_id}</dd>
@@ -105,6 +107,6 @@ function RequestEditor({ id, onChanged }: { id: string; onChanged: () => Promise
           <div className="actions"><button className="btn-primary">{t('수동 정산 확인')}</button></div></fieldset></form>}
       </div>
     </div>
-    <section aria-label={t('선택 usage')} className="card"><h3>{t('사용량 출처와 token')}</h3><dl className="kv">{(['partial', 'final', 'late_final'] as const).map(kind => <Fragment key={kind}><dt className="mono">{kind}</dt><dd>{r.usage[kind] ? <div className="stack-sm"><span>{t('출처: {{source}} · 입력 {{input}} / 출력 {{output}}', { source: r.usage[kind]!.source, input: r.usage[kind]!.input_tokens ?? t('미확인'), output: r.usage[kind]!.output_tokens ?? t('미확인') })}</span><pre>{JSON.stringify(r.usage[kind], null, 2)}</pre></div> : <span className="meta">{t('기록 없음')}</span>}</dd></Fragment>)}</dl></section>
+    <section aria-label={t('선택 usage')} className="card"><h3>{t('사용량 출처와 token')}</h3><dl className="kv">{(['partial', 'final', 'late_final', 'correction'] as const).map(kind => <Fragment key={kind}><dt className="mono">{kind}</dt><dd>{r.usage[kind] ? <div className="stack-sm"><span>{t('출처: {{source}} · 입력 {{input}} / 출력 {{output}}', { source: r.usage[kind]!.source, input: r.usage[kind]!.input_tokens ?? t('미확인'), output: r.usage[kind]!.output_tokens ?? t('미확인') })}</span><pre>{JSON.stringify(r.usage[kind], null, 2)}</pre></div> : <span className="meta">{t('기록 없음')}</span>}</dd></Fragment>)}</dl></section>
   </>}</section>;
 }

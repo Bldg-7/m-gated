@@ -344,14 +344,55 @@ function api(state: MockState) {
   };
 
   // ── 설정 ──
-  const cutoffRuleView = () => ({ provider: 'anthropic', cutoff_rule: state.cutoffRule.cutoff_rule, version: String(state.cutoffRule.version) });
+  // 미리보기 서버에는 Admin API 키가 있다고 친다(사후 보정 스위치를 켤 수 있다).
+  const cutoffRuleView = () => ({ provider: 'anthropic', cutoff_rule: state.cutoffRule.cutoff_rule, correction: state.cutoffRule.correction, correction_available: true, version: String(state.cutoffRule.version) });
   const setCutoffRule = (body: Json, commandId: string): Reply => {
     expect(body.expected_version, state.cutoffRule.version);
     const rule = text(body.cutoff_rule);
     if (text(body.provider) !== 'anthropic' || (rule !== 'received' && rule !== 'max_tokens')) fail(400, 'invalid_request');
-    const changed = rule !== state.cutoffRule.cutoff_rule;
-    if (changed) Object.assign(state.cutoffRule, { cutoff_rule: rule, version: state.cutoffRule.version + 1 });
+    if (body.correction !== undefined && typeof body.correction !== 'boolean') fail(400, 'invalid_request');
+    const correction = typeof body.correction === 'boolean' ? body.correction : state.cutoffRule.correction;
+    const changed = rule !== state.cutoffRule.cutoff_rule || correction !== state.cutoffRule.correction;
+    if (changed) Object.assign(state.cutoffRule, { cutoff_rule: rule, correction, version: state.cutoffRule.version + 1 });
     return { status: 200, body: ack(commandId, 'set_settlement_rule', 'settings', '00000000-0000-0000-0000-000000000000', state.cutoffRule.version, changed, { cutoff_rule: cutoffRuleView() }) };
+  };
+  // ── 토큰 대조: 미리보기는 9일 전부터 사용량 보고서를 받아 두었고, 첫 Anthropic 키만 API 키 목록에서 찾았다고 친다 ──
+  const tokenCheck = (query: URLSearchParams) => {
+    const hours = ({ '24h': 24, '7d': 168, '30d': 720 } as Record<string, number>)[query.get('range') ?? '24h'] ?? fail(400, 'invalid_request');
+    const to = Math.floor((Date.now() - 600000) / 3600000) * 3600000, from = to - hours * 3600000, coveredFrom = to - 9 * 24 * 3600000;
+    const scale = (Math.min(to - from, to - coveredFrom) / 3600000) / 24, n = (v: number) => Math.round(v * scale);
+    const anthropic = state.credentials.filter(c => c.provider === 'anthropic' && c.state === 'active');
+    const credential = anthropic[0] ? { id: anthropic[0].id, label: anthropic[0].label, hint: anthropic[0].hint } : null;
+    // 금액: 토큰 × 백만 토큰당 USD. 미리보기는 출력 가격 하나로 어림한다. 가격을 모르는 모델은 null.
+    const price: Record<string, number> = { 'claude-opus-5-5': 25, 'claude-haiku-5-5': 5 };
+    const money = (model: string, tokens: number) => price[model] === undefined ? null : usd(BigInt(tokens) * BigInt(price[model]) * 1000000n);
+    type Reason = { reason: string; tokens: number };
+    const row = (model: string, provider: number, gateway: number, more: Reason[], less: number) => ({ model, provider, gateway, more, less });
+    const raw = [
+      row('claude-opus-5-5', n(1204880), n(1179900), [{ reason: 'cutoff', tokens: n(24500) }, { reason: 'unexplained', tokens: n(7320) }], n(6840)),
+      row('claude-haiku-5-5', n(402000), n(396800), [{ reason: 'unknown', tokens: n(5200) }], 0),
+      row('claude-sonnet-5-5', n(88000), 0, [{ reason: 'outside', tokens: n(88000) }], 0),
+    ];
+    const sum = (list: number[]) => list.reduce((a, b) => a + b, 0);
+    const moreOf = (r: typeof raw[number]) => sum(r.more.map(x => x.tokens));
+    const usdSum = (list: (string | null)[]) => usd(list.reduce<bigint>((a, b) => a + (b === null ? 0n : pico(b)), 0n));
+    const rows = raw.map(r => ({ credential, api_key_id: 'apikey_01PreviewPlatform', model: r.model, provider_tokens: String(r.provider), gateway_tokens: String(r.gateway), provider_more_tokens: String(moreOf(r)), gateway_more_tokens: String(r.less), provider_more_usd: money(r.model, moreOf(r)), gateway_more_usd: money(r.model, r.less), reasons: r.more.map(x => ({ reason: x.reason, tokens: String(x.tokens) })) }));
+    const reasonTotal = (reason: string) => raw.flatMap(r => r.more.filter(x => x.reason === reason).map(x => ({ model: r.model, tokens: x.tokens })));
+    return {
+      enabled: true,
+      range: { from: iso(from), to: iso(to) },
+      compared: { from: iso(Math.max(from, coveredFrom)), to: iso(to) },
+      state: { last_attempt_at: iso(Date.now() - 120000), last_success_at: iso(Date.now() - 120000), last_error: null, minute_convention: state.cutoffRule.correction ? 'end' : null, start_minutes: '0', end_minutes: state.cutoffRule.correction ? '14' : '0' },
+      totals: {
+        provider_tokens: String(sum(raw.map(r => r.provider))), gateway_tokens: String(sum(raw.map(r => r.gateway))),
+        provider_more_tokens: String(sum(raw.map(moreOf))), gateway_more_tokens: String(sum(raw.map(r => r.less))),
+        provider_more_usd: usdSum(rows.map(r => r.provider_more_usd)), gateway_more_usd: usdSum(rows.map(r => r.gateway_more_usd)),
+        unpriced_models: raw.filter(r => price[r.model] === undefined).map(r => r.model), corrected_requests: String(Math.max(1, Math.round(scale))),
+        reasons: ['cutoff', 'unknown', 'outside', 'unexplained'].map(reason => { const parts = reasonTotal(reason); return { reason, tokens: String(sum(parts.map(p => p.tokens))), usd: parts.length > 0 && parts.every(p => price[p.model] === undefined) ? null : usdSum(parts.map(p => money(p.model, p.tokens))) }; }),
+      },
+      rows,
+      unmatched_credentials: anthropic.slice(1).map(c => ({ id: c.id, label: c.label, hint: c.hint })),
+    };
   };
   const setTimezone = (body: Json, commandId: string): Reply => {
     expect(body.expected_version, state.timezone.version);
@@ -395,6 +436,7 @@ function api(state: MockState) {
       case 'GET /api/admin/model-catalog': if (s.length === 3) return ok(catalogView()); break;
       case 'POST /api/admin/model-catalog': if (s[3] === 'sync') return syncCatalog(commandId); if (s[3] === 'approve') return approveCatalog(body, commandId); break;
       case 'GET /api/admin/settings': if (s.length === 3) return ok({ budget_timezone: timezoneView(), cutoff_rule: cutoffRuleView() }); break;
+      case 'GET /api/admin/token-check': if (s.length === 3) return ok(tokenCheck(query)); break;
       case 'PUT /api/admin/settings': if (s[3] === 'budget-timezone') return setTimezone(body, commandId); if (s[3] === 'cutoff-rule') return setCutoffRule(body, commandId); break;
     }
     return fail(404, 'resource_not_found');

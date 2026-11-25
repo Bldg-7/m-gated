@@ -2179,10 +2179,10 @@ async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_
             .fetch_one(db.store.pool())
             .await
             .unwrap();
-        assert_eq!(n, 16);
+        assert_eq!(n, 17);
         if future {
             sqlx::query(
-                "INSERT INTO gw_schema_migrations VALUES(17,decode(repeat('00',32),'hex'))",
+                "INSERT INTO gw_schema_migrations VALUES(18,decode(repeat('00',32),'hex'))",
             )
             .execute(db.store.pool())
             .await
@@ -3704,3 +3704,6 @@ mod closure;
 
 #[path = "support/cutoff.rs"]
 mod cutoff;
+
+#[path = "support/token_check.rs"]
+mod token_check;

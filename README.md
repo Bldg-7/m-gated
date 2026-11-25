@@ -103,6 +103,7 @@ $EDITOR gateway.yaml        # hosts, e-mails, database, profiles and, above all,
 export DB_PASSWORD='...'
 export CSRF_SIGNING_KEY="$(openssl rand -hex 32)"           # exactly 64 lowercase hex characters
 export CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"  # different value; keep it stable
+export ANTHROPIC_ADMIN_API_KEY='sk-ant-admin01-...'         # optional: token check and correction
 ```
 
 Provider API keys are **not** environment variables. An admin registers them in the dashboard after
@@ -301,6 +302,7 @@ The gateway reads only the variables in this table.
 | `DB_PASSWORD` | – | **Secret, environment only.** |
 | `CSRF_SIGNING_KEY` | – | **Secret, environment only.** 64 lowercase hex characters (32 bytes). It signs CSRF tokens and pagination cursors. |
 | `CREDENTIAL_ENCRYPTION_KEY` | – | **Secret, environment only.** 64 lowercase hex characters (32 bytes), different from `CSRF_SIGNING_KEY`. It encrypts the provider keys stored in Postgres. If it changes, stored keys can no longer be decrypted and must be registered again. |
+| `ANTHROPIC_ADMIN_API_KEY` | – | **Secret, environment only. Optional.** An Anthropic Admin API key (`sk-ant-admin01-…`) of the organization that owns the Anthropic provider keys. It turns on the [token check and correction](#token-check-against-the-provider-optional). |
 
 ### `limits`
 
@@ -370,8 +372,8 @@ API (admin only; writes need `X-Gateway-Command-Id`, and cookie writes need `Ori
 
 | Method and path | Body | Result |
 |---|---|---|
-| `GET /api/admin/settings` | – | `budget_timezone`: the current time zone and period, the scheduled change (`pending`, or `null`) and `version`. `cutoff_rule`: how cut-off Anthropic streams are settled (`received` or `max_tokens`) and `version` |
-| `PUT /api/admin/settings/cutoff-rule` | `{"provider": "anthropic", "cutoff_rule": "received" \| "max_tokens", "expected_version": "<n>"}` | `200`; `409 version_conflict` if another admin changed it since you read `version`. Requests admitted after the change use the new rule |
+| `GET /api/admin/settings` | – | `budget_timezone`: the current time zone and period, the scheduled change (`pending`, or `null`) and `version`. `cutoff_rule`: how cut-off Anthropic streams are settled (`received` or `max_tokens`), whether correction is on (`correction`), whether it can be turned on on this server (`correction_available`) and `version` |
+| `PUT /api/admin/settings/cutoff-rule` | `{"provider": "anthropic", "cutoff_rule": "received" \| "max_tokens", "correction": true \| false, "expected_version": "<n>"}`. `correction` is optional; without it, the switch keeps its value | `200`; `409 version_conflict` if another admin changed it since you read `version`; `400` for `"correction": true` when `ANTHROPIC_ADMIN_API_KEY` is not set. Requests admitted after the change use the new rule |
 | `PUT /api/admin/settings/budget-timezone` | `{"timezone": "<IANA name>", "expected_version": "<n>"}` | `200`; `409 version_conflict` if another admin changed it since you read `version`; `400` for an unknown time zone |
 
 When you upgrade to 0.9.0, the setting starts with the time zone that most budgets used before
@@ -498,6 +500,59 @@ Every inference request goes through the ledger in Postgres:
    pauses inference for that principal (`inference_paused`). An admin must release the pause
    explicitly (`/api/admin/principals/{id}/inference-pause/release`). Policy edits do not clear it.
 
+### Token check against the provider (optional)
+
+The gateway can compare its own token counts with Anthropic's usage report. This works only when the
+environment variable `ANTHROPIC_ADMIN_API_KEY` holds an Admin API key. Without it, the gateway does
+not poll, *Admin → Token check* says that the check is off, and correction cannot be turned on.
+
+- Every 5 minutes, one instance reads the usage report (`/v1/organizations/usage_report/messages`)
+  in one-hour buckets, grouped by API key and model. It reads the last 48 hours each time, because
+  the provider's data can arrive late, and it also reads any hours it missed in the last 30 days.
+  Hours that ended less than 10 minutes ago are skipped.
+- The report names keys by Anthropic's API key ID, not by the key itself. The gateway finds the ID of
+  each provider key in the Admin API's list of API keys, which shows the first and last characters
+  of each key. A provider key that is not found is listed on the screen and left out of the
+  comparison.
+- For each provider key, model and hour, the gateway compares the report with the tokens of its own
+  requests in that hour. The gateway computes its own totals when it stores the report, so the
+  screen reads stored totals. A difference sends no alert.
+- *Admin → Token check* (`/dashboard/admin/token-check`) shows the tokens that the provider counted
+  more and the tokens that the gateway counted more, priced at the current catalog prices. The
+  tokens that the provider counted more are split by reason. Each hour gets the first reason that
+  applies: use of the key outside the gateway (no gateway request with that key in that hour),
+  cut-off requests in that hour, requests with unknown usage in that hour, or unexplained.
+
+**Correction.** The cut-off rule on *Admin → Settings* has a correction switch, off by default. When
+it is on, the gateway also reads the report in one-minute buckets, and 10 to 15 minutes after a
+cut-off request ends it replaces the request's output tokens with the provider's count.
+
+- Anthropic's documentation does not say whether a one-minute bucket holds the requests that were
+  sent in that minute or the requests that ended in it. This document calls it the bucket
+  assignment: by send time or by end time.
+- The gateway learns the bucket assignment first. It uses minutes in which every request on the
+  provider key and model was settled with the usage that the provider sent in its response. Such a
+  minute counts for an assignment when the bucket's tokens equal the sum of the requests that this
+  assignment puts in the minute, and do not equal the sum for the other assignment. The gateway uses
+  an assignment once at least 3 minutes count for it and the other assignment has no more than a
+  tenth of that number. It corrects nothing before that. *Admin → Token check* shows how many
+  minutes counted for each assignment.
+- With the known assignment, the gateway corrects a request only when all of these hold:
+  - every other request that the assignment puts in the same minute, with the same provider key
+    and model, was settled with the usage that the provider sent in its response;
+  - the request is more than 5 seconds away from a minute boundary;
+  - the bucket's input and cache tokens, minus those of the other requests, equal the request's
+    own.
+
+  The new output never exceeds the request's `max_tokens`.
+- The cost change goes to the request's original budget period. The request detail shows the
+  correction, and an audit record that the gateway writes itself (operation `usage_correction`)
+  records it. The gateway tries each cut-off request from 10 minutes to 2 hours after it ended. The
+  report usually arrives within minutes, so a request that cannot be corrected by then is left as
+  it is.
+
+`GET /api/admin/token-check?range=24h|7d|30d` (admin only) returns what the screen shows.
+
 
 ## Anthropic pass-through policy
 
@@ -573,7 +628,8 @@ It has no inline scripts and loads nothing from external CDNs.
 | Requests and manual settlement | `/dashboard/admin/requests` | admins |
 | Provider keys (register, replace, retire) | `/dashboard/admin/credentials` | admins |
 | Model & price catalog (sync, compare, approve) | `/dashboard/admin/models` | admins |
-| Settings (budget time zone, cut-off rule) | `/dashboard/admin/settings` | admins |
+| Token check against Anthropic's usage report | `/dashboard/admin/token-check` | admins |
+| Settings (budget time zone, cut-off rule, correction) | `/dashboard/admin/settings` | admins |
 
 The JSON API behind it is under `/api/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
 routes). It is same-origin only, with no CORS. The UI is in Korean by default; a language switch in the header changes it to English (the choice is remembered in that browser only).
