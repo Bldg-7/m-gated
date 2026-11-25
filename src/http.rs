@@ -13,23 +13,12 @@ use std::sync::Arc;
 
 /// `content-type`이 하나뿐이고 `application/json`(선택 `charset=utf-8`)인지.
 pub fn json_content_type(headers: &axum::http::HeaderMap) -> bool {
-    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
-    let Some(v) = values.next().and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
-    }
-    let mut parts = v.split(';');
-    if !parts
-        .next()
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"))
-    {
-        return false;
-    }
-    let parameters: Vec<_> = parts.collect();
-    parameters.is_empty()
-        || (parameters.len() == 1 && parameters[0].trim().eq_ignore_ascii_case("charset=utf-8"))
+    m_gated_adapter_kit::openai::json_content_type(
+        headers
+            .get_all(header::CONTENT_TYPE)
+            .iter()
+            .map(|v| v.as_bytes()),
+    )
 }
 /// 요청 본문의 `Content-Encoding`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

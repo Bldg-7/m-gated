@@ -1,0 +1,12 @@
+[package]
+name = "m-gated-adapter-deepseek"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "DeepSeek Chat Completions adapter for m-gated. Built natively into the host and, later, as a WASM component."
+
+[dependencies]
+m-gated-adapter-kit = { path = "../../crates/adapter-kit" }
+
+[dev-dependencies]
+serde_json = "=1.0.149"

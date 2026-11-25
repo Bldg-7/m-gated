@@ -661,6 +661,20 @@ impl JsonDecoder {
         }
         Ok(self.values)
     }
+    /// 본문 전체를 읽는다. 64 KiB를 읽을 때마다 `cooperate`를 기다린다.
+    pub async fn read_with<C: crate::json::Cooperate>(
+        mut self,
+        bytes: &[u8],
+        cooperate: &mut C,
+    ) -> Result<BTreeMap<String, Scalar>, ParseError> {
+        for part in bytes.chunks(64 * 1024) {
+            for &b in part {
+                self.byte(b)?;
+            }
+            cooperate.cooperate().await;
+        }
+        self.finish()
+    }
 }
 fn hex(b: u8) -> Result<u16, ParseError> {
     match b {

@@ -6,11 +6,12 @@ use super::{
 };
 use crate::{
     config::{ApiKind, ModelProfile, NativeFeature, ProviderId, StartupError},
-    json::{self, JsonError, Kind, Visitor},
+    json::{self, JsonError, Kind, TokioYield, Visitor},
     ledger::finance::FinalUsage,
     stream::{Event, JsonDecoder, Scalar, SseDecoder},
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use m_gated_adapter_kit::openai as kit;
 use std::collections::{BTreeMap, BTreeSet};
 
 fn at(path: &[String], parts: &[&str]) -> bool {
@@ -407,23 +408,10 @@ pub async fn validate(body: &[u8], profile: &ModelProfile) -> Result<RequestMeta
         stream: v.stream,
     })
 }
+/// OpenAI 호환 API가 업스트림에 보내는 클라이언트 헤더. JSON `content-type`만 보낸다.
 pub fn approved_headers(headers: &HeaderMap) -> Result<HeaderMap, ApiError> {
-    if !crate::http::json_content_type(headers)
-        || headers
-            .get_all(header::CONNECTION)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .any(|v| {
-                v.split(',')
-                    .any(|s| s.trim().eq_ignore_ascii_case("content-type"))
-            })
-    {
-        return Err(ApiError::UnsupportedOption);
-    }
-    Ok(HeaderMap::from_iter([(
-        header::CONTENT_TYPE,
-        headers[header::CONTENT_TYPE].clone(),
-    )]))
+    let names = kit::approved_headers(&port::adapter_headers(headers))?;
+    Ok(port::select_headers(headers, &names))
 }
 const FIELDS: &[&str] = &[
     "object",
@@ -634,38 +622,10 @@ impl ResponsesStream {
     }
 }
 async fn decode(bytes: &[u8]) -> Result<BTreeMap<String, Scalar>, UpstreamError> {
-    let mut p = JsonDecoder::new(FIELDS);
-    for part in bytes.chunks(64 * 1024) {
-        for &b in part {
-            p.byte(b).map_err(|_| UpstreamError::Protocol)?;
-        }
-        tokio::task::yield_now().await;
-    }
-    p.finish().map_err(|_| UpstreamError::Protocol)
-}
-async fn decode_chat(
-    bytes: &[u8],
-    deepseek: bool,
-) -> Result<BTreeMap<String, Scalar>, UpstreamError> {
-    let mut p = JsonDecoder::with_string_shapes(
-        if deepseek {
-            super::deepseek::FIELDS
-        } else {
-            super::openai_chat::FIELDS
-        },
-        if deepseek {
-            super::deepseek::STRING_SHAPES
-        } else {
-            super::openai_chat::STRING_SHAPES
-        },
-    );
-    for part in bytes.chunks(64 * 1024) {
-        for &b in part {
-            p.byte(b).map_err(|_| UpstreamError::Protocol)?;
-        }
-        tokio::task::yield_now().await;
-    }
-    p.finish().map_err(|_| UpstreamError::Protocol)
+    JsonDecoder::new(FIELDS)
+        .read_with(bytes, &mut TokioYield)
+        .await
+        .map_err(|_| UpstreamError::Protocol)
 }
 /// Chat profile이 출력 상한을 `max_tokens`로 받으면 추론 토큰이 0이어야 정산한다.
 fn chat_output_contract(u: &FinalUsage, profile: &ModelProfile) -> bool {
@@ -688,7 +648,7 @@ fn chat_final(v: &BTreeMap<String, Scalar>) -> Option<FinalUsage> {
     }
     super::openai_chat::usage(v)
 }
-/// Responses, Chat Completions, DeepSeek Chat의 비스트림 응답 본문을 읽는다.
+/// Responses와 Chat Completions의 비스트림 응답 본문을 읽는다.
 /// Embeddings의 오류 응답도 Responses와 같이 읽는다.
 pub(super) async fn read_json(
     kind: ApiKind,
@@ -696,84 +656,45 @@ pub(super) async fn read_json(
     body: &[u8],
     profile: &ModelProfile,
 ) -> Result<Reading, UpstreamError> {
-    let deepseek = kind == ApiKind::DeepseekChat;
-    let chat = deepseek || kind == ApiKind::OpenaiChat;
-    let values = if chat {
-        decode_chat(body, deepseek).await?
-    } else {
-        decode(body).await?
-    };
-    let chat_error =
-        status == StatusCode::OK && chat && values.get("error").is_some_and(|v| v != &Scalar::Null);
-    if chat_error {
-        if body.len() > 64 * 1024 {
-            return Err(UpstreamError::TooLarge);
-        }
-        if !(if deepseek {
-            super::deepseek::native_error_shape(&values)
-        } else {
-            super::openai_chat::native_error_shape(&values)
-        }) {
-            return Err(UpstreamError::Protocol);
-        }
+    if kind == ApiKind::OpenaiChat {
+        let (usage, failed) = kit::read_chat_with(
+            status.as_u16(),
+            body,
+            JsonDecoder::with_string_shapes(
+                super::openai_chat::FIELDS,
+                super::openai_chat::STRING_SHAPES,
+            ),
+            super::openai_chat::native_error_shape,
+            |v| chat_final(v).filter(|u| chat_output_contract(u, profile)),
+            &mut TokioYield,
+        )
+        .await?;
+        return Ok(Reading {
+            usage,
+            counted_input_tokens: None,
+            failed,
+        });
     }
+    let values = decode(body).await?;
     let usage = if status == StatusCode::OK {
-        if deepseek {
-            super::deepseek::final_usage(&values)
-        } else if chat {
-            chat_final(&values).filter(|u| chat_output_contract(u, profile))
-        } else {
-            final_usage(&values, "")
-        }
+        final_usage(&values, "")
     } else {
-        validate_error(body).await?;
+        kit::error_body_with(body, &mut TokioYield).await?;
         None
     };
     Ok(Reading {
         usage,
         counted_input_tokens: None,
-        failed: chat_error || text(&values, "", "status") == Some("failed"),
+        failed: text(&values, "", "status") == Some("failed"),
     })
 }
-async fn validate_error(body: &[u8]) -> Result<(), UpstreamError> {
-    let mut p = JsonDecoder::with_string_shapes(&["error"], &["error.message", "error.type"]);
-    for part in body.chunks(64 * 1024) {
-        for &b in part {
-            p.byte(b).map_err(|_| UpstreamError::Protocol)?;
-        }
-        tokio::task::yield_now().await;
-    }
-    let v = p.finish().map_err(|_| UpstreamError::Protocol)?;
-    if v.get("error") == Some(&Scalar::Object)
-        && v.get("error.message") == Some(&Scalar::StringShape)
-        && v.get("error.type") == Some(&Scalar::StringShape)
-    {
-        Ok(())
-    } else {
-        Err(UpstreamError::Protocol)
-    }
-}
 
-/// OpenAI 호환 Provider(OpenAI, DeepSeek)가 같이 쓰는 키 규칙. Anthropic 키는 받지 않는다.
+/// OpenAI 호환 Provider(OpenAI, DeepSeek, TypeSafe)가 같이 쓰는 인증 헤더.
 pub(super) fn bearer(secret: &str) -> Option<(HeaderName, HeaderValue)> {
     Some((
         header::AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {secret}")).ok()?,
     ))
-}
-pub(super) fn accepts_sk_key(secret: &str) -> bool {
-    secret.starts_with("sk-") && !secret.starts_with("sk-ant-")
-}
-/// OpenAI 호환 Provider가 같이 쓰는 profile 규칙.
-pub(super) fn check_compatible_profile(profile: &ModelProfile) -> Result<(), StartupError> {
-    if !profile.approved_beta.is_empty() {
-        return Err(StartupError::InvalidProfile);
-    }
-    if profile.features.contains(&NativeFeature::Cache) && !profile.rates.contains_key("cache_read")
-    {
-        return Err(StartupError::InvalidPrice);
-    }
-    Ok(())
 }
 
 /// OpenAI 어댑터.
@@ -798,13 +719,15 @@ impl port::Provider for Openai {
         bearer(secret)
     }
     fn accepts_key(&self, secret: &str) -> bool {
-        accepts_sk_key(secret)
+        kit::accepts_sk_key(secret)
     }
     fn verify_path(&self) -> &'static str {
         "v1/models"
     }
     fn check_profile(&self, profile: &ModelProfile) -> Result<(), StartupError> {
-        check_compatible_profile(profile)
+        Ok(kit::check_compatible_profile(&port::adapter_profile(
+            profile,
+        ))?)
     }
     fn models_dev_name(&self) -> Option<&'static str> {
         Some("openai")
@@ -892,6 +815,17 @@ impl port::StreamReader for ResponsesStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub(super) async fn decode_chat(
+        bytes: &[u8],
+    ) -> Result<BTreeMap<String, Scalar>, UpstreamError> {
+        JsonDecoder::with_string_shapes(
+            super::super::openai_chat::FIELDS,
+            super::super::openai_chat::STRING_SHAPES,
+        )
+        .read_with(bytes, &mut TokioYield)
+        .await
+        .map_err(|_| UpstreamError::Protocol)
+    }
     fn profile() -> ModelProfile {
         serde_json::from_value(serde_json::json!({"model":"synthetic-text","api":"responses","profile_version":"responses-fixture-v1","pricing_version":"responses-price-v1","fixture_version":"responses-native-v1","actual_models":["synthetic-text"],"features":["client_tools","thinking","cache","json_schema","inline_png"],"max_input_tokens":4096,"max_output_tokens":1024,"max_body_bytes":8388608,"max_response_bytes":16777216,"rates":{"input":"1.000000000000","output":"2.000000000000","cache_read":"0.500000000000"}})).unwrap()
     }
@@ -1257,6 +1191,7 @@ mod tests {
 
 #[cfg(test)]
 mod chat_shape_tests {
+    use super::tests::decode_chat;
     use super::*;
 
     fn completion() -> String {
@@ -1278,7 +1213,7 @@ mod chat_shape_tests {
                 } else {
                     format!("{},\"error\":{error}}}", &base[..base.len()-1])
                 };
-                let projection = decode_chat(raw.as_bytes(), false).await.unwrap();
+                let projection = decode_chat(raw.as_bytes()).await.unwrap();
                 if chat_final(&projection).is_some() {
                     accepted.push((i, first));
                 }
@@ -1297,7 +1232,7 @@ mod chat_shape_tests {
             format!("{{\"error\":null,{}", &base[1..]),
             format!("{},\"error\":null}}", &base[..base.len() - 1]),
         ] {
-            let projection = decode_chat(raw.as_bytes(), false).await.unwrap();
+            let projection = decode_chat(raw.as_bytes()).await.unwrap();
             assert!(chat_final(&projection).is_some());
         }
     }
@@ -1336,14 +1271,14 @@ mod chat_shape_tests {
             r#"{"message":"failure","type":"server_error","unknown":0}"#,
         ] {
             let raw = format!("{{\"error\":{error}}}");
-            let projection = decode_chat(raw.as_bytes(), false).await.unwrap();
+            let projection = decode_chat(raw.as_bytes()).await.unwrap();
             assert!(!super::super::openai_chat::native_error_shape(&projection));
         }
     }
     #[tokio::test]
     async fn nonstream_requires_assistant_message_object() {
         let raw = br#"{"id":"c1","object":"chat.completion","model":"synthetic-text","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":10}}}"#;
-        let values = decode_chat(raw, false).await.unwrap();
+        let values = decode_chat(raw).await.unwrap();
         assert!(
             chat_final(&values).is_none(),
             "message 없는 응답을 정상 확정"
@@ -1367,9 +1302,7 @@ mod chat_shape_tests {
         ] {
             let mut value = base.clone();
             value["choices"][0]["message"] = message;
-            let projection = decode_chat(value.to_string().as_bytes(), false)
-                .await
-                .unwrap();
+            let projection = decode_chat(value.to_string().as_bytes()).await.unwrap();
             assert!(
                 chat_final(&projection).is_none(),
                 "비정상 message shape 거부"
@@ -1383,9 +1316,7 @@ mod chat_shape_tests {
         ] {
             let mut value = base.clone();
             value["choices"][0]["message"] = message;
-            let projection = decode_chat(value.to_string().as_bytes(), false)
-                .await
-                .unwrap();
+            let projection = decode_chat(value.to_string().as_bytes()).await.unwrap();
             assert!(chat_final(&projection).is_some());
             assert!(matches!(
                 projection.get("choices.*.message.content"),

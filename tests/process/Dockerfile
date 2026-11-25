@@ -3,6 +3,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 COPY crates ./crates
+COPY adapters ./adapters
 COPY migrations ./migrations
 RUN cargo build --locked --release
 FROM node:22.22.2-bookworm-slim

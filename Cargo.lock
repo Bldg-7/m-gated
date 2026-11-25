@@ -938,6 +938,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "m-gated-adapter-deepseek",
  "m-gated-adapter-kit",
  "reqwest",
  "ring",
@@ -955,6 +956,14 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "m-gated-adapter-deepseek"
+version = "0.0.0"
+dependencies = [
+ "m-gated-adapter-kit",
+ "serde_json",
 ]
 
 [[package]]

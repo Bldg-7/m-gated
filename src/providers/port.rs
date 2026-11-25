@@ -8,26 +8,14 @@
 //! [`PROVIDERS`]에 넣는다.
 use super::transport::UpstreamError;
 use crate::{
-    config::{ApiKind, ModelProfile, ProviderId, StartupError},
+    config::{ApiKind, ModelProfile, NativeFeature, ProviderId, StartupError},
     ledger::finance::{FinalUsage, StartUsage},
     stream::{Event, SseDecoder},
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 pub use futures_util::future::BoxFuture;
-
-/// 요청 검사 실패.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApiError {
-    InvalidRequest,
-    UnsupportedOption,
-    UnsupportedModel,
-}
-/// 요청 검사가 알려 주는 값.
-pub struct RequestMetadata {
-    pub model: String,
-    pub output_limit: Option<u64>,
-    pub stream: bool,
-}
+use m_gated_adapter_kit::adapter as kit;
+pub use m_gated_adapter_kit::adapter::{ApiError, ErrorFormat, RequestMetadata, Step};
 
 /// Provider 하나. 키 형식, 인증 헤더, 키 확인 경로와 이 Provider가 가진 API 목록을 알려 준다.
 pub trait Provider: Sync {
@@ -99,17 +87,6 @@ pub enum HeaderRule {
     Id,
     /// 10진 숫자만.
     Number,
-}
-
-/// 게이트웨이가 직접 만든 오류 응답의 형식.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ErrorFormat {
-    /// `{"type":"error","error":{...}}`
-    Anthropic,
-    /// `{"error":{"message":...,"type":...,"code":...}}`
-    Openai,
-    /// `{"detail":"..."}`
-    Detail,
 }
 
 /// 비스트림 응답을 읽은 결과.
@@ -188,17 +165,6 @@ pub trait Api: Sync {
     }
 }
 
-/// 스트림 event 하나를 읽은 결과.
-#[derive(Default)]
-pub struct Step {
-    /// 이 event가 스트림의 끝을 알린다.
-    pub terminal: bool,
-    /// 이 event가 Provider의 오류 event다.
-    pub error: bool,
-    /// 끊긴 요청의 `received` 정산에 쓰는 출력 내용 조각. None은 조각이 상한을 넘어 받지 못한 것이다.
-    pub content: Vec<Option<String>>,
-}
-
 /// 스트림 응답 하나를 읽는 상태 기계. event를 차례로 받아 검사하고, 사용량을 알려 준다.
 pub trait StreamReader: Send {
     fn decoder(&self) -> SseDecoder;
@@ -218,6 +184,79 @@ pub trait StreamReader: Send {
     }
     /// 스트림이 끝났을 때의 사용량과 실패 여부. 끝 event 없이 끝났으면 오류다.
     fn close(&self) -> Result<(Option<FinalUsage>, bool), UpstreamError>;
+}
+
+/// 어댑터 crate(`adapter-kit`을 쓰는 crate)에 넘기는 profile.
+pub fn adapter_profile(profile: &ModelProfile) -> kit::Profile {
+    kit::Profile {
+        model: profile.model.clone(),
+        features: profile
+            .features
+            .iter()
+            .map(|f| match f {
+                NativeFeature::ClientTools => kit::Feature::ClientTools,
+                NativeFeature::Thinking => kit::Feature::Thinking,
+                NativeFeature::Cache => kit::Feature::Cache,
+                NativeFeature::JsonSchema => kit::Feature::JsonSchema,
+                NativeFeature::InlinePng => kit::Feature::InlinePng,
+            })
+            .collect(),
+        approved_beta: profile.approved_beta.clone(),
+        max_output_tokens: profile.max_output_tokens,
+        rates: profile.rates.keys().cloned().collect(),
+    }
+}
+/// 어댑터 crate에 넘기는 클라이언트 헤더. `HeaderMap`의 이름은 이미 소문자다.
+pub fn adapter_headers(headers: &HeaderMap) -> Vec<kit::Header<'_>> {
+    headers
+        .iter()
+        .map(|(name, value)| kit::Header {
+            name: name.as_str(),
+            value: value.as_bytes(),
+        })
+        .collect()
+}
+/// 어댑터가 고른 이름의 헤더만 남긴다. 값은 클라이언트가 보낸 그대로다.
+pub fn select_headers(incoming: &HeaderMap, names: &[&str]) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for name in names {
+        for value in incoming.get_all(*name) {
+            out.append(
+                HeaderName::from_bytes(name.as_bytes()).expect("받은 헤더 이름"),
+                value.clone(),
+            );
+        }
+    }
+    out
+}
+impl From<kit::ReadError> for UpstreamError {
+    fn from(e: kit::ReadError) -> Self {
+        match e {
+            kit::ReadError::Protocol => Self::Protocol,
+            kit::ReadError::StreamLimit => Self::StreamLimit,
+            kit::ReadError::TooLarge => Self::TooLarge,
+        }
+    }
+}
+impl From<kit::Usage> for FinalUsage {
+    fn from(u: kit::Usage) -> Self {
+        Self {
+            actual_model: u.actual_model,
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_read_tokens: u.cache_read_tokens,
+            cache_write_tokens: u.cache_write_tokens,
+            reasoning_tokens: u.reasoning_tokens,
+        }
+    }
+}
+impl From<kit::ProfileError> for StartupError {
+    fn from(e: kit::ProfileError) -> Self {
+        match e {
+            kit::ProfileError::InvalidPrice => Self::InvalidPrice,
+            kit::ProfileError::InvalidProfile => Self::InvalidProfile,
+        }
+    }
 }
 
 /// 이 게이트웨이가 아는 Provider 전부.

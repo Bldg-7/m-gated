@@ -9,7 +9,7 @@ repository = "https://github.com/Bldg-7/m-gated"
 publish = false
 
 [workspace]
-members = ["crates/adapter-kit"]
+members = ["crates/adapter-kit", "adapters/deepseek"]
 
 [dependencies]
 axum = { version = "=0.8.8", default-features = false, features = ["http1", "json", "tokio"] }
@@ -40,6 +40,7 @@ ring = "=0.17.14"
 zeroize = "=1.9.1"
 futures-util = "=0.3.34"
 m-gated-adapter-kit = { path = "crates/adapter-kit" }
+m-gated-adapter-deepseek = { path = "adapters/deepseek" }
 ruzstd = "=0.9.1"
 chrono-tz = "=0.10.4"
 
