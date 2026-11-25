@@ -1146,6 +1146,7 @@ async fn large_incremental_sse_cpu_work_yields_to_real_probe_without_finishing_f
     let finished = done.clone();
     let (started, ready) = oneshot::channel();
     let parser = tokio::spawn(async move {
+        use m_gated::stream::Feed;
         let mut parser = m_gated::stream::SseDecoder::new(&["model"]);
         parser
             .feed(b"data: {\"skip\":\"", |_| Ok(()))

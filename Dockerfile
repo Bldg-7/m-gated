@@ -9,6 +9,7 @@ FROM rust:1.93.0-bookworm AS binary
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/
+COPY crates/ ./crates/
 COPY migrations/ ./migrations/
 RUN cargo build --locked --release
 

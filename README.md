@@ -884,9 +884,9 @@ and
 ## Development and tests
 
 ```sh
-cargo test --locked                                  # unit + integration suites, no external services
+cargo test --locked --workspace                      # unit + integration suites, no external services
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 (cd web && npm ci && npm run typecheck && npm test)  # dashboard unit tests (Vitest)
 ```
 

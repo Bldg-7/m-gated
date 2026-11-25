@@ -14,7 +14,7 @@ env -i PATH="$(dirname "$fnm_binary"):/usr/bin:/bin" HOME="$public_home" \
   NPM_CONFIG_GLOBALCONFIG="$public_home/global-npmrc" DO_NOT_TRACK=1 \
   "$fnm_binary" exec --using 22.22.2 npm --prefix tests/compat ci \
   --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
-cargo test --locked
+cargo test --locked --workspace
 cargo test --locked --test auth_postgres -- --ignored
 # 실제 분 경계 시험은 내부 두 task/row lock은 유지하되 다른 suite 부하와 분리해 반드시 실행한다.
 clock_test=s3_contract::saturated_previous_minute_retries_after_authoritative_anchor_for_both_lanes
@@ -29,5 +29,5 @@ for alarm_test in telemetry_actual_sql_jwks_provider_success_unknown_and_company
   cargo test --locked --test postgres_contract "s10::$alarm_test" -- --ignored --exact --test-threads=1
  done
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check

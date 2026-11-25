@@ -19,7 +19,7 @@ done
 ./scripts/test-s6.sh
 cargo test --locked --test chat_embeddings_postgres -- --ignored --nocapture
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check
 test -z "$(git diff --cached --name-only)"
 test -z "$(find target/test-owned-schemas -type f -print -quit)"

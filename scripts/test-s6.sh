@@ -9,7 +9,7 @@ test "$TEST_DATABASE_URL" = 'postgres://m_gated_test@127.0.0.1:64603/m_gated_tes
 ./scripts/test-u2.sh
 cargo test --locked --test responses_postgres -- --ignored --nocapture
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check
 test -z "$(git diff --cached --name-only)"
 test -z "$(find target/test-owned-schemas -type f -print -quit)"

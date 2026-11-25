@@ -10,7 +10,7 @@ test "$TEST_DATABASE_URL" = 'postgres://m_gated_test@127.0.0.1:64603/m_gated_tes
 cargo test --locked --test server default_management_ten_seconds_and_asset_thirty_seconds_are_wire_deadlines -- --ignored --exact --nocapture
 ./scripts/test-main.sh
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check
 test -z "$(git diff --cached --name-only)"
 test -z "$(find target/test-owned-schemas -type f -print -quit)"

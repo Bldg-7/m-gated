@@ -24,7 +24,7 @@ node_command npm --prefix web run build
 cargo test --locked --test dashboard_postgres -- --ignored
 cargo test --locked --test dashboard_e2e -- --ignored --nocapture
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check
 test -z "$(git diff --cached --name-only)"
 test -z "$(find target/test-owned-schemas -type f -print -quit)"

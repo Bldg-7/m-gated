@@ -10,7 +10,7 @@ test "$TEST_DATABASE_URL" = 'postgres://m_gated_test@127.0.0.1:64603/m_gated_tes
 # 각 시험의 내부 경합은 유지하고, 독립 fixture들의 초기 pool 연결만 유한하게 스케줄한다.
 cargo test --locked --test deepseek_postgres -- --ignored --nocapture --test-threads=2
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check
 test -z "$(git diff --cached --name-only)"
 test -z "$(find target/test-owned-schemas -type f -print -quit)"

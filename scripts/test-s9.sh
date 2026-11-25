@@ -9,7 +9,7 @@ test "$TEST_DATABASE_URL" = 'postgres://m_gated_test@127.0.0.1:64603/m_gated_tes
 # S8 누적은 새 S9 PG/SDK/browser 및 실제120초 read-idle 시험까지 모든 target을 실행한다.
 ./scripts/test-s8.sh
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check
 test -z "$(git diff --cached --name-only)"
 test -z "$(find target/test-owned-schemas -type f -print -quit)"

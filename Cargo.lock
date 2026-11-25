@@ -938,6 +938,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "m-gated-adapter-kit",
  "reqwest",
  "ring",
  "ruzstd",
@@ -954,6 +955,14 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "m-gated-adapter-kit"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

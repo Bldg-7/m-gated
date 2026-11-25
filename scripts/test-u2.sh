@@ -10,7 +10,7 @@ export TEST_FNM_BINARY="$(command -v fnm)"
 ./scripts/test-u1.sh
 cargo test --locked --test admin_e2e -- --ignored --nocapture
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 git diff --check
 test -z "$(git diff --cached --name-only)"
 test -z "$(find target/test-owned-schemas -type f -print -quit)"
