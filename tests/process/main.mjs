@@ -127,7 +127,7 @@ try{
  console.log('DB_SSL_MODE_REQUIRE_ENCRYPTS_WITHOUT_VERIFY_AND_NEVER_PLAINTEXT_OK');
  writeFileSync(join(directory,'config.yaml'),config.replace('host: 127.0.0.1','host: localhost'));
  app=start();await waitStatus('/readyz',200);assert.equal((await get('/livez')).status,200);assert.equal((await get('/dashboard/')).status,200);
- const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17']);
+ const migrations=await db.query(`SELECT version FROM ${schema}.gw_schema_migrations ORDER BY version`);assert.deepEqual(migrations.rows.map(r=>r.version),['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18']);
  const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'key1'})).toString('base64url');const payload=Buffer.from(JSON.stringify({iss:'https://auth.example.test',aud:'https://example.test',sub:'main-human',email:'alice@example.test',email_verified:true,exp:Math.floor(Date.now()/1000)+7200,name:'Synthetic main'})).toString('base64url');const signed=`${header}.${payload}`;const signature=createSign('RSA-SHA256').update(signed).sign(keys.privateKey).toString('base64url');const cookie=`mgated_access=${signed}.${signature}`;
  assert.equal((await get('/api/me',{cookie})).status,200);assert.equal((await get('/api/usage?group_by=provider',{cookie})).status,200);
  // 회사 키 미등록에도 ready는 유지한다(관리자가 등록할 수 있게). SSO 로그인 토큰 추론은 키와 무관하게 장부 행 없이 403이다.

@@ -1,26 +1,17 @@
-//! Responses 계약과 bounded native relay I/O. 두 Chat의 입력/usage/종료/가격은 각 전용 adapter가 결정한다.
+//! OpenAI 어댑터와 Responses 계약. Chat Completions와 Embeddings의 입력·usage 계약은 각 전용 모듈이 정한다.
 use super::{
     anthropic::{self, ApiError, RequestMetadata},
-    transport::{
-        NativeClient, SendOptions, UpstreamError, UpstreamResponse, classify_transport,
-        response_headers,
-    },
+    port::{self, Api, BoxFuture, ErrorFormat, Reading},
+    transport::UpstreamError,
 };
 use crate::{
-    config::{ModelProfile, NativeFeature},
+    config::{ApiKind, ModelProfile, NativeFeature, ProviderId, StartupError},
     json::{self, JsonError, Kind, Visitor},
-    ledger::finance::{FinalObservation, FinalOutcome, FinalUsage, SendPermit},
-    runtime::{RequestControl, request::byte_queue},
+    ledger::finance::FinalUsage,
     stream::{Event, JsonDecoder, Scalar, SseDecoder},
 };
-use axum::{
-    body::{Body, Bytes},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
-};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use std::collections::{BTreeMap, BTreeSet};
 
 fn at(path: &[String], parts: &[&str]) -> bool {
     path.iter().map(String::as_str).eq(parts.iter().copied())
@@ -417,7 +408,7 @@ pub async fn validate(body: &[u8], profile: &ModelProfile) -> Result<RequestMeta
     })
 }
 pub fn approved_headers(headers: &HeaderMap) -> Result<HeaderMap, ApiError> {
-    if !anthropic::json_content_type(headers)
+    if !crate::http::json_content_type(headers)
         || headers
             .get_all(header::CONNECTION)
             .iter()
@@ -676,6 +667,7 @@ async fn decode_chat(
     }
     p.finish().map_err(|_| UpstreamError::Protocol)
 }
+/// Chat profile이 출력 상한을 `max_tokens`로 받으면 추론 토큰이 0이어야 정산한다.
 fn chat_output_contract(u: &FinalUsage, profile: &ModelProfile) -> bool {
     profile.chat_output_limit_field.as_deref() != Some("max_tokens")
         || u.reasoning_tokens == Some(0)
@@ -696,66 +688,23 @@ fn chat_final(v: &BTreeMap<String, Scalar>) -> Option<FinalUsage> {
     }
     super::openai_chat::usage(v)
 }
-fn observation(
+/// Responses, Chat Completions, DeepSeek Chat의 비스트림 응답 본문을 읽는다.
+/// Embeddings의 오류 응답도 Responses와 같이 읽는다.
+pub(super) async fn read_json(
+    kind: ApiKind,
     status: StatusCode,
-    headers: &HeaderMap,
-    usage: Option<FinalUsage>,
-) -> FinalObservation {
-    FinalObservation {
-        outcome: if status == StatusCode::OK {
-            FinalOutcome::Completed
-        } else {
-            FinalOutcome::Failed
-        },
-        usage,
-        counted_input_tokens: None,
-        reason: if status == StatusCode::OK {
-            "completed"
-        } else {
-            "provider_error"
-        },
-        http_status: Some(status.as_u16()),
-        provider_request_id: headers
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned),
-    }
-}
-pub(super) async fn read_response(
-    response: reqwest::Response,
-    options: SendOptions<'_>,
-) -> Result<UpstreamResponse, UpstreamError> {
-    let status = response.status();
-    super::transport::keep_error_status(status, read_response_body(response, options).await)
-}
-async fn read_response_body(
-    mut response: reqwest::Response,
-    options: SendOptions<'_>,
-) -> Result<UpstreamResponse, UpstreamError> {
-    let status = response.status();
-    check_response(&response, false)?;
-    let limit = if status == StatusCode::OK {
-        options.profile.max_response_bytes.min(16 * 1024 * 1024)
+    body: &[u8],
+    profile: &ModelProfile,
+) -> Result<Reading, UpstreamError> {
+    let deepseek = kind == ApiKind::DeepseekChat;
+    let chat = deepseek || kind == ApiKind::OpenaiChat;
+    let values = if chat {
+        decode_chat(body, deepseek).await?
     } else {
-        64 * 1024
+        decode(body).await?
     };
-    if response.content_length().is_some_and(|n| n > limit as u64) {
-        return Err(UpstreamError::TooLarge);
-    }
-    let mut body = crate::runtime::BoundedBuffer::new(limit);
-    while let Some(chunk) = response.chunk().await.map_err(classify_transport)? {
-        body.extend(&chunk).map_err(|_| UpstreamError::TooLarge)?;
-    }
-    let body = body.freeze();
-    let deepseek = options.api == crate::config::ApiKind::DeepseekChat;
-    let values = if deepseek || options.api == crate::config::ApiKind::OpenaiChat {
-        decode_chat(&body, deepseek).await?
-    } else {
-        decode(&body).await?
-    };
-    let chat_error = status == StatusCode::OK
-        && (deepseek || options.api == crate::config::ApiKind::OpenaiChat)
-        && values.get("error").is_some_and(|v| v != &Scalar::Null);
+    let chat_error =
+        status == StatusCode::OK && chat && values.get("error").is_some_and(|v| v != &Scalar::Null);
     if chat_error {
         if body.len() > 64 * 1024 {
             return Err(UpstreamError::TooLarge);
@@ -771,31 +720,19 @@ async fn read_response_body(
     let usage = if status == StatusCode::OK {
         if deepseek {
             super::deepseek::final_usage(&values)
-        } else if options.api == crate::config::ApiKind::OpenaiChat {
-            chat_final(&values).filter(|u| chat_output_contract(u, options.profile))
+        } else if chat {
+            chat_final(&values).filter(|u| chat_output_contract(u, profile))
         } else {
             final_usage(&values, "")
         }
     } else {
-        validate_error(&body).await?;
+        validate_error(body).await?;
         None
     };
-    let mut headers = response_headers(response.headers());
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    headers.insert("x-should-retry", HeaderValue::from_static("false"));
-    let mut observation = observation(status, &headers, usage);
-    if chat_error || text(&values, "", "status") == Some("failed") {
-        observation.outcome = FinalOutcome::Failed;
-        observation.reason = "provider_error";
-    }
-    Ok(UpstreamResponse {
-        status,
-        headers,
-        body,
-        observation,
+    Ok(Reading {
+        usage,
+        counted_input_tokens: None,
+        failed: chat_error || text(&values, "", "status") == Some("failed"),
     })
 }
 async fn validate_error(body: &[u8]) -> Result<(), UpstreamError> {
@@ -816,280 +753,140 @@ async fn validate_error(body: &[u8]) -> Result<(), UpstreamError> {
         Err(UpstreamError::Protocol)
     }
 }
-pub(super) fn check_response(r: &reqwest::Response, stream: bool) -> Result<(), UpstreamError> {
-    if matches!(r.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        return Err(UpstreamError::Auth);
+
+/// OpenAI 호환 Provider(OpenAI, DeepSeek)가 같이 쓰는 키 규칙. Anthropic 키는 받지 않는다.
+pub(super) fn bearer(secret: &str) -> Option<(HeaderName, HeaderValue)> {
+    Some((
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {secret}")).ok()?,
+    ))
+}
+pub(super) fn accepts_sk_key(secret: &str) -> bool {
+    secret.starts_with("sk-") && !secret.starts_with("sk-ant-")
+}
+/// OpenAI 호환 Provider가 같이 쓰는 profile 규칙.
+pub(super) fn check_compatible_profile(profile: &ModelProfile) -> Result<(), StartupError> {
+    if !profile.approved_beta.is_empty() {
+        return Err(StartupError::InvalidProfile);
     }
-    if r.status().is_redirection() {
-        return Err(UpstreamError::Redirect);
-    }
-    if r.headers()
-        .get_all(header::CONTENT_ENCODING)
-        .iter()
-        .any(|v| v.as_bytes() != b"identity")
+    if profile.features.contains(&NativeFeature::Cache) && !profile.rates.contains_key("cache_read")
     {
-        return Err(UpstreamError::Encoding);
-    }
-    if stream && r.status() == StatusCode::OK {
-        let c = r
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|s| s.to_str().ok());
-        if !c.is_some_and(|s| {
-            s.eq_ignore_ascii_case("text/event-stream")
-                || s.eq_ignore_ascii_case("text/event-stream; charset=utf-8")
-        }) {
-            return Err(UpstreamError::Protocol);
-        }
-    } else if !anthropic::json_content_type(r.headers()) {
-        return Err(UpstreamError::Protocol);
+        return Err(StartupError::InvalidPrice);
     }
     Ok(())
 }
-fn verified_stream_usage(
-    api: crate::config::ApiKind,
-    profile: &ModelProfile,
-    responses: &ResponsesStream,
-    chat: &super::openai_chat::ChatStream,
-    deepseek: &super::deepseek::DeepseekStream,
-) -> Option<FinalUsage> {
-    match api {
-        crate::config::ApiKind::DeepseekChat => deepseek.finish().ok().flatten(),
-        crate::config::ApiKind::OpenaiChat => chat
-            .finish()
-            .ok()
-            .flatten()
-            .filter(|usage| chat_output_contract(usage, profile)),
-        _ => responses.finish().ok().flatten(),
+
+/// OpenAI 어댑터.
+pub struct Openai;
+pub static PROVIDER: Openai = Openai;
+static APIS: [&dyn Api; 3] = [
+    &RESPONSES,
+    &super::openai_chat::CHAT,
+    &super::embeddings::EMBEDDINGS,
+];
+impl port::Provider for Openai {
+    fn id(&self) -> ProviderId {
+        ProviderId::Openai
+    }
+    fn origin(&self) -> &'static str {
+        "https://api.openai.com"
+    }
+    fn apis(&self) -> &'static [&'static dyn Api] {
+        &APIS
+    }
+    fn auth_header(&self, secret: &str) -> Option<(HeaderName, HeaderValue)> {
+        bearer(secret)
+    }
+    fn accepts_key(&self, secret: &str) -> bool {
+        accepts_sk_key(secret)
+    }
+    fn verify_path(&self) -> &'static str {
+        "v1/models"
+    }
+    fn check_profile(&self, profile: &ModelProfile) -> Result<(), StartupError> {
+        check_compatible_profile(profile)
+    }
+    fn models_dev_name(&self) -> Option<&'static str> {
+        Some("openai")
     }
 }
-pub(super) async fn relay(
-    client: &NativeClient,
-    permit: SendPermit,
-    body: Bytes,
-    options: SendOptions<'_>,
-    control: Arc<RequestControl>,
-    progress: &mut super::transport::StreamProgress,
-    head: impl FnOnce(StatusCode, HeaderMap, Body),
-) -> Result<FinalObservation, UpstreamError> {
-    let mut response = client.begin_send(permit, body, options).await?;
-    check_response(&response, true)?;
-    if response.status() != StatusCode::OK {
-        let r = read_response(response, options).await?;
-        head(r.status, r.headers, Body::from(control.retain_body(r.body)));
-        return Ok(r.observation);
+
+/// OpenAI Responses API.
+pub struct Responses;
+static RESPONSES: Responses = Responses;
+impl Api for Responses {
+    fn kind(&self) -> ApiKind {
+        ApiKind::Responses
     }
-    let mut headers = response_headers(response.headers());
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream"),
-    );
-    headers.insert("x-should-retry", HeaderValue::from_static("false"));
-    let saved = headers.clone();
-    let (queue, body) = byte_queue(control.clone());
-    let mut delivery = Some((head, headers, body));
-    let deepseek = options.api == crate::config::ApiKind::DeepseekChat;
-    let chat = options.api == crate::config::ApiKind::OpenaiChat;
-    let mut parser = if deepseek {
-        SseDecoder::chat_with_string_shapes(super::deepseek::FIELDS, super::deepseek::STRING_SHAPES)
-    } else if chat {
-        SseDecoder::chat_with_string_shapes(
-            super::openai_chat::FIELDS,
-            super::openai_chat::STRING_SHAPES,
-        )
-    } else {
+    fn routes(&self) -> &'static [&'static str] {
+        &["/openai/v1/responses"]
+    }
+    fn upstream_path(&self) -> &'static str {
+        "v1/responses"
+    }
+    fn error_format(&self) -> ErrorFormat {
+        ErrorFormat::Openai
+    }
+    fn validate<'a>(
+        &'a self,
+        body: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<RequestMetadata, ApiError>> {
+        Box::pin(validate(body, profile))
+    }
+    fn approved_headers(
+        &self,
+        incoming: &HeaderMap,
+        _: &ModelProfile,
+    ) -> Result<HeaderMap, ApiError> {
+        approved_headers(incoming)
+    }
+    fn read<'a>(
+        &'a self,
+        status: StatusCode,
+        body: &'a [u8],
+        _request: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<Reading, UpstreamError>> {
+        Box::pin(read_json(ApiKind::Responses, status, body, profile))
+    }
+    fn stream(&self, _profile: &ModelProfile) -> Option<Box<dyn port::StreamReader>> {
+        Some(Box::<ResponsesStream>::default())
+    }
+    fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
+        "openai_responses_input_includes_cache_output_includes_reasoning_v1"
+    }
+    fn catalog(&self) -> bool {
+        true
+    }
+}
+impl port::StreamReader for ResponsesStream {
+    fn decoder(&self) -> SseDecoder {
         SseDecoder::new(STREAM_FIELDS)
-    };
-    parser.reserve_retained(super::transport::StreamProgress::RETAINED_BYTES);
-    let mut reducer = ResponsesStream::default();
-    let mut chat_reducer = super::openai_chat::ChatStream::default();
-    let mut deepseek_reducer = super::deepseek::DeepseekStream::default();
-    let mut error_cr_boundary = None;
-    let mut pending_error_tail = None;
-    // 같은 event의 선택 LF가 상한을 넘기면 blank CR에서 관측한 terminal 후보를 살리지 않는다.
-    let mut terminal_boundary_pending = false;
-    let result = async {
-        while let Some(chunk) = response.chunk().await.map_err(classify_transport)? {
-            for part in chunk.chunks(crate::stream::CHUNK_BYTES) {
-                for &b in part {
-                    let pending = terminal_boundary_pending;
-                    if b != b'\n' {
-                        terminal_boundary_pending = false;
-                        if pending {
-                            progress.final_usage = verified_stream_usage(
-                                options.api,
-                                options.profile,
-                                &reducer,
-                                &chat_reducer,
-                                &deepseek_reducer,
-                            );
-                        }
-                    }
-                    if let Some(size) = error_cr_boundary.take()
-                        && b == b'\n'
-                        && size >= 64 * 1024
-                    {
-                        progress.invalidate();
-                        return Err(UpstreamError::StreamLimit);
-                    }
-                    let event = parser.byte(b);
-                    if parser.native_error_in_progress() {
-                        progress.invalidate();
-                    }
-                    let event = event.map_err(|error| {
-                        let error = UpstreamError::from(error);
-                        if error != UpstreamError::StreamLimit || terminal_boundary_pending {
-                            progress.invalidate();
-                        }
-                        error
-                    })?;
-                    if pending && b == b'\n' {
-                        progress.final_usage = verified_stream_usage(
-                            options.api,
-                            options.profile,
-                            &reducer,
-                            &chat_reducer,
-                            &deepseek_reducer,
-                        );
-                    }
-                    terminal_boundary_pending = false;
-                    if let Some(event) = event {
-                        // 첫 event를 받은 뒤에 끊기면 첫 응답 전 끊김(0원)이 아니다.
-                        progress.started = true;
-                        let terminal = if chat || deepseek {
-                            event.values.get("$done") == Some(&Scalar::Bool(true))
-                        } else {
-                            matches!(
-                                event.values.get("type").and_then(Scalar::text),
-                                Some(
-                                    "response.completed"
-                                        | "response.incomplete"
-                                        | "response.failed"
-                                )
-                            )
-                        };
-                        let error = if chat || deepseek {
-                            event.values.contains_key("error")
-                        } else {
-                            event.values.get("type").and_then(Scalar::text) == Some("error")
-                        };
-                        let size = event.wire_bytes;
-                        // 새 event의 의미 검증이 실패하면 이전 final은 절대로 복원하지 않는다.
-                        progress.invalidate();
-                        if deepseek {
-                            deepseek_reducer.event(event)?;
-                            progress.provider_error_observed = deepseek_reducer.native_error();
-                        } else if chat {
-                            chat_reducer.event(event)?;
-                            progress.provider_error_observed = chat_reducer.native_error();
-                        } else {
-                            reducer.event(event)?;
-                            progress.provider_error_observed = reducer.failed;
-                        }
-                        terminal_boundary_pending = terminal && parser.boundary_after_cr();
-                        if terminal && (!terminal_boundary_pending || parser.optional_lf_fits()) {
-                            progress.final_usage = verified_stream_usage(
-                                options.api,
-                                options.profile,
-                                &reducer,
-                                &chat_reducer,
-                                &deepseek_reducer,
-                            );
-                        }
-                        if error && parser.boundary_after_cr() {
-                            error_cr_boundary = Some(size);
-                        }
-                    }
-                }
-                control.observe_parser(
-                    parser.retained_peak() + super::transport::StreamProgress::RETAINED_BYTES,
-                    chunk.len(),
-                );
-                if let Some((head, headers, body)) = delivery.take() {
-                    head(StatusCode::OK, headers, body);
-                }
-                if error_cr_boundary.is_some() {
-                    // blank CR의 선택 LF 검사 전 최대 한 작업 chunk만 보류한다. 초과 event를 정상 EOF로 전달하지 않는다.
-                    let retained = parser.retained_peak()
-                        + part.len()
-                        + super::transport::StreamProgress::RETAINED_BYTES;
-                    if retained > crate::stream::RETAINED_BYTES {
-                        return Err(UpstreamError::StreamLimit);
-                    }
-                    control.observe_parser(retained, chunk.len());
-                    pending_error_tail = Some(control.retain_body(Bytes::copy_from_slice(part)));
-                } else {
-                    if let Some(tail) = pending_error_tail.take() {
-                        queue
-                            .send(&tail)
-                            .await
-                            .map_err(|_| UpstreamError::Cancelled)?;
-                    }
-                    queue
-                        .send(part)
-                        .await
-                        .map_err(|_| UpstreamError::Cancelled)?;
-                }
-                tokio::task::yield_now().await;
-            }
-        }
-        parser
-            .finish()
-            .map_err(UpstreamError::from)
-            .inspect_err(|_| progress.invalidate())?;
-        if let Some(tail) = pending_error_tail.take() {
-            queue
-                .send(&tail)
-                .await
-                .map_err(|_| UpstreamError::Cancelled)?;
-        }
-        Ok(())
     }
-    .await;
-    drop(response);
-    let limit_after_final = match result {
-        Ok(()) => false,
-        Err(UpstreamError::StreamLimit)
-            if !terminal_boundary_pending && progress.final_usage.is_some() =>
-        {
-            true
-        }
-        Err(error) => return Err(error),
-    };
-    let final_usage = if deepseek {
-        let failed = deepseek_reducer.native_error();
-        deepseek_reducer.finish().map(|usage| (usage, failed))
-    } else if chat {
-        let failed = chat_reducer.native_error();
-        chat_reducer.finish().map(|usage| {
-            (
-                usage.filter(|usage| chat_output_contract(usage, options.profile)),
-                failed,
-            )
+    fn accept(&mut self, event: Event) -> Result<port::Step, UpstreamError> {
+        let kind = event.values.get("type").and_then(Scalar::text);
+        let terminal = matches!(
+            kind,
+            Some("response.completed" | "response.incomplete" | "response.failed")
+        );
+        let error = kind == Some("error");
+        self.event(event)?;
+        Ok(port::Step {
+            terminal,
+            error,
+            content: Vec::new(),
         })
-    } else {
-        let failed = reducer.failed;
-        reducer.finish().map(|usage| (usage, failed))
-    };
-    let (usage, failed) = if limit_after_final {
-        let (usage, _) = final_usage.map_err(|_| UpstreamError::StreamLimit)?;
-        (Some(usage.ok_or(UpstreamError::StreamLimit)?), true)
-    } else {
-        final_usage?
-    };
-    if !limit_after_final {
-        queue.finish();
     }
-    let mut observation = observation(StatusCode::OK, &saved, usage);
-    if failed {
-        observation.outcome = FinalOutcome::Failed;
-        observation.reason = if limit_after_final {
-            "stream_limit"
-        } else {
-            "provider_error"
-        };
+    fn final_usage(&self) -> Option<FinalUsage> {
+        self.finish().ok().flatten()
     }
-    Ok(observation)
+    fn provider_error(&self) -> bool {
+        self.failed
+    }
+    fn close(&self) -> Result<(Option<FinalUsage>, bool), UpstreamError> {
+        self.finish().map(|usage| (usage, self.failed))
+    }
 }
 
 #[cfg(test)]

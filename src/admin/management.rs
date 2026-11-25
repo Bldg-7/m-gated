@@ -433,7 +433,7 @@ async fn execute(
         }
         Value::Null
     } else {
-        if !crate::providers::anthropic::json_content_type(&head.headers) {
+        if !crate::http::json_content_type(&head.headers) {
             return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
         }
         struct Check;
@@ -751,7 +751,7 @@ async fn provider_credentials(
         if head.uri.query().is_some() {
             return error(ManagementError::Invalid);
         }
-        if !crate::providers::anthropic::json_content_type(&head.headers) {
+        if !crate::http::json_content_type(&head.headers) {
             return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
         }
         let Ok(mut input) = serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes) else {
@@ -1018,7 +1018,7 @@ async fn settings(
         .get_all(header::CONTENT_ENCODING)
         .iter()
         .any(|v| v.as_bytes() != b"identity")
-        || !crate::providers::anthropic::json_content_type(&head.headers)
+        || !crate::http::json_content_type(&head.headers)
     {
         return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
     }
@@ -1164,7 +1164,7 @@ async fn model_catalog(
     };
     let input: Value = if bytes.is_empty() {
         json!({})
-    } else if !crate::providers::anthropic::json_content_type(&head.headers) {
+    } else if !crate::http::json_content_type(&head.headers) {
         return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
     } else {
         match serde_json::from_slice(&bytes) {

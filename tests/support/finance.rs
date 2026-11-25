@@ -45,14 +45,15 @@ pub fn synthetic_credential(provider: &str) -> Uuid {
         "anthropic" => Uuid::from_u128(0xa0),
         "openai" => Uuid::from_u128(0xb0),
         "deepseek" => Uuid::from_u128(0xd0),
+        "typesafe" => Uuid::from_u128(0xe0),
         other => panic!("알 수 없는 Provider {other}"),
     }
 }
 
-/// 세 Provider의 시험 고정 Provider 키를 (없으면) 만들고 이 주체에게 인가한다.
+/// 모든 Provider의 시험 고정 Provider 키를 (없으면) 만들고 이 주체에게 인가한다.
 #[allow(dead_code)]
 pub async fn allow(pool: &PgPool, principal: Uuid) {
-    for provider in ["anthropic", "openai", "deepseek"] {
+    for provider in ["anthropic", "openai", "deepseek", "typesafe"] {
         let id = synthetic_credential(provider);
         sqlx::query("INSERT INTO gw_provider_credentials(id,provider,state,kek_id,nonce,ciphertext,fingerprint,hint,verified_at,created_by,label) VALUES($1,$2,'active',decode(repeat('00',8),'hex'),decode(repeat('00',12),'hex'),decode(repeat('00',36),'hex'),decode(repeat('5a',32),'hex'),'test',clock_timestamp(),$3,'synthetic') ON CONFLICT(id) DO NOTHING")
             .bind(id).bind(provider).bind(principal).execute(pool).await.unwrap();

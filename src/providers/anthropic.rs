@@ -4,17 +4,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApiError {
-    InvalidRequest,
-    UnsupportedOption,
-    UnsupportedModel,
-}
-pub struct RequestMetadata {
-    pub model: String,
-    pub output_limit: Option<u64>,
-    pub stream: bool,
-}
+pub use super::port::{ApiError, RequestMetadata};
 struct Validation<'a> {
     profile: &'a ModelProfile,
     api: ApiKind,
@@ -909,156 +899,217 @@ mod tests {
     }
 }
 
-use crate::ledger::finance::{FinalObservation, FinalOutcome, FinalUsage, SendPermit};
+use crate::ledger::finance::FinalUsage;
 use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderValue, StatusCode, header},
 };
 
+use super::port::{self, Api, BoxFuture, ErrorFormat, Reading};
 pub use super::transport::{
     NativeClient as AnthropicClient, SendOptions, UpstreamError, UpstreamResponse,
 };
-pub(super) use super::transport::{classify_transport, response_headers};
-impl AnthropicClient {
-    pub async fn send(
-        &self,
-        permit: SendPermit,
-        body: impl Into<reqwest::Body>,
-        options: SendOptions<'_>,
-    ) -> Result<UpstreamResponse, UpstreamError> {
-        let response = self.begin_send(permit, body, options).await?;
-        self.read_response(response, options).await
+use crate::config::ProviderId;
+use crate::http::json_content_type;
+
+/// Anthropic 어댑터.
+pub struct Anthropic;
+pub static PROVIDER: Anthropic = Anthropic;
+/// Anthropic API 하나. Messages와 토큰 세기(count_tokens)가 있다.
+pub struct AnthropicApi(ApiKind);
+static MESSAGES: AnthropicApi = AnthropicApi(ApiKind::Messages);
+static COUNT_TOKENS: AnthropicApi = AnthropicApi(ApiKind::CountTokens);
+static APIS: [&dyn Api; 2] = [&MESSAGES, &COUNT_TOKENS];
+impl port::Provider for Anthropic {
+    fn id(&self) -> ProviderId {
+        ProviderId::Anthropic
     }
-    pub(super) async fn read_response(
-        &self,
-        response: reqwest::Response,
-        options: SendOptions<'_>,
-    ) -> Result<UpstreamResponse, UpstreamError> {
-        let status = response.status();
-        super::transport::keep_error_status(
-            status,
-            self.read_response_body(response, options).await,
-        )
+    fn origin(&self) -> &'static str {
+        "https://api.anthropic.com"
     }
-    async fn read_response_body(
-        &self,
-        mut response: reqwest::Response,
-        options: SendOptions<'_>,
-    ) -> Result<UpstreamResponse, UpstreamError> {
-        if matches!(
-            options.api,
-            ApiKind::Responses | ApiKind::OpenaiChat | ApiKind::DeepseekChat
-        ) {
-            return super::openai::read_response(response, options).await;
-        }
-        let api = options.api;
-        let profile = options.profile;
-        let status = response.status();
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(UpstreamError::Auth);
-        }
-        if status.is_redirection() {
-            return Err(UpstreamError::Redirect);
-        }
-        if response
-            .headers()
-            .get_all(header::CONTENT_ENCODING)
-            .iter()
-            .any(|v| v.as_bytes() != b"identity")
+    fn apis(&self) -> &'static [&'static dyn Api] {
+        &APIS
+    }
+    fn auth_header(&self, secret: &str) -> Option<(header::HeaderName, HeaderValue)> {
+        Some((
+            header::HeaderName::from_static("x-api-key"),
+            HeaderValue::from_str(secret).ok()?,
+        ))
+    }
+    fn accepts_key(&self, secret: &str) -> bool {
+        secret.starts_with("sk-ant-")
+    }
+    fn verify_path(&self) -> &'static str {
+        "v1/models?limit=1"
+    }
+    fn fixed_headers(&self) -> &'static [(&'static str, &'static str)] {
+        &[("anthropic-version", "2023-06-01")]
+    }
+    fn request_id_headers(&self) -> &'static [&'static str] {
+        &["request-id", "x-request-id"]
+    }
+    fn response_headers(&self) -> &'static [(&'static str, port::HeaderRule)] {
+        use port::HeaderRule::{Id, Number};
+        &[
+            ("request-id", Id),
+            ("x-request-id", Id),
+            ("anthropic-ratelimit-requests-limit", Number),
+            ("anthropic-ratelimit-requests-remaining", Number),
+            ("anthropic-ratelimit-input-tokens-limit", Number),
+            ("anthropic-ratelimit-input-tokens-remaining", Number),
+            ("anthropic-ratelimit-output-tokens-limit", Number),
+            ("anthropic-ratelimit-output-tokens-remaining", Number),
+        ]
+    }
+    fn cache_write_rate(&self) -> Option<&'static str> {
+        Some("cache_write_5m")
+    }
+    fn check_profile(&self, profile: &ModelProfile) -> Result<(), crate::config::StartupError> {
+        if profile.features.contains(&NativeFeature::Cache)
+            && profile.billing_class == crate::config::BillingClass::Chargeable
+            && (!profile.rates.contains_key("cache_read")
+                || !(profile.rates.contains_key("cache_write")
+                    ^ profile.rates.contains_key("cache_write_5m"))
+                || profile.rates.contains_key("cache_write_1h"))
         {
-            return Err(UpstreamError::Encoding);
+            return Err(crate::config::StartupError::InvalidPrice);
         }
-        if !json_content_type(response.headers()) {
-            return Err(UpstreamError::Protocol);
-        }
-        let limit = if status.is_success() {
-            if api == ApiKind::CountTokens {
-                profile.max_response_bytes.min(256 * 1024)
-            } else {
-                profile.max_response_bytes.min(16 * 1024 * 1024)
-            }
-        } else {
-            64 * 1024
+        Ok(())
+    }
+    fn models_dev_name(&self) -> Option<&'static str> {
+        Some("anthropic")
+    }
+    /// 무료인 count_tokens로 센다. 받은 내용을 사용자 메시지 하나로 세고, 한 글자짜리 기준 메시지의 수를
+    /// 빼서 내용의 토큰 수를 낸다.
+    fn count_output<'a>(
+        &'a self,
+        http: &'a dyn port::SideRequest,
+        model: &'a str,
+        text: &'a str,
+    ) -> Option<BoxFuture<'a, Result<u64, UpstreamError>>> {
+        let one = move |content: &'a str| async move {
+            let body =
+                serde_json::json!({"model":model,"messages":[{"role":"user","content":content}]});
+            let bytes = http
+                .post_json("v1/messages/count_tokens", body.to_string())
+                .await?;
+            serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| v["input_tokens"].as_u64())
+                .ok_or(UpstreamError::Protocol)
         };
-        if response.content_length().is_some_and(|n| n > limit as u64) {
-            return Err(UpstreamError::TooLarge);
-        }
-        let mut bytes = crate::runtime::BoundedBuffer::new(limit);
-        while let Some(chunk) = response.chunk().await.map_err(classify_transport)? {
-            bytes.extend(&chunk).map_err(|_| UpstreamError::TooLarge)?;
-        }
-        let bytes = bytes.freeze();
-        let mut headers = response_headers(response.headers());
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert("x-should-retry", HeaderValue::from_static("false"));
-        let provider_request_id = headers
-            .get("request-id")
-            .or_else(|| headers.get("x-request-id"))
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let (mut usage, counted) = if status == StatusCode::OK {
-            parse_response(&bytes, api).await?
-        } else {
-            validate_native_error(&bytes).await?;
-            (None, None)
-        };
-        if api == ApiKind::CountTokens
-            && profile.count_billing.as_deref() == Some("counted_input_tokens")
-        {
-            usage = counted.map(|n| FinalUsage {
-                actual_model: profile.model.clone(),
-                input_tokens: n,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: None,
-            });
-        }
-        let observation = FinalObservation {
-            outcome: if status == StatusCode::OK {
-                FinalOutcome::Completed
-            } else {
-                FinalOutcome::Failed
-            },
-            usage,
-            counted_input_tokens: counted,
-            reason: if status == StatusCode::OK {
-                "completed"
-            } else {
-                "provider_error"
-            },
-            http_status: Some(status.as_u16()),
-            provider_request_id,
-        };
-        Ok(UpstreamResponse {
-            status,
-            headers,
-            body: bytes,
-            observation,
-        })
+        Some(Box::pin(async move {
+            let (base, full) = tokio::join!(one("."), one(text));
+            Ok(full?.saturating_sub(base?).saturating_add(1))
+        }))
     }
 }
-pub fn json_content_type(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
-    let Some(v) = values.next().and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
+impl Api for AnthropicApi {
+    fn kind(&self) -> ApiKind {
+        self.0
     }
-    let mut parts = v.split(';');
-    if !parts
-        .next()
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"))
-    {
-        return false;
+    fn routes(&self) -> &'static [&'static str] {
+        if self.0 == ApiKind::CountTokens {
+            &[
+                "/anthropic/v1/messages/count_tokens",
+                "/v1/messages/count_tokens",
+            ]
+        } else {
+            &["/anthropic/v1/messages", "/v1/messages"]
+        }
     }
-    let parameters: Vec<_> = parts.collect();
-    parameters.is_empty()
-        || (parameters.len() == 1 && parameters[0].trim().eq_ignore_ascii_case("charset=utf-8"))
+    fn upstream_path(&self) -> &'static str {
+        if self.0 == ApiKind::CountTokens {
+            "v1/messages/count_tokens"
+        } else {
+            "v1/messages"
+        }
+    }
+    fn error_format(&self) -> ErrorFormat {
+        ErrorFormat::Anthropic
+    }
+    /// Anthropic SDK의 beta client는 `?beta=true`를 붙인다. 이 표식만 받는다. beta 기능은 승인된
+    /// `anthropic-beta` 헤더로만 정해진다.
+    fn query_allowed(&self, query: &str) -> bool {
+        query == "beta=true"
+    }
+    fn validate<'a>(
+        &'a self,
+        body: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<RequestMetadata, ApiError>> {
+        Box::pin(validate(body, self.0, profile))
+    }
+    fn approved_headers(
+        &self,
+        incoming: &HeaderMap,
+        profile: &ModelProfile,
+    ) -> Result<HeaderMap, ApiError> {
+        approved_headers(incoming, profile)
+    }
+    fn forwarded_headers(&self) -> &'static [&'static str] {
+        &["anthropic-version", "anthropic-beta"]
+    }
+    fn response_limit(&self, profile: &ModelProfile) -> usize {
+        if self.0 == ApiKind::CountTokens {
+            profile.max_response_bytes.min(256 * 1024)
+        } else {
+            profile.max_response_bytes.min(16 * 1024 * 1024)
+        }
+    }
+    fn read<'a>(
+        &'a self,
+        status: StatusCode,
+        body: &'a [u8],
+        _request: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<Reading, UpstreamError>> {
+        Box::pin(async move {
+            let (mut usage, counted) = if status == StatusCode::OK {
+                parse_response(body, self.0).await?
+            } else {
+                validate_native_error(body).await?;
+                (None, None)
+            };
+            if self.0 == ApiKind::CountTokens
+                && profile.count_billing.as_deref() == Some("counted_input_tokens")
+            {
+                usage = counted.map(|n| FinalUsage {
+                    actual_model: profile.model.clone(),
+                    input_tokens: n,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: None,
+                });
+            }
+            Ok(Reading {
+                usage,
+                counted_input_tokens: counted,
+                failed: false,
+            })
+        })
+    }
+    fn stream(&self, _profile: &ModelProfile) -> Option<Box<dyn port::StreamReader>> {
+        (self.0 == ApiKind::Messages)
+            .then(|| Box::new(super::anthropic_stream::AnthropicReader::default()) as _)
+    }
+    fn settles_cutoff(&self) -> bool {
+        self.0 == ApiKind::Messages
+    }
+    fn may_be_free(&self) -> bool {
+        self.0 == ApiKind::CountTokens
+    }
+    fn token_rule(&self, profile: &ModelProfile) -> &'static str {
+        if profile.count_billing.as_deref() == Some("counted_input_tokens") {
+            "anthropic_count_input_v1"
+        } else {
+            "anthropic_input_excludes_cache_output_includes_thinking_v1"
+        }
+    }
+    fn catalog(&self) -> bool {
+        self.0 == ApiKind::Messages
+    }
 }
 pub fn approved_headers(
     headers: &HeaderMap,

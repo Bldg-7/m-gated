@@ -1,5 +1,5 @@
-//! Provider 간에 공유하는 고정 목적지·재시도 없는 단일 송신 경계. usage는 API별 adapter가 소유한다.
-use super::anthropic::ApiError;
+//! Provider 간에 공유하는 고정 목적지·재시도 없는 단일 송신 경계. 응답 해석은 어댑터([`super::port`])가 한다.
+use super::port::{self, ApiError};
 use crate::{
     config::{ApiKind, ModelProfile, ProviderConfig, ProviderId},
     ledger::finance::{FinalObservation, FinalUsage, SendPermit},
@@ -196,15 +196,25 @@ pub struct UpstreamResponse {
     pub body: Bytes,
     pub observation: FinalObservation,
 }
-/// stream/nonstream 공통: 중복·비숫자·금지 헤더는 원본에 있어도 전달하지 않는다.
-pub(super) fn response_headers(source: &HeaderMap) -> HeaderMap {
+/// stream/nonstream 공통: Provider가 정한 헤더와 `retry-after`만 넘긴다. 중복이거나 규칙에 맞지 않는 값은
+/// 원본에 있어도 넘기지 않는다.
+pub(super) fn response_headers(source: &HeaderMap, provider: ProviderId) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for name in ["request-id", "x-request-id"] {
-        if let Some(v) = single_header(source, name)
-            && !v.as_bytes().is_empty()
-            && v.as_bytes().len() <= 256
-            && v.to_str().is_ok_and(|s| !s.chars().any(char::is_control))
-        {
+    for (name, rule) in port::provider(provider).response_headers() {
+        let Some(v) = single_header(source, name) else {
+            continue;
+        };
+        let valid = match rule {
+            port::HeaderRule::Id => {
+                !v.as_bytes().is_empty()
+                    && v.as_bytes().len() <= 256
+                    && v.to_str().is_ok_and(|s| !s.chars().any(char::is_control))
+            }
+            port::HeaderRule::Number => v.to_str().ok().is_some_and(|v| {
+                !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) && v.parse::<u64>().is_ok()
+            }),
+        };
+        if valid && let Ok(name) = header::HeaderName::from_bytes(name.as_bytes()) {
             headers.insert(name, v.clone());
         }
     }
@@ -221,28 +231,6 @@ pub(super) fn response_headers(source: &HeaderMap) -> HeaderMap {
     {
         headers.insert(header::RETRY_AFTER, v.clone());
     }
-    for name in [
-        "anthropic-ratelimit-requests-limit",
-        "anthropic-ratelimit-requests-remaining",
-        "anthropic-ratelimit-input-tokens-limit",
-        "anthropic-ratelimit-input-tokens-remaining",
-        "anthropic-ratelimit-output-tokens-limit",
-        "anthropic-ratelimit-output-tokens-remaining",
-    ] {
-        if let Some(v) = single_header(source, name)
-            && v.to_str()
-                .ok()
-                .and_then(|v| {
-                    v.bytes()
-                        .all(|b| b.is_ascii_digit())
-                        .then(|| v.parse::<u64>().ok())
-                        .flatten()
-                })
-                .is_some()
-        {
-            headers.insert(name, v.clone());
-        }
-    }
     headers
 }
 fn single_header<'a>(source: &'a HeaderMap, name: &str) -> Option<&'a HeaderValue> {
@@ -258,7 +246,7 @@ impl NativeClient {
         shared: Option<&Self>,
         cache: Arc<crate::credentials::CredentialCache>,
     ) -> Result<Self, ApiError> {
-        if config.base_url.as_str() != format!("{}/", config.provider.origin()) {
+        if config.base_url.as_str() != format!("{}/", port::provider(config.provider).origin()) {
             return Err(ApiError::InvalidRequest);
         }
         if let Some(shared) = shared {
@@ -318,67 +306,48 @@ impl NativeClient {
             KeySource::Store(_) => None,
         }
     }
-    fn authorize(&self, request: reqwest::RequestBuilder, secret: &str) -> reqwest::RequestBuilder {
-        if matches!(self.provider, ProviderId::Openai | ProviderId::Deepseek) {
-            request.bearer_auth(secret)
-        } else {
-            request.header("x-api-key", secret)
-        }
+    /// 키를 Provider의 인증 헤더로 붙인다. 헤더 값으로 쓸 수 없는 키면 None이다.
+    fn authorize(
+        &self,
+        request: reqwest::RequestBuilder,
+        secret: &str,
+    ) -> Option<reqwest::RequestBuilder> {
+        let (name, mut value) = port::provider(self.provider).auth_header(secret)?;
+        value.set_sensitive(true);
+        Some(request.header(name, value))
     }
-    /// 끊긴 Anthropic 스트림에서 받은 출력 내용의 토큰 수를 센다(결정 0005의 `received` 규칙).
-    /// 무료인 count_tokens를 쓰고, 사용자 요청이 아니므로 장부의 송신 권한(permit) 없이 보낸다.
-    /// 받은 내용을 사용자 메시지 하나로 세고, 한 글자짜리 기준 메시지의 수를 빼서 내용의 토큰 수를 낸다.
-    /// 재시도하지 않는다. 실패하면 호출한 쪽이 `max_tokens` 규칙으로 정산한다.
+    /// 키 확인과 내용 세기 요청에 붙이는 Provider의 고정 헤더.
+    fn fixed_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in port::provider(self.provider).fixed_headers() {
+            request = request.header(*name, *value);
+        }
+        request
+    }
+    /// 이 client의 Provider가 가진 API. 없으면 보내지 않는다.
+    pub(super) fn api(&self, kind: ApiKind) -> Result<&'static dyn port::Api, UpstreamError> {
+        port::api(self.provider, kind).ok_or(UpstreamError::Protocol)
+    }
+    /// 끊긴 스트림에서 받은 출력 내용의 토큰 수를 센다(결정 0005의 `received` 규칙).
+    /// 세는 방법은 Provider 어댑터가 정하고, 송신은 [`SideClient`]가 한다. 사용자 요청이 아니므로
+    /// 장부의 송신 권한(permit) 없이 보낸다. 재시도하지 않는다. 실패하면 호출한 쪽이 `max_tokens`
+    /// 규칙으로 정산한다.
     pub async fn count_received(
         &self,
         model: &str,
         text: &str,
         deadline: tokio::time::Instant,
     ) -> Result<u64, UpstreamError> {
-        if self.provider != ProviderId::Anthropic {
+        let side = SideClient {
+            client: self,
+            deadline,
+        };
+        let Some(count) = port::provider(self.provider).count_output(&side, model, text) else {
             return Err(UpstreamError::Protocol);
-        }
+        };
         if text.is_empty() {
             return Ok(0);
         }
-        let secret = self.secret().ok_or(UpstreamError::Credential)?;
-        let url = self
-            .base
-            .join("v1/messages/count_tokens")
-            .map_err(|_| UpstreamError::Protocol)?;
-        let one = |content: &str| {
-            let body =
-                serde_json::json!({"model":model,"messages":[{"role":"user","content":content}]});
-            let request = self
-                .authorize(self.client.post(url.clone()), secret)
-                .header("anthropic-version", "2023-06-01")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(body.to_string());
-            async move {
-                let response = tokio::time::timeout_at(deadline, request.send())
-                    .await
-                    .map_err(|_| UpstreamError::Timeout)?
-                    .map_err(classify_transport)?;
-                if response.status() != StatusCode::OK
-                    || response.content_length().is_some_and(|n| n > 4096)
-                {
-                    return Err(UpstreamError::Protocol);
-                }
-                let bytes = tokio::time::timeout_at(deadline, response.bytes())
-                    .await
-                    .map_err(|_| UpstreamError::Timeout)?
-                    .map_err(classify_transport)?;
-                if bytes.len() > 4096 {
-                    return Err(UpstreamError::Protocol);
-                }
-                serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .ok()
-                    .and_then(|v| v["input_tokens"].as_u64())
-                    .ok_or(UpstreamError::Protocol)
-            }
-        };
-        let (base, full) = tokio::join!(one("."), one(text));
-        Ok(full?.saturating_sub(base?).saturating_add(1))
+        count.await
     }
     /// Anthropic Admin API에 GET을 한 번 보낸다(토큰 대조, 결정 0005). Provider 키가 아니라 Admin API 키를 쓴다.
     /// 재시도하지 않고, 응답은 `limit` 바이트까지만 읽는다. 401·403은 [`AdminError::Rejected`]다.
@@ -426,16 +395,12 @@ impl NativeClient {
     }
     /// 등록 직전 후보 키를 과금 없는 모델 목록 API로 확인한다. 응답 본문은 읽지 않는다.
     pub async fn verify_credential(&self, secret: &str) -> Result<(), VerifyError> {
-        let path = match self.provider {
-            ProviderId::Anthropic => "v1/models?limit=1",
-            ProviderId::Openai => "v1/models",
-            ProviderId::Deepseek => "models",
-        };
+        let path = port::provider(self.provider).verify_path();
         let url = self.base.join(path).map_err(|_| VerifyError::Unavailable)?;
-        let mut request = self.authorize(self.client.get(url), secret);
-        if self.provider == ProviderId::Anthropic {
-            request = request.header("anthropic-version", "2023-06-01");
-        }
+        let request = self
+            .authorize(self.client.get(url), secret)
+            .ok_or(VerifyError::Unavailable)?;
+        let request = self.fixed_headers(request);
         let response = tokio::time::timeout(Duration::from_secs(10), request.send())
             .await
             .map_err(|_| VerifyError::Unavailable)?
@@ -447,30 +412,6 @@ impl NativeClient {
         }
     }
 
-    pub fn new(
-        config: &ProviderConfig,
-        cache: Arc<crate::credentials::CredentialCache>,
-    ) -> Result<Self, ApiError> {
-        Self::new_with_ca(config, None, cache)
-    }
-    pub(crate) fn new_with_ca(
-        config: &ProviderConfig,
-        ca: Option<&[u8]>,
-        cache: Arc<crate::credentials::CredentialCache>,
-    ) -> Result<Self, ApiError> {
-        if config.provider != ProviderId::Anthropic
-            || config.base_url.as_str() != "https://api.anthropic.com/"
-        {
-            return Err(ApiError::InvalidRequest);
-        }
-        Self::build(
-            config.base_url.clone(),
-            KeySource::Store(cache),
-            true,
-            ca,
-            ProviderId::Anthropic,
-        )
-    }
     /// 테스트 조립만 사용하는 별도 loopback 주소. 제품 설정 로더는 이 주소를 수용하지 않는다.
     pub fn loopback_for_test(base: Url, key: String) -> Result<Self, ApiError> {
         if base.scheme() != "http"
@@ -546,18 +487,14 @@ impl NativeClient {
             deadline,
             runtime,
         } = options;
-        let path = match (self.provider, api) {
-            (ProviderId::Anthropic, ApiKind::Messages) => "v1/messages",
-            (ProviderId::Anthropic, ApiKind::CountTokens) => "v1/messages/count_tokens",
-            (ProviderId::Openai, ApiKind::Responses) => "v1/responses",
-            (ProviderId::Openai, ApiKind::OpenaiChat) => "v1/chat/completions",
-            (ProviderId::Openai, ApiKind::Embeddings) => "v1/embeddings",
-            (ProviderId::Deepseek, ApiKind::DeepseekChat) => "chat/completions",
-            _ => return Err(UpstreamError::Protocol),
-        };
+        let api = self.api(api)?;
         let mut outbound = self
             .client
-            .post(self.base.join(path).map_err(|_| UpstreamError::Protocol)?)
+            .post(
+                self.base
+                    .join(api.upstream_path())
+                    .map_err(|_| UpstreamError::Protocol)?,
+            )
             .header(
                 header::CONTENT_TYPE,
                 headers
@@ -570,13 +507,12 @@ impl NativeClient {
         let Some(secret) = self.secret() else {
             return Err(UpstreamError::Credential);
         };
-        outbound = self.authorize(outbound, secret);
-        for name in ["anthropic-version", "anthropic-beta"]
-            .into_iter()
-            .filter(|_| self.provider == ProviderId::Anthropic)
-        {
-            if let Some(v) = headers.get(name) {
-                outbound = outbound.header(name, v);
+        outbound = self
+            .authorize(outbound, secret)
+            .ok_or(UpstreamError::Credential)?;
+        for name in api.forwarded_headers() {
+            if let Some(v) = headers.get(*name) {
+                outbound = outbound.header(*name, v);
             }
         }
         // 바깥 timeout의 poll 순서에 기대지 않고 실제 단일 send 바로 직전에 재확인한다.
@@ -611,23 +547,15 @@ impl NativeClient {
     }
 }
 impl NativeClient {
-    pub fn openai(
-        config: &ProviderConfig,
-        ca: Option<&[u8]>,
-        cache: Arc<crate::credentials::CredentialCache>,
+    /// 테스트 조립 전용: loopback 주소에 고정 키를 쓰는 Provider client.
+    pub fn provider_loopback_for_test(
+        base: Url,
+        provider: ProviderId,
+        key: String,
     ) -> Result<Self, ApiError> {
-        if config.provider != ProviderId::Openai
-            || config.base_url.as_str() != "https://api.openai.com/"
-        {
-            return Err(ApiError::InvalidRequest);
-        }
-        Self::build(
-            config.base_url.clone(),
-            KeySource::Store(cache),
-            true,
-            ca,
-            ProviderId::Openai,
-        )
+        let mut client = Self::loopback_for_test(base, key)?;
+        client.provider = provider;
+        Ok(client)
     }
     pub fn deepseek_loopback_for_test(base: Url, key: String) -> Result<Self, ApiError> {
         let mut client = Self::loopback_for_test(base, key)?;
@@ -638,6 +566,49 @@ impl NativeClient {
         let mut client = Self::loopback_for_test(base, key)?;
         client.provider = ProviderId::Openai;
         Ok(client)
+    }
+}
+/// 어댑터가 쓰는 과금 없는 보조 요청([`port::SideRequest`]). 요청에 고정한 키와 Provider의 고정 헤더를 쓰고,
+/// 응답은 4 KiB까지만 읽는다.
+struct SideClient<'c> {
+    client: &'c NativeClient,
+    deadline: tokio::time::Instant,
+}
+impl port::SideRequest for SideClient<'_> {
+    fn post_json<'a>(
+        &'a self,
+        path: &'a str,
+        body: String,
+    ) -> port::BoxFuture<'a, Result<Vec<u8>, UpstreamError>> {
+        Box::pin(async move {
+            let c = self.client;
+            let secret = c.secret().ok_or(UpstreamError::Credential)?;
+            let url = c.base.join(path).map_err(|_| UpstreamError::Protocol)?;
+            let request = c
+                .authorize(c.client.post(url), secret)
+                .ok_or(UpstreamError::Credential)?;
+            let request = c
+                .fixed_headers(request)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body);
+            let response = tokio::time::timeout_at(self.deadline, request.send())
+                .await
+                .map_err(|_| UpstreamError::Timeout)?
+                .map_err(classify_transport)?;
+            if response.status() != StatusCode::OK
+                || response.content_length().is_some_and(|n| n > 4096)
+            {
+                return Err(UpstreamError::Protocol);
+            }
+            let bytes = tokio::time::timeout_at(self.deadline, response.bytes())
+                .await
+                .map_err(|_| UpstreamError::Timeout)?
+                .map_err(classify_transport)?;
+            if bytes.len() > 4096 {
+                return Err(UpstreamError::Protocol);
+            }
+            Ok(bytes.to_vec())
+        })
     }
 }
 pub(super) fn classify_transport(e: reqwest::Error) -> UpstreamError {

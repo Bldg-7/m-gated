@@ -169,25 +169,25 @@ pub enum ProviderId {
     Anthropic,
     Openai,
     Deepseek,
+    Typesafe,
 }
 impl ProviderId {
-    pub const ALL: [Self; 3] = [Self::Anthropic, Self::Openai, Self::Deepseek];
+    pub const ALL: [Self; 4] = [
+        Self::Anthropic,
+        Self::Openai,
+        Self::Deepseek,
+        Self::Typesafe,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
             Self::Openai => "openai",
             Self::Deepseek => "deepseek",
+            Self::Typesafe => "typesafe",
         }
     }
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.name() == name)
-    }
-    pub fn origin(self) -> &'static str {
-        match self {
-            Self::Anthropic => "https://api.anthropic.com",
-            Self::Openai => "https://api.openai.com",
-            Self::Deepseek => "https://api.deepseek.com",
-        }
     }
 }
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -199,6 +199,7 @@ pub enum ApiKind {
     OpenaiChat,
     Embeddings,
     DeepseekChat,
+    Systemone,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -269,18 +270,13 @@ impl CatalogTemplate {
         let mut keys = vec!["input", "output"];
         if self.features.contains(&NativeFeature::Cache) {
             keys.push("cache_read");
-            if provider == ProviderId::Anthropic {
-                keys.push("cache_write_5m");
-            }
+            keys.extend(crate::providers::port::provider(provider).cache_write_rate());
         }
         keys
     }
     fn validate(&self, provider: ProviderId, limits: &Limits) -> Result<(), StartupError> {
-        if !matches!(
-            (provider, self.api),
-            (ProviderId::Anthropic, ApiKind::Messages)
-                | (ProviderId::Openai, ApiKind::Responses | ApiKind::OpenaiChat)
-        ) || self.model_prefixes.is_empty()
+        if !crate::providers::port::api(provider, self.api).is_some_and(|api| api.catalog())
+            || self.model_prefixes.is_empty()
             || self.model_prefixes.len() > 16
             || self.model_prefixes.iter().any(|p| {
                 p.is_empty()
@@ -831,13 +827,17 @@ impl ValidatedConfig {
         self.execution_ceiling
             .validate()
             .map_err(|_| StartupError::InvalidLimits)?;
-        if self.providers.is_empty() || self.providers.len() > 3 {
+        if self.providers.is_empty() || self.providers.len() > ProviderId::ALL.len() {
             return Err(StartupError::InvalidProfile);
         }
         let mut providers = BTreeSet::new();
         for provider in &self.providers {
             secure_url(&provider.base_url)?;
-            if provider.base_url.as_str() != format!("{}/", provider.provider.origin())
+            if provider.base_url.as_str()
+                != format!(
+                    "{}/",
+                    crate::providers::port::provider(provider.provider).origin()
+                )
                 || !providers.insert(provider.provider)
                 || provider.profiles.is_empty() == provider.catalog.is_none()
                 || provider.profiles.len() > 64
@@ -930,16 +930,8 @@ impl ModelProfile {
         provider: ProviderId,
         limits: &Limits,
     ) -> Result<(), StartupError> {
-        let allowed = matches!(
-            (provider, self.api),
-            (
-                ProviderId::Anthropic,
-                ApiKind::Messages | ApiKind::CountTokens
-            ) | (
-                ProviderId::Openai,
-                ApiKind::Responses | ApiKind::OpenaiChat | ApiKind::Embeddings
-            ) | (ProviderId::Deepseek, ApiKind::DeepseekChat)
-        );
+        let api = crate::providers::port::api(provider, self.api);
+        let allowed = api.is_some();
         let bounded_text =
             |s: &str, max| !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control);
         let count = self.api == ApiKind::CountTokens;
@@ -977,7 +969,11 @@ impl ModelProfile {
         {
             return Err(StartupError::InvalidProfile);
         }
-        let output = !matches!(self.api, ApiKind::CountTokens | ApiKind::Embeddings);
+        // 출력 상한을 요청에 담는 API만 profile에 max_output_tokens가 있다.
+        let output = !matches!(
+            self.api,
+            ApiKind::CountTokens | ApiKind::Embeddings | ApiKind::Systemone
+        );
         if (self.count_billing.is_some()
             && !(count
                 && self.billing_class == BillingClass::Chargeable
@@ -1017,43 +1013,14 @@ impl ModelProfile {
             || self.max_response_bytes == 0
             || self.max_response_bytes > if count { 256 * 1024 } else { 16 * 1024 * 1024 }
             || (self.billing_class == BillingClass::GuaranteedFree
-                && !(provider == ProviderId::Anthropic && count))
+                && !api.is_some_and(|api| api.may_be_free()))
         {
             return Err(StartupError::InvalidProfile);
         }
-        if provider == ProviderId::Deepseek
-            && (self.rates.len() != 3
-                || !["input", "output", "cache_read"]
-                    .iter()
-                    .all(|k| self.rates.contains_key(*k)))
-        {
-            return Err(StartupError::InvalidPrice);
-        }
-        if provider == ProviderId::Deepseek && self.features.contains(&NativeFeature::InlinePng) {
-            return Err(StartupError::InvalidProfile);
-        }
-        if provider != ProviderId::Anthropic && !self.approved_beta.is_empty() {
-            return Err(StartupError::InvalidProfile);
-        }
-        if matches!(provider, ProviderId::Openai | ProviderId::Deepseek)
-            && self.features.contains(&NativeFeature::Cache)
-            && !self.rates.contains_key("cache_read")
-        {
-            return Err(StartupError::InvalidPrice);
-        }
+        crate::providers::port::provider(provider).check_profile(self)?;
         if !self.rates.contains_key("input")
             || (output && !self.rates.contains_key("output"))
             || self.rates.len() > 8
-        {
-            return Err(StartupError::InvalidPrice);
-        }
-        if provider == ProviderId::Anthropic
-            && self.features.contains(&NativeFeature::Cache)
-            && self.billing_class == BillingClass::Chargeable
-            && (!self.rates.contains_key("cache_read")
-                || !(self.rates.contains_key("cache_write")
-                    ^ self.rates.contains_key("cache_write_5m"))
-                || self.rates.contains_key("cache_write_1h"))
         {
             return Err(StartupError::InvalidPrice);
         }

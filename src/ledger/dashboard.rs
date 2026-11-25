@@ -87,7 +87,7 @@ impl UsageQuery {
         let provider = fields.remove("provider");
         if provider
             .as_ref()
-            .is_some_and(|s| !["anthropic", "openai", "deepseek"].contains(&s.as_str()))
+            .is_some_and(|s| crate::config::ProviderId::from_name(s).is_none())
         {
             return Err(QueryError::InvalidFilter);
         }

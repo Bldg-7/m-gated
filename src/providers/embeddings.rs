@@ -1,20 +1,15 @@
 //! Embeddings는 생성/SSE와 별개인 유한 입력·벡터·usage 계약이다.
 use super::{
     anthropic::{ApiError, RequestMetadata},
-    transport::{
-        NativeClient, SendOptions, UpstreamError, UpstreamResponse, classify_transport,
-        response_headers,
-    },
+    port::{Api, BoxFuture, ErrorFormat, Reading},
+    transport::UpstreamError,
 };
 use crate::{
-    config::ModelProfile,
+    config::{ApiKind, ModelProfile},
     json::{self, JsonError, Kind, Visitor},
-    ledger::finance::{FinalObservation, FinalOutcome, FinalUsage, SendPermit},
+    ledger::finance::FinalUsage,
 };
-use axum::{
-    body::Bytes,
-    http::{HeaderValue, StatusCode, header},
-};
+use axum::http::StatusCode;
 use base64::Engine;
 use std::collections::BTreeSet;
 fn at(p: &[String], s: &[&str]) -> bool {
@@ -300,53 +295,59 @@ pub async fn response_usage(
     };
     Ok(usage)
 }
-impl NativeClient {
-    pub async fn send_embeddings(
+/// OpenAI Embeddings API. 스트림이 없다.
+pub struct Embeddings;
+pub(super) static EMBEDDINGS: Embeddings = Embeddings;
+impl Api for Embeddings {
+    fn kind(&self) -> ApiKind {
+        ApiKind::Embeddings
+    }
+    fn routes(&self) -> &'static [&'static str] {
+        &["/openai/v1/embeddings"]
+    }
+    fn upstream_path(&self) -> &'static str {
+        "v1/embeddings"
+    }
+    fn error_format(&self) -> ErrorFormat {
+        ErrorFormat::Openai
+    }
+    fn validate<'a>(
+        &'a self,
+        body: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<RequestMetadata, ApiError>> {
+        Box::pin(validate(body, profile))
+    }
+    fn approved_headers(
         &self,
-        permit: SendPermit,
-        body: Bytes,
-        options: SendOptions<'_>,
-    ) -> Result<UpstreamResponse, UpstreamError> {
-        let shape = validate_shape(&body, options.profile)
-            .await
-            .map_err(|_| UpstreamError::Protocol)?;
-        let mut response = self.begin_send(permit, body, options).await?;
-        super::openai::check_response(&response, false)?;
-        if response.status() != StatusCode::OK {
-            return super::openai::read_response(response, options).await;
-        }
-        let limit = options.profile.max_response_bytes.min(16 * 1024 * 1024);
-        if response.content_length().is_some_and(|n| n > limit as u64) {
-            return Err(UpstreamError::TooLarge);
-        }
-        let mut body = crate::runtime::BoundedBuffer::new(limit);
-        while let Some(c) = response.chunk().await.map_err(classify_transport)? {
-            body.extend(&c).map_err(|_| UpstreamError::TooLarge)?;
-        }
-        let body = body.freeze();
-        let usage = response_usage(&body, &shape).await?;
-        let mut headers = response_headers(response.headers());
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert("x-should-retry", HeaderValue::from_static("false"));
-        let observation = FinalObservation {
-            outcome: FinalOutcome::Completed,
-            usage,
-            counted_input_tokens: None,
-            reason: "completed",
-            http_status: Some(200),
-            provider_request_id: headers
-                .get("x-request-id")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned),
-        };
-        Ok(UpstreamResponse {
-            status: StatusCode::OK,
-            headers,
-            body,
-            observation,
+        incoming: &axum::http::HeaderMap,
+        _: &ModelProfile,
+    ) -> Result<axum::http::HeaderMap, ApiError> {
+        super::openai::approved_headers(incoming)
+    }
+    /// 성공 응답은 요청이 정한 벡터 수와 차원으로 검사한다. 오류 응답은 Responses와 같이 읽는다.
+    fn read<'a>(
+        &'a self,
+        status: StatusCode,
+        body: &'a [u8],
+        request: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<Reading, UpstreamError>> {
+        Box::pin(async move {
+            if status != StatusCode::OK {
+                return super::openai::read_json(ApiKind::Embeddings, status, body, profile).await;
+            }
+            let shape = validate_shape(request, profile)
+                .await
+                .map_err(|_| UpstreamError::Protocol)?;
+            Ok(Reading {
+                usage: response_usage(body, &shape).await?,
+                counted_input_tokens: None,
+                failed: false,
+            })
         })
+    }
+    fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
+        "openai_embeddings_prompt_v1"
     }
 }

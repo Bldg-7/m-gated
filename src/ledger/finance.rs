@@ -75,26 +75,10 @@ impl PricingSnapshot {
                     usd_per_million_tokens: rate.clone(),
                 })
                 .collect(),
-            included_token_rules: if profile.count_billing.as_deref()
-                == Some("counted_input_tokens")
-            {
-                "anthropic_count_input_v1"
-            } else if provider == ProviderId::Openai
-                && matches!(profile.api, ApiKind::Responses | ApiKind::OpenaiChat)
-            {
-                if profile.api == ApiKind::Responses {
-                    "openai_responses_input_includes_cache_output_includes_reasoning_v1"
-                } else {
-                    "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1"
-                }
-            } else if provider == ProviderId::Deepseek {
-                "deepseek_prompt_includes_hit_completion_includes_reasoning_v1"
-            } else if provider == ProviderId::Openai && profile.api == ApiKind::Embeddings {
-                "openai_embeddings_prompt_v1"
-            } else {
-                "anthropic_input_excludes_cache_output_includes_thinking_v1"
-            }
-            .into(),
+            // 설정 검사를 통과한 profile에는 늘 어댑터가 있다. 없으면 장부가 snapshot을 거절한다.
+            included_token_rules: crate::providers::port::api(provider, profile.api)
+                .map_or("", |api| api.token_rule(profile))
+                .into(),
             cache_tier_rules: if profile.rates.contains_key("cache_write_5m") {
                 "anthropic_5m_v1"
             } else {
@@ -144,6 +128,15 @@ impl PricingSnapshot {
             || (self.included_token_rules
                 == "deepseek_prompt_includes_hit_completion_includes_reasoning_v1"
                 && self.provider != "deepseek")
+            || ((self.provider == "typesafe")
+                != (self.included_token_rules == "typesafe_input_output_v1"))
+            || (self.provider == "typesafe"
+                && (self.api != "systemone"
+                    || self.rates.len() != 2
+                    || !["input", "output"]
+                        .iter()
+                        .all(|category| self.rates.iter().any(|r| r.category == *category))
+                    || self.cache_tier_rules != "explicit_categories_v1"))
             || !text(&self.pricing_version, 64)
             || !text(&self.requested_model, 200)
             || self.allowed_actual_models.is_empty()
@@ -189,6 +182,7 @@ impl PricingSnapshot {
                 "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1",
                 "openai_embeddings_prompt_v1",
                 "deepseek_prompt_includes_hit_completion_includes_reasoning_v1",
+                "typesafe_input_output_v1",
             ]
             .contains(&self.included_token_rules.as_str())
             || !["explicit_categories_v1", "anthropic_5m_v1"]
@@ -249,6 +243,8 @@ impl PricingSnapshot {
             json!({"prompt_tokens":u.input_tokens,"completion_tokens":u.output_tokens,"total_tokens":u.input_tokens.checked_add(u.output_tokens),"prompt_tokens_details":{"cached_tokens":u.cache_read_tokens},"completion_tokens_details":{"reasoning_tokens":u.reasoning_tokens}})
         } else if self.provider == "openai" && self.api == "embeddings" {
             json!({"prompt_tokens":u.input_tokens,"total_tokens":u.input_tokens})
+        } else if self.included_token_rules == "typesafe_input_output_v1" {
+            json!({"input_tokens":u.input_tokens,"output_tokens":u.output_tokens})
         } else if self.input_includes_cache() {
             json!({"input_tokens":u.input_tokens,"output_tokens":u.output_tokens,"total_tokens":u.input_tokens.checked_add(u.output_tokens),"input_tokens_details":{"cached_tokens":u.cache_read_tokens},"output_tokens_details":{"reasoning_tokens":u.reasoning_tokens}})
         } else {
@@ -331,12 +327,17 @@ pub(crate) fn policy_limits(p: &PgRow) -> Result<super::policy::PolicyLimits, Le
     limits.validate()?;
     Ok(limits)
 }
+/// 권한의 기능 이름이 그 Provider가 가진 API 이름인지.
+pub(crate) fn capability_allowed(provider: &str, capability: &str) -> bool {
+    ProviderId::from_name(provider).is_some_and(|id| {
+        crate::providers::port::provider(id)
+            .apis()
+            .iter()
+            .any(|api| api_name(api.kind()) == capability)
+    })
+}
 pub fn provider_name(p: ProviderId) -> &'static str {
-    match p {
-        ProviderId::Anthropic => "anthropic",
-        ProviderId::Openai => "openai",
-        ProviderId::Deepseek => "deepseek",
-    }
+    p.name()
 }
 pub fn api_name(a: ApiKind) -> &'static str {
     match a {
@@ -345,6 +346,7 @@ pub fn api_name(a: ApiKind) -> &'static str {
         ApiKind::Responses => "responses",
         ApiKind::OpenaiChat | ApiKind::DeepseekChat => "chat_completions",
         ApiKind::Embeddings => "embeddings",
+        ApiKind::Systemone => "systemone",
     }
 }
 
@@ -681,7 +683,8 @@ impl PgLedger {
             || spec.pricing.currency != "USD"
             || spec.pricing.schema_version != 1
             || (spec.billing_class == BillingClass::GuaranteedFree
-                && !(spec.provider == ProviderId::Anthropic && spec.api == ApiKind::CountTokens))
+                && !crate::providers::port::api(spec.provider, spec.api)
+                    .is_some_and(|api| api.may_be_free()))
         {
             return Err(LedgerError::InvalidSnapshot);
         }
@@ -729,17 +732,17 @@ impl PgLedger {
             self.check_grant(policy, spec)?;
         }
         policies.sort_by_key(|p| p.get::<Uuid, _>("id"));
-        // 끊긴 요청의 정산 규칙은 받을 때 정해 실행 기록에 남긴다. 이번 단계에서는 Anthropic 스트림만 쓴다.
-        let cutoff_rule: Option<String> = if spec.provider == ProviderId::Anthropic
-            && spec.api == ApiKind::Messages
+        // 끊긴 요청의 정산 규칙은 받을 때 정해 실행 기록에 남긴다. 시작 event가 입력 토큰을 알려 주는
+        // API의 스트림만 쓴다.
+        let cutoff_rule: Option<String> = if crate::providers::port::api(spec.provider, spec.api)
+            .is_some_and(|api| api.settles_cutoff())
             && spec.stream
             && spec.billing_class != BillingClass::GuaranteedFree
         {
-            sqlx::query_scalar(
-                "SELECT cutoff_rule FROM gw_settlement_rules WHERE provider='anthropic'",
-            )
-            .fetch_optional(&mut *tx)
-            .await?
+            sqlx::query_scalar("SELECT cutoff_rule FROM gw_settlement_rules WHERE provider=$1")
+                .bind(provider_name(spec.provider))
+                .fetch_optional(&mut *tx)
+                .await?
         } else {
             None
         };
@@ -782,8 +785,8 @@ impl PgLedger {
                 || root.get::<Uuid, _>("principal_id") != human.id
                 || root.get::<Option<Uuid>, _>("key_id") != key.map(|k| k.id)
                 || !root.get::<bool, _>("unexpired")
-                || spec.provider != ProviderId::Anthropic
-                || spec.api != ApiKind::CountTokens
+                || !crate::providers::port::api(spec.provider, spec.api)
+                    .is_some_and(|api| api.may_be_free())
                 || root.get::<String, _>("requested_model") != spec.pricing.requested_model
             {
                 return Err(LedgerError::Conflict);
@@ -1655,12 +1658,8 @@ fn read_grants(value: Value) -> Result<Vec<GrantSnapshot>, LedgerError> {
             return Err(LedgerError::InvalidSnapshot);
         }
         for api in &grant.capabilities {
-            if !match grant.provider.as_str() {
-                "anthropic" => ["messages", "count_tokens"].contains(&api.as_str()),
-                "openai" => ["responses", "chat_completions", "embeddings"].contains(&api.as_str()),
-                "deepseek" => api == "chat_completions",
-                _ => false,
-            } || !tuples.insert((&grant.provider, &grant.model, api))
+            if !capability_allowed(&grant.provider, api)
+                || !tuples.insert((&grant.provider, &grant.model, api))
             {
                 return Err(LedgerError::InvalidSnapshot);
             }
@@ -1742,14 +1741,10 @@ pub(crate) fn read_execution_snapshot(value: Value) -> Result<Value, LedgerError
         || e.profile_version.len() > 64
         || e.profile_version.chars().any(char::is_control)
         || !["chargeable", "guaranteed_free"].contains(&e.billing_class.as_str())
-        || ![
-            "messages",
-            "count_tokens",
-            "responses",
-            "chat_completions",
-            "embeddings",
-        ]
-        .contains(&e.capability.as_str())
+        || !crate::providers::port::PROVIDERS
+            .iter()
+            .flat_map(|p| p.apis())
+            .any(|api| api_name(api.kind()) == e.capability)
         || (e.billing_class == "guaranteed_free" && e.capability != "count_tokens")
         || !ids(&e.auth_dependency_versions.principals)
         || !ids(&e.auth_dependency_versions.policies)

@@ -7,7 +7,7 @@ import type { KeyMetadata, Page } from '../../lib/types';
 import { Money, SearchSelect, Select, StatusBadge, TextArea, Time } from '../../ui/ui';
 import { directId, fields, PrincipalSelect, ReadState, RequestModelSelect, useAll, useCommand, useResource } from './shared';
 import type { RequestDetail, RequestSummary } from './types';
-const providers = [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['deepseek', 'DeepSeek']];
+const providers = [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['deepseek', 'DeepSeek'], ['typesafe', 'TypeSafe']];
 const phases = [['admitted', msgid('입장')], ['dispatching', msgid('전송 중')], ['finished', msgid('종료')]];
 const outcomes = [['completed', msgid('완료')], ['rejected', msgid('거절')], ['failed', msgid('실패')], ['cancelled', msgid('취소됨')]];
 const accounting = [['unknown', msgid('미정산')], ['pending', msgid('정산 대기')], ['settled', msgid('확정')]];

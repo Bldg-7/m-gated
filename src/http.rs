@@ -11,6 +11,82 @@ use uuid::Uuid;
 use crate::runtime::{AdmissionError, Lifecycle, Runtime};
 use std::sync::Arc;
 
+/// `content-type`이 하나뿐이고 `application/json`(선택 `charset=utf-8`)인지.
+pub fn json_content_type(headers: &axum::http::HeaderMap) -> bool {
+    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
+    let Some(v) = values.next().and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let mut parts = v.split(';');
+    if !parts
+        .next()
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return false;
+    }
+    let parameters: Vec<_> = parts.collect();
+    parameters.is_empty()
+        || (parameters.len() == 1 && parameters[0].trim().eq_ignore_ascii_case("charset=utf-8"))
+}
+/// 요청 본문의 `Content-Encoding`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyEncoding {
+    /// 헤더가 없거나 모두 `identity`다.
+    Identity,
+    /// `zstd` 한 겹.
+    Zstd,
+    /// 그 밖의 인코딩, 또는 두 겹 이상.
+    Other,
+}
+pub fn body_encoding(headers: &axum::http::HeaderMap) -> BodyEncoding {
+    let values: Vec<_> = headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .flat_map(|v| v.as_bytes().split(|b| *b == b','))
+        .map(|v| v.trim_ascii())
+        .filter(|v| !v.eq_ignore_ascii_case(b"identity"))
+        .collect();
+    match values.as_slice() {
+        [] => BodyEncoding::Identity,
+        [v] if v.eq_ignore_ascii_case(b"zstd") => BodyEncoding::Zstd,
+        _ => BodyEncoding::Other,
+    }
+}
+/// zstd 압축 창의 상한. 이보다 큰 창을 선언한 frame은 메모리를 잡기 전에 거절한다.
+pub const ZSTD_MAX_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+/// zstd 한 frame을 푼다. 푼 크기가 `limit`을 넘으면 413, 형식이 틀리거나 frame 뒤에 바이트가 남으면 400이다.
+pub async fn decode_zstd(
+    body: axum::body::Bytes,
+    limit: usize,
+) -> Result<axum::body::Bytes, (StatusCode, &'static str)> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let invalid = (StatusCode::BAD_REQUEST, "invalid_request");
+        let mut source: &[u8] = &body;
+        let decoder = ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
+            &mut source,
+            ZSTD_MAX_WINDOW_BYTES,
+        )
+        .map_err(|_| invalid)?;
+        let mut out = Vec::new();
+        decoder
+            .take(limit as u64 + 1)
+            .read_to_end(&mut out)
+            .map_err(|_| invalid)?;
+        if out.len() > limit {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"));
+        }
+        if !source.is_empty() {
+            return Err(invalid);
+        }
+        Ok(axum::body::Bytes::from(out))
+    })
+    .await
+    .unwrap_or(Err((StatusCode::INTERNAL_SERVER_ERROR, "internal_error")))
+}
 #[derive(Clone)]
 pub struct AppState {
     pub runtime: Arc<Runtime>,
@@ -97,13 +173,7 @@ async fn check_headers(
         Err(error) => {
             if state.native_paths.contains(&request.uri().path()) {
                 let response = crate::gateway::native_admission(Uuid::new_v4(), error);
-                return if request.uri().path().starts_with("/openai/v1/")
-                    || request.uri().path().starts_with("/deepseek/v1/")
-                {
-                    crate::gateway::openai_error(response)
-                } else {
-                    response
-                };
+                return crate::gateway::project_error(request.uri().path(), response);
             }
             return admission_error(error);
         }
@@ -285,4 +355,72 @@ pub fn authentication_error(error: crate::auth::AuthError) -> Response {
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     }
     response
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    use axum::body::Bytes;
+    use axum::http::{HeaderMap, HeaderValue};
+    fn zstd(data: &[u8]) -> Bytes {
+        Bytes::from(ruzstd::encoding::compress_to_vec(
+            data,
+            ruzstd::encoding::CompressionLevel::Fastest,
+        ))
+    }
+    #[test]
+    fn only_one_layer_of_zstd_is_recognized() {
+        let encoding = |values: &[&'static str]| {
+            let mut h = HeaderMap::new();
+            for v in values {
+                h.append(header::CONTENT_ENCODING, HeaderValue::from_static(v));
+            }
+            body_encoding(&h)
+        };
+        assert_eq!(encoding(&[]), BodyEncoding::Identity);
+        assert_eq!(encoding(&["identity"]), BodyEncoding::Identity);
+        assert_eq!(encoding(&["zstd"]), BodyEncoding::Zstd);
+        assert_eq!(encoding(&["ZSTD"]), BodyEncoding::Zstd);
+        assert_eq!(encoding(&["identity, zstd"]), BodyEncoding::Zstd);
+        for other in [
+            &["gzip"][..],
+            &["zstd, zstd"],
+            &["zstd", "zstd"],
+            &["zstd", "gzip"],
+            &["br"],
+        ] {
+            assert_eq!(encoding(other), BodyEncoding::Other, "{other:?}");
+        }
+    }
+    #[tokio::test]
+    async fn zstd_bodies_are_decoded_within_the_limit() {
+        let data =
+            br#"{"model":"jev-latest","state":"x","questions":{"q":{"type":"noul"}}}"#.repeat(100);
+        assert_eq!(decode_zstd(zstd(&data), data.len()).await.unwrap(), data);
+        // 푼 크기가 상한을 넘으면 압축된 크기와 무관하게 413이다.
+        let big = vec![b'a'; 1024 * 1024];
+        let compressed = zstd(&big);
+        assert!(compressed.len() < 64 * 1024);
+        assert_eq!(
+            decode_zstd(compressed, big.len() - 1).await.err(),
+            Some((StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"))
+        );
+    }
+    #[tokio::test]
+    async fn malformed_frames_and_trailing_bytes_are_rejected() {
+        let invalid = Some((StatusCode::BAD_REQUEST, "invalid_request"));
+        assert_eq!(
+            decode_zstd(Bytes::from_static(b"{}"), 1024).await.err(),
+            invalid
+        );
+        let mut two = zstd(b"{}").to_vec();
+        two.extend_from_slice(&zstd(b"{}"));
+        assert_eq!(decode_zstd(Bytes::from(two), 1024).await.err(), invalid);
+        let mut cut = zstd(&vec![b'a'; 4096]).to_vec();
+        cut.truncate(cut.len() - 1);
+        assert_eq!(decode_zstd(Bytes::from(cut), 8192).await.err(), invalid);
+        // 16 MiB 창을 선언한 frame은 메모리를 잡기 전에 거절한다.
+        let huge_window = Bytes::from_static(&[0x28, 0xb5, 0x2f, 0xfd, 0x00, 14 << 3]);
+        assert_eq!(decode_zstd(huge_window, 1024).await.err(), invalid);
+    }
 }

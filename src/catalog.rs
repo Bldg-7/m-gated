@@ -52,13 +52,7 @@ fn per_mtok(value: &Value) -> Option<String> {
 fn tokens(value: &Value) -> Option<u64> {
     value.as_u64().filter(|v| *v > 0 && *v <= 1_000_000_000)
 }
-fn provider_of(name: &str) -> Option<ProviderId> {
-    match name {
-        "anthropic" => Some(ProviderId::Anthropic),
-        "openai" => Some(ProviderId::Openai),
-        _ => None,
-    }
-}
+
 fn insert(parsed: &mut Parsed, provider: ProviderId, model: &str, candidate: Candidate) {
     if model.is_empty() || model.len() > 200 || model.chars().any(|c| c.is_control()) {
         return;
@@ -70,8 +64,11 @@ fn insert(parsed: &mut Parsed, provider: ProviderId, model: &str, candidate: Can
 
 pub fn parse_models_dev(body: &Value) -> Parsed {
     let mut parsed = Parsed::new();
-    for name in ["anthropic", "openai"] {
-        let provider = provider_of(name).expect("고정 이름");
+    for provider in crate::providers::port::PROVIDERS {
+        let Some(name) = provider.models_dev_name() else {
+            continue;
+        };
+        let provider = provider.id();
         let Some(models) = body[name]["models"].as_object() else {
             continue;
         };

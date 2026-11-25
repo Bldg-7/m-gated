@@ -125,14 +125,9 @@ impl CredentialCipher {
 
 /// 다른 Provider 키를 잘못 붙여 넣는 실수를 막는 형식 검사. 원문은 오류에 담지 않는다.
 pub fn valid_secret(provider: ProviderId, secret: &str) -> bool {
-    let prefix = match provider {
-        ProviderId::Anthropic => "sk-ant-",
-        ProviderId::Openai | ProviderId::Deepseek => "sk-",
-    };
     (20..=512).contains(&secret.len())
         && secret.bytes().all(|b| b.is_ascii_graphic())
-        && secret.starts_with(prefix)
-        && !(provider != ProviderId::Anthropic && secret.starts_with("sk-ant-"))
+        && crate::providers::port::provider(provider).accepts_key(secret)
 }
 /// 화면 표시용 끝 4자리.
 pub fn hint(secret: &str) -> String {

@@ -1,15 +1,10 @@
 //! Anthropic의 누계 usage와 message_stop을 다른 API의 terminal 규칙과 분리한다.
 use super::anthropic::*;
 use crate::{
-    ledger::finance::{FinalObservation, FinalOutcome, FinalUsage, SendPermit},
-    runtime::{RequestControl, request::byte_queue},
+    ledger::finance::FinalUsage,
     stream::{Event, Scalar, SseDecoder},
 };
-use axum::{
-    body::{Body, Bytes},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
-};
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 const FIELDS: &[&str] = &[
     "type",
     "message.type",
@@ -235,282 +230,82 @@ fn check_usage(
     }
     Ok(())
 }
-impl AnthropicClient {
-    pub async fn relay(
-        &self,
-        permit: SendPermit,
-        body: Bytes,
-        options: SendOptions<'_>,
-        control: Arc<RequestControl>,
-        progress: &mut super::transport::StreamProgress,
-        head: impl FnOnce(StatusCode, HeaderMap, Body),
-    ) -> Result<FinalObservation, UpstreamError> {
-        if matches!(
-            options.api,
-            crate::config::ApiKind::Responses
-                | crate::config::ApiKind::OpenaiChat
-                | crate::config::ApiKind::DeepseekChat
-        ) {
-            return super::openai::relay(self, permit, body, options, control, progress, head)
-                .await;
-        }
-        let mut response = self.begin_send(permit, body, options).await?;
-        let status = response.status();
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(UpstreamError::Auth);
-        }
-        if status.is_redirection() {
-            return Err(UpstreamError::Redirect);
-        }
-        if !status.is_success() {
-            let result = self.read_response(response, options).await?;
-            head(
-                result.status,
-                result.headers,
-                Body::from(control.retain_body(result.body)),
-            );
-            return Ok(result.observation);
-        }
-        if status != StatusCode::OK {
+/// Anthropic 스트림 읽기 어댑터. 오류 event를 받으면 읽기를 멈춘다. Anthropic은 오류 뒤에 연결을 닫는다.
+#[derive(Default)]
+pub struct AnthropicReader {
+    stream: AnthropicStream,
+    native_error: bool,
+}
+impl super::port::StreamReader for AnthropicReader {
+    fn decoder(&self) -> SseDecoder {
+        SseDecoder::with_string_shapes(FIELDS, &["error.type", "error.message"])
+            .with_content(CONTENT)
+    }
+    fn accept(&mut self, event: Event) -> Result<super::port::Step, UpstreamError> {
+        if self.native_error {
             return Err(UpstreamError::Protocol);
         }
-        if response
-            .headers()
-            .get_all(header::CONTENT_ENCODING)
-            .iter()
-            .any(|v| v.as_bytes() != b"identity")
-        {
-            return Err(UpstreamError::Encoding);
-        }
-        let content = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok());
-        if !content.is_some_and(|s| {
-            s.eq_ignore_ascii_case("text/event-stream")
-                || s.eq_ignore_ascii_case("text/event-stream; charset=utf-8")
-        }) {
-            return Err(UpstreamError::Protocol);
-        }
-        let mut headers = response_headers(response.headers());
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/event-stream"),
-        );
-        headers.insert("x-should-retry", HeaderValue::from_static("false"));
-        let provider_request_id = headers
-            .get("request-id")
-            .or_else(|| headers.get("x-request-id"))
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let (queue, body) = byte_queue(control.clone());
-        let mut delivery = Some((head, headers, body));
-        let mut parser = SseDecoder::with_string_shapes(FIELDS, &["error.type", "error.message"])
-            .with_content(CONTENT);
-        parser.reserve_retained(super::transport::StreamProgress::RETAINED_BYTES);
-        let mut reducer = AnthropicStream::default();
-        let mut native_error = false;
-        let mut success_invalidated = false;
-        let mut error_cr_boundary = None;
-        let mut pending_error_tail = None;
-        // blank CR의 terminal 후보는 같은 event의 선택 LF 상한 확인 전에는 정산 근거가 아니다.
-        let mut terminal_boundary_pending = false;
-        let result = async {
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(super::anthropic::classify_transport)?
+        let kind = event.values.get("type").and_then(Scalar::text);
+        if kind == Some("error") {
+            if event.wire_bytes > 64 * 1024 {
+                return Err(UpstreamError::StreamLimit);
+            }
+            if (!event.name.is_empty() && event.name != "error")
+                || event.values.get("error.type") != Some(&Scalar::StringShape)
+                || event.values.get("error.message") != Some(&Scalar::StringShape)
             {
-                for part in chunk.chunks(crate::stream::CHUNK_BYTES) {
-                    for &b in part {
-                        let pending = terminal_boundary_pending;
-                        if b != b'\n' {
-                            terminal_boundary_pending = false;
-                            if pending && !success_invalidated {
-                                progress.final_usage = reducer.finish().ok();
-                            }
-                        }
-                        // blank CR의 다음 LF도 같은 오류 event의 wire 상한/원본에 포함한다.
-                        if let Some(size) = error_cr_boundary.take()
-                            && b == b'\n'
-                            && size >= 64 * 1024
-                        {
-                            progress.invalidate();
-                            return Err(UpstreamError::StreamLimit);
-                        }
-                        let event = parser.byte(b);
-                        if parser.native_error_in_progress() {
-                            success_invalidated = true;
-                            progress.invalidate();
-                        }
-                        let event = event.map_err(|error| {
-                            let error = UpstreamError::from(error);
-                            if error != UpstreamError::StreamLimit || terminal_boundary_pending {
-                                progress.invalidate();
-                            }
-                            error
-                        })?;
-                        if pending && b == b'\n' && !success_invalidated {
-                            progress.final_usage = reducer.finish().ok();
-                        }
-                        terminal_boundary_pending = false;
-                        if let Some(event) = event {
-                            if native_error {
-                                progress.invalidate();
-                                return Err(UpstreamError::Protocol);
-                            }
-                            if event.values.get("type").and_then(Scalar::text) == Some("error") {
-                                // 오류의 shape/크기가 유효한지와 무관하게 옛 성공 final의 근거는 폐기한다.
-                                success_invalidated = true;
-                                progress.invalidate();
-                                if event.wire_bytes > 64 * 1024 {
-                                    return Err(UpstreamError::StreamLimit);
-                                }
-                                if (!event.name.is_empty() && event.name != "error")
-                                    || event.values.get("error.type") != Some(&Scalar::StringShape)
-                                    || event.values.get("error.message")
-                                        != Some(&Scalar::StringShape)
-                                {
-                                    return Err(UpstreamError::Protocol);
-                                }
-                                native_error = true;
-                                progress.provider_error_observed = true;
-                                if parser.boundary_after_cr() {
-                                    error_cr_boundary = Some(event.wire_bytes);
-                                }
-                            } else {
-                                let terminal = event.values.get("type").and_then(Scalar::text)
-                                    == Some("message_stop");
-                                // 받은 출력 내용은 event를 넘기기 전에 꺼내 둔다.
-                                // 상한을 넘어 버린 조각(StringShape)은 None으로 남겨 내용이 너무 컸다고 기록한다.
-                                let deltas: Vec<Option<String>> =
-                                    if event.values.get("type").and_then(Scalar::text)
-                                        == Some("content_block_delta")
-                                    {
-                                        CONTENT
-                                            .iter()
-                                            .filter_map(|key| match event.values.get(*key) {
-                                                Some(Scalar::String(s)) => Some(Some(s.clone())),
-                                                Some(Scalar::StringShape) => Some(None),
-                                                _ => None,
-                                            })
-                                            .collect()
-                                    } else {
-                                        Vec::new()
-                                    };
-                                reducer
-                                    .event(event)
-                                    .inspect_err(|_| progress.invalidate())?;
-                                progress.started = true;
-                                if progress.start.is_none() {
-                                    progress.start = reducer.start_usage();
-                                }
-                                for delta in &deltas {
-                                    match delta {
-                                        Some(text) => progress.received.push(text),
-                                        None => progress.received.drop_content(),
-                                    }
-                                }
-                                terminal_boundary_pending = terminal && parser.boundary_after_cr();
-                                if terminal
-                                    && (!terminal_boundary_pending || parser.optional_lf_fits())
-                                {
-                                    progress.final_usage = reducer.finish().ok();
-                                }
-                            }
-                        }
-                    }
-                    if let Some((head, headers, body)) = delivery.take() {
-                        head(status, headers, body);
-                    }
-                    control.observe_parser(
-                        parser.retained_peak()
-                            + super::transport::StreamProgress::RETAINED_BYTES
-                            + progress.received.len(),
-                        chunk.len(),
-                    );
-                    if error_cr_boundary.is_some() {
-                        // 마지막 blank CR을 먼저 보내면 초과한 CRLF 오류가 SDK에서 완료될 수 있다.
-                        // 최대 한 작업 chunk만 보류하고 다음 LF 검사 후 원래 순서로 보낸다.
-                        let retained = parser.retained_peak()
-                            + part.len()
-                            + super::transport::StreamProgress::RETAINED_BYTES;
-                        if retained > crate::stream::RETAINED_BYTES {
-                            return Err(UpstreamError::StreamLimit);
-                        }
-                        control.observe_parser(retained, chunk.len());
-                        pending_error_tail =
-                            Some(control.retain_body(Bytes::copy_from_slice(part)));
-                    } else {
-                        if let Some(tail) = pending_error_tail.take() {
-                            queue
-                                .send(&tail)
-                                .await
-                                .map_err(|_| UpstreamError::Cancelled)?;
-                        }
-                        queue
-                            .send(part)
-                            .await
-                            .map_err(|_| UpstreamError::Cancelled)?;
-                        if native_error {
-                            return Ok(None);
-                        }
-                    }
-                    tokio::task::yield_now().await;
-                }
+                return Err(UpstreamError::Protocol);
             }
-            parser
-                .finish()
-                .map_err(UpstreamError::from)
-                .inspect_err(|_| progress.invalidate())?;
-            if let Some(tail) = pending_error_tail.take() {
-                queue
-                    .send(&tail)
-                    .await
-                    .map_err(|_| UpstreamError::Cancelled)?;
-            }
-            if native_error {
-                Ok(None)
-            } else {
-                reducer.finish().map(Some)
-            }
+            self.native_error = true;
+            return Ok(super::port::Step {
+                error: true,
+                ..Default::default()
+            });
         }
-        .await;
-        // upstream은 마감 전에 해제하며 오류 event로 queue 포화 대기를 추가하지 않는다.
-        drop(response);
-        let (usage, limit_after_final) = match result {
-            Ok(usage) => (usage, false),
-            Err(UpstreamError::StreamLimit)
-                if !terminal_boundary_pending && !success_invalidated =>
-            {
-                (
-                    Some(reducer.finish().map_err(|_| UpstreamError::StreamLimit)?),
-                    true,
-                )
-            }
-            Err(error) => return Err(error),
+        let terminal = kind == Some("message_stop");
+        // 받은 출력 내용은 event를 넘기기 전에 꺼내 둔다.
+        // 상한을 넘어 버린 조각(StringShape)은 None으로 남겨 내용이 너무 컸다고 기록한다.
+        let content = if kind == Some("content_block_delta") {
+            CONTENT
+                .iter()
+                .filter_map(|key| match event.values.get(*key) {
+                    Some(Scalar::String(s)) => Some(Some(s.clone())),
+                    Some(Scalar::StringShape) => Some(None),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
         };
-        if !limit_after_final {
-            queue.finish();
-        }
-        Ok(FinalObservation {
-            outcome: if native_error || limit_after_final {
-                FinalOutcome::Failed
-            } else {
-                FinalOutcome::Completed
-            },
-            usage,
-            counted_input_tokens: None,
-            reason: if limit_after_final {
-                "stream_limit"
-            } else if native_error {
-                "provider_error"
-            } else {
-                "completed"
-            },
-            http_status: Some(status.as_u16()),
-            provider_request_id,
+        self.stream.event(event)?;
+        Ok(super::port::Step {
+            terminal,
+            error: false,
+            content,
         })
+    }
+    fn final_usage(&self) -> Option<FinalUsage> {
+        if self.native_error {
+            None
+        } else {
+            self.stream.finish().ok()
+        }
+    }
+    fn start(&self) -> Option<crate::ledger::finance::StartUsage> {
+        self.stream.start_usage()
+    }
+    fn provider_error(&self) -> bool {
+        self.native_error
+    }
+    fn stops_at_error(&self) -> bool {
+        true
+    }
+    fn close(&self) -> Result<(Option<FinalUsage>, bool), UpstreamError> {
+        if self.native_error {
+            Ok((None, true))
+        } else {
+            self.stream.finish().map(|usage| (Some(usage), false))
+        }
     }
 }
 

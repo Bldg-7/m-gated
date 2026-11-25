@@ -41,7 +41,7 @@ export function UsageScreen({ admin = false }: { admin?: boolean }) {
     <form onSubmit={submit} key={auth.epoch} aria-label={t('사용량 조회')} className="filters">
       <label>{t('시작 (현지 시각)')}<input type="datetime-local" name="from" defaultValue={localTime(selected.get('from'))} /></label>
       <label>{t('종료 (현지 시각)')}<input type="datetime-local" name="to" defaultValue={localTime(selected.get('to'))} /></label>
-      <div className="field"><label htmlFor="usage-provider">Provider</label><Select id="usage-provider" name="provider" defaultValue={selected.get('provider') ?? ''} options={[{ value: '', label: t('전체') }, { value: 'anthropic', label: 'Anthropic' }, { value: 'openai', label: 'OpenAI' }, { value: 'deepseek', label: 'DeepSeek' }]} /></div>
+      <div className="field"><label htmlFor="usage-provider">Provider</label><Select id="usage-provider" name="provider" defaultValue={selected.get('provider') ?? ''} options={[{ value: '', label: t('전체') }, { value: 'anthropic', label: 'Anthropic' }, { value: 'openai', label: 'OpenAI' }, { value: 'deepseek', label: 'DeepSeek' }, { value: 'typesafe', label: 'TypeSafe' }]} /></div>
       {/* 요청 기록의 모델에서 고른다. 전체 사용량은 전체 기록, 내 사용량은 내 기록이 후보다. */}
       <div className="field"><label htmlFor="usage-model">{t('모델')}</label><RequestModelSelect id="usage-model" name="model" mine={!admin} defaultValue={selected.get('model') ?? ''} /></div>
       {admin && <div className="field"><label htmlFor="usage-principal">{t('사용자')}</label><PrincipalSelect id="usage-principal" name="principal_id" optional value={principalPick} onChange={setPrincipalPick} /></div>}

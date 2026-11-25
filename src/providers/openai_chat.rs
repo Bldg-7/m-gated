@@ -1,10 +1,11 @@
 //! Chat Completions 전용 입력/usage 계약. Responses·DeepSeek 종료 규칙을 승계하지 않는다.
 use super::{
     anthropic::{self, ApiError, RequestMetadata},
+    port::{self, Api, BoxFuture, ErrorFormat, Reading},
     transport::UpstreamError,
 };
 use crate::{
-    config::{ModelProfile, NativeFeature},
+    config::{ApiKind, ModelProfile, NativeFeature},
     json::{self, JsonError, Kind, Visitor},
     ledger::finance::FinalUsage,
     stream::{Event, Scalar},
@@ -740,6 +741,102 @@ impl ChatStream {
         } else {
             Err(UpstreamError::Protocol)
         }
+    }
+}
+
+/// OpenAI Chat Completions API.
+pub struct Chat;
+pub(super) static CHAT: Chat = Chat;
+impl Api for Chat {
+    fn kind(&self) -> ApiKind {
+        ApiKind::OpenaiChat
+    }
+    fn routes(&self) -> &'static [&'static str] {
+        &["/openai/v1/chat/completions"]
+    }
+    fn upstream_path(&self) -> &'static str {
+        "v1/chat/completions"
+    }
+    fn error_format(&self) -> ErrorFormat {
+        ErrorFormat::Openai
+    }
+    fn validate<'a>(
+        &'a self,
+        body: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<RequestMetadata, ApiError>> {
+        Box::pin(validate(body, profile))
+    }
+    fn approved_headers(
+        &self,
+        incoming: &axum::http::HeaderMap,
+        _: &ModelProfile,
+    ) -> Result<axum::http::HeaderMap, ApiError> {
+        super::openai::approved_headers(incoming)
+    }
+    fn read<'a>(
+        &'a self,
+        status: axum::http::StatusCode,
+        body: &'a [u8],
+        _request: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<Reading, UpstreamError>> {
+        Box::pin(super::openai::read_json(
+            ApiKind::OpenaiChat,
+            status,
+            body,
+            profile,
+        ))
+    }
+    fn stream(&self, profile: &ModelProfile) -> Option<Box<dyn port::StreamReader>> {
+        Some(Box::new(ChatReader {
+            stream: ChatStream::default(),
+            no_reasoning: profile.chat_output_limit_field.as_deref() == Some("max_tokens"),
+        }))
+    }
+    fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
+        "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1"
+    }
+    fn catalog(&self) -> bool {
+        true
+    }
+}
+/// Chat Completions 스트림 읽기 어댑터.
+pub struct ChatReader {
+    stream: ChatStream,
+    /// 출력 상한을 `max_tokens`로 받는 profile은 추론 토큰이 0일 때만 정산한다.
+    no_reasoning: bool,
+}
+impl ChatReader {
+    fn contract(&self, usage: Option<FinalUsage>) -> Option<FinalUsage> {
+        usage.filter(|u| !self.no_reasoning || u.reasoning_tokens == Some(0))
+    }
+}
+impl port::StreamReader for ChatReader {
+    fn decoder(&self) -> crate::stream::SseDecoder {
+        crate::stream::SseDecoder::chat_with_string_shapes(FIELDS, STRING_SHAPES)
+    }
+    fn accept(&mut self, event: Event) -> Result<port::Step, UpstreamError> {
+        let terminal = event.values.get("$done") == Some(&Scalar::Bool(true));
+        let error = event.values.contains_key("error");
+        self.stream.event(event)?;
+        Ok(port::Step {
+            terminal,
+            error,
+            content: Vec::new(),
+        })
+    }
+    fn final_usage(&self) -> Option<FinalUsage> {
+        self.contract(self.stream.finish().ok().flatten())
+    }
+    fn provider_error(&self) -> bool {
+        self.stream.native_error()
+    }
+    fn close(&self) -> Result<(Option<FinalUsage>, bool), UpstreamError> {
+        let failed = self.stream.native_error();
+        self.stream
+            .finish()
+            .map(|usage| (self.contract(usage), failed))
     }
 }
 

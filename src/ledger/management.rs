@@ -106,12 +106,7 @@ pub fn normalize_grants(mut grants: Vec<Grant>) -> Result<Value, ManagementError
         }
         g.capabilities.sort();
         for cap in &g.capabilities {
-            let valid = match g.provider.as_str() {
-                "anthropic" => ["messages", "count_tokens"].contains(&cap.as_str()),
-                "openai" => ["responses", "chat_completions", "embeddings"].contains(&cap.as_str()),
-                "deepseek" => cap == "chat_completions",
-                _ => false,
-            };
+            let valid = super::finance::capability_allowed(&g.provider, cap);
             if !valid || !tuples.insert((g.provider.clone(), g.model.clone(), cap.clone())) {
                 return Err(ManagementError::Invalid);
             }

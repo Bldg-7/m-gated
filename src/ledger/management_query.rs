@@ -348,7 +348,11 @@ impl PgIdentityStore {
         let status = enum_filter("status", &["active", "revoked", "expired"])?;
         let kind = enum_filter("kind", &["human", "service"])?;
         let disabled = enum_filter("disabled", &["true", "false"])?;
-        let provider = enum_filter("provider", &["anthropic", "openai", "deepseek"])?;
+        let providers: Vec<&str> = crate::config::ProviderId::ALL
+            .iter()
+            .map(|p| p.name())
+            .collect();
+        let provider = enum_filter("provider", &providers)?;
         let phase = enum_filter("phase", &["admitted", "dispatching", "finished"])?;
         let outcome = enum_filter("outcome", &["completed", "rejected", "failed", "cancelled"])?;
         let state = enum_filter("accounting_state", &["pending", "settled", "unknown"])?;

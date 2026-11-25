@@ -8,7 +8,7 @@ import { useTimeFormat } from '../../lib/time';
 import { Badge, IconButton, Modal, SearchSelect, Select, StatusBadge } from '../../ui/ui';
 import { GrantModal } from './grant';
 
-export const providerNames: Record<string, string> = { anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek' };
+export const providerNames: Record<string, string> = { anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek', typesafe: 'TypeSafe' };
 /** 상태 라벨은 StatusBadge(정상·미등록·복호화 불가)가 그리고, 여기에는 그 결과만 적는다. */
 const statusNote: Record<string, string> = { missing: msgid('활성 Provider 키가 없는 요청은 503으로 거절됩니다.'), undecryptable: msgid('CREDENTIAL_ENCRYPTION_KEY가 바뀌었습니다. 복호화할 수 없는 키마다 「키 교체」로 같은 키를 다시 넣으세요. 이름·연결·인가는 그대로 유지됩니다.') };
 /** 키 교체와 해제는 확인 창을 거친다. 키 추가는 입력 창에서 바로 보낸다. */

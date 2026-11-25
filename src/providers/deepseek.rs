@@ -1,10 +1,11 @@
 //! DeepSeek 고유 text/tools/thinking/JSON·hit/miss·마지막 일반 chunk 계약.
 use super::{
     anthropic::{ApiError, RequestMetadata},
+    port::{self, Api, BoxFuture, ErrorFormat, Reading},
     transport::UpstreamError,
 };
 use crate::{
-    config::{ApiKind, ModelProfile, NativeFeature},
+    config::{ApiKind, ModelProfile, NativeFeature, ProviderId, StartupError},
     json::{self, JsonError, Kind, Visitor},
     ledger::finance::FinalUsage,
     stream::{Event, Scalar},
@@ -609,6 +610,122 @@ impl DeepseekStream {
         } else {
             Err(UpstreamError::Protocol)
         }
+    }
+}
+
+/// DeepSeek 어댑터.
+pub struct Deepseek;
+pub static PROVIDER: Deepseek = Deepseek;
+static APIS: [&dyn Api; 1] = [&CHAT];
+impl port::Provider for Deepseek {
+    fn id(&self) -> ProviderId {
+        ProviderId::Deepseek
+    }
+    fn origin(&self) -> &'static str {
+        "https://api.deepseek.com"
+    }
+    fn apis(&self) -> &'static [&'static dyn Api] {
+        &APIS
+    }
+    fn auth_header(
+        &self,
+        secret: &str,
+    ) -> Option<(axum::http::HeaderName, axum::http::HeaderValue)> {
+        super::openai::bearer(secret)
+    }
+    fn accepts_key(&self, secret: &str) -> bool {
+        super::openai::accepts_sk_key(secret)
+    }
+    fn verify_path(&self) -> &'static str {
+        "models"
+    }
+    fn check_profile(&self, profile: &ModelProfile) -> Result<(), StartupError> {
+        if profile.rates.len() != 3
+            || !["input", "output", "cache_read"]
+                .iter()
+                .all(|k| profile.rates.contains_key(*k))
+        {
+            return Err(StartupError::InvalidPrice);
+        }
+        if profile.features.contains(&NativeFeature::InlinePng) {
+            return Err(StartupError::InvalidProfile);
+        }
+        super::openai::check_compatible_profile(profile)
+    }
+}
+/// DeepSeek Chat Completions API.
+pub struct Chat;
+static CHAT: Chat = Chat;
+impl Api for Chat {
+    fn kind(&self) -> ApiKind {
+        ApiKind::DeepseekChat
+    }
+    fn routes(&self) -> &'static [&'static str] {
+        &["/deepseek/v1/chat/completions"]
+    }
+    fn upstream_path(&self) -> &'static str {
+        "chat/completions"
+    }
+    fn error_format(&self) -> ErrorFormat {
+        ErrorFormat::Openai
+    }
+    fn validate<'a>(
+        &'a self,
+        body: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<RequestMetadata, ApiError>> {
+        Box::pin(validate(body, profile))
+    }
+    fn approved_headers(
+        &self,
+        incoming: &axum::http::HeaderMap,
+        _: &ModelProfile,
+    ) -> Result<axum::http::HeaderMap, ApiError> {
+        super::openai::approved_headers(incoming)
+    }
+    fn read<'a>(
+        &'a self,
+        status: axum::http::StatusCode,
+        body: &'a [u8],
+        _request: &'a [u8],
+        profile: &'a ModelProfile,
+    ) -> BoxFuture<'a, Result<Reading, UpstreamError>> {
+        Box::pin(super::openai::read_json(
+            ApiKind::DeepseekChat,
+            status,
+            body,
+            profile,
+        ))
+    }
+    fn stream(&self, _profile: &ModelProfile) -> Option<Box<dyn port::StreamReader>> {
+        Some(Box::<DeepseekStream>::default())
+    }
+    fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
+        "deepseek_prompt_includes_hit_completion_includes_reasoning_v1"
+    }
+}
+impl port::StreamReader for DeepseekStream {
+    fn decoder(&self) -> crate::stream::SseDecoder {
+        crate::stream::SseDecoder::chat_with_string_shapes(FIELDS, STRING_SHAPES)
+    }
+    fn accept(&mut self, event: Event) -> Result<port::Step, UpstreamError> {
+        let terminal = event.values.get("$done") == Some(&Scalar::Bool(true));
+        let error = event.values.contains_key("error");
+        self.event(event)?;
+        Ok(port::Step {
+            terminal,
+            error,
+            content: Vec::new(),
+        })
+    }
+    fn final_usage(&self) -> Option<FinalUsage> {
+        self.finish().ok().flatten()
+    }
+    fn provider_error(&self) -> bool {
+        self.native_error()
+    }
+    fn close(&self) -> Result<(Option<FinalUsage>, bool), UpstreamError> {
+        self.finish().map(|usage| (usage, self.native_error()))
     }
 }
 

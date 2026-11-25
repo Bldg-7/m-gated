@@ -1,14 +1,14 @@
 use crate::{
     auth::{AuthError, SsoAuthenticator},
-    config::{ApiKind, ModelProfile, ProviderConfig, ProviderId, ValidatedConfig},
+    config::{ModelProfile, ProviderConfig, ProviderId, ValidatedConfig},
     http,
     ledger::{
         PgLedger,
         finance::{FinalObservation, FinalOutcome, LedgerError, NoUsage, RequestSpec},
     },
     providers::{
-        anthropic::{self, ApiError},
-        transport::NativeClient,
+        port::{self, ApiError, ErrorFormat},
+        transport::{NativeClient, SendOptions, UpstreamError},
     },
     runtime::request::RequestPhase,
     runtime::{HttpAdmission, RequestLease, RouteClass, Runtime},
@@ -43,18 +43,26 @@ struct GatewayState {
     gateway: Arc<InferenceGateway>,
     runtime: Arc<Runtime>,
 }
-pub(crate) const ANTHROPIC_ROUTES: [&str; 4] = [
-    "/anthropic/v1/messages",
-    "/v1/messages",
-    "/anthropic/v1/messages/count_tokens",
-    "/v1/messages/count_tokens",
-];
-/// Anthropic SDK의 beta client는 `?beta=true`를 붙인다. 이 표식만 허용하며 upstream에는 전달하지 않는다
-/// (upstream 경로는 서버 고정, beta 기능은 승인된 anthropic-beta 헤더로만 결정된다). 그 외 query는 거부한다.
+/// 경로의 API가 허용한 query만 받는다([`port::Api::query_allowed`]). query는 upstream에 전달하지 않는다.
 fn inference_query_allowed(path: &str, query: Option<&str>) -> bool {
     match query {
         None => true,
-        Some(q) => q == "beta=true" && ANTHROPIC_ROUTES.contains(&path),
+        Some(q) => port::route(path).is_some_and(|(_, api)| api.query_allowed(q)),
+    }
+}
+/// 경로의 API가 쓰는 오류 형식. 게이트웨이 경로가 아니면 Anthropic 형식을 쓴다.
+fn error_format(path: &str) -> ErrorFormat {
+    port::route(path).map_or(ErrorFormat::Anthropic, |(_, api)| api.error_format())
+}
+/// 게이트웨이가 만든 오류를 경로의 API가 쓰는 형식으로 바꾼다.
+pub(crate) fn project_error(path: &str, response: Response) -> Response {
+    project(error_format(path), response)
+}
+fn project(format: ErrorFormat, response: Response) -> Response {
+    match format {
+        ErrorFormat::Anthropic => response,
+        ErrorFormat::Openai => openai_error(response),
+        ErrorFormat::Detail => detail_error(response),
     }
 }
 impl InferenceGateway {
@@ -107,21 +115,11 @@ impl InferenceGateway {
         &self.ledger
     }
     pub fn paths(&self) -> Vec<&'static str> {
-        let mut paths = Vec::new();
-        if self.clients.contains_key(&ProviderId::Anthropic) {
-            paths.extend(ANTHROPIC_ROUTES);
-        }
-        if self.clients.contains_key(&ProviderId::Openai) {
-            paths.extend([
-                "/openai/v1/responses",
-                "/openai/v1/chat/completions",
-                "/openai/v1/embeddings",
-            ]);
-        }
-        if self.clients.contains_key(&ProviderId::Deepseek) {
-            paths.push("/deepseek/v1/chat/completions");
-        }
-        paths
+        self.clients
+            .keys()
+            .flat_map(|id| port::provider(*id).apis())
+            .flat_map(|api| api.routes().iter().copied())
+            .collect()
     }
     pub fn routes(self: &Arc<Self>, runtime: Arc<Runtime>) -> Router {
         self.paths()
@@ -136,18 +134,12 @@ impl InferenceGateway {
     }
 }
 async fn handle(State(state): State<GatewayState>, request: Request) -> Response {
-    let responses = request.uri().path().starts_with("/openai/v1/")
-        || request.uri().path().starts_with("/deepseek/v1/");
+    let format = error_format(request.uri().path());
     let response = handle_inner(state, request).await;
-    if responses {
-        openai_error(response)
-    } else {
-        response
-    }
+    project(format, response)
 }
 async fn handle_inner(state: GatewayState, request: Request) -> Response {
-    let responses = request.uri().path().starts_with("/openai/v1/")
-        || request.uri().path().starts_with("/deepseek/v1/");
+    let format = error_format(request.uri().path());
     let id = Uuid::new_v4();
     if request.method() != Method::POST {
         let mut r = error(
@@ -265,11 +257,7 @@ async fn handle_inner(state: GatewayState, request: Request) -> Response {
                     progress.dispatch.known_not_dispatched(),
                 )
             });
-            let response = if responses {
-                openai_error(response)
-            } else {
-                response
-            };
+            let response = project(format, response);
             let _ = tx.send(owner.bind(response));
         }
     });
@@ -294,7 +282,7 @@ struct ExecutionProgress {
     /// 스트림 요청인지. 비스트림 요청은 응답 전체를 한 번에 받는다.
     streaming: bool,
     stream: crate::providers::transport::StreamProgress,
-    /// 끊긴 Anthropic 스트림의 받은 출력 내용을 셀 때 쓰는 client와 모델.
+    /// 끊긴 스트림을 정산 규칙으로 정산할 수 있는 API일 때, 받은 출력 내용을 셀 때 쓰는 client와 모델.
     counter: Option<CutoffCounter>,
 }
 /// 요청에 고정한 Provider 키를 그대로 쓴다.
@@ -355,25 +343,15 @@ async fn execute(
     if !inference_query_allowed(request.uri().path(), request.uri().query()) {
         return error(id, StatusCode::BAD_REQUEST, "invalid_request", true);
     }
-    let api = if request.uri().path() == "/deepseek/v1/chat/completions" {
-        ApiKind::DeepseekChat
-    } else if request.uri().path() == "/openai/v1/chat/completions" {
-        ApiKind::OpenaiChat
-    } else if request.uri().path() == "/openai/v1/embeddings" {
-        ApiKind::Embeddings
-    } else if request.uri().path().starts_with("/openai/v1/") {
-        ApiKind::Responses
-    } else if request.uri().path().ends_with("/count_tokens") {
-        ApiKind::CountTokens
-    } else {
-        ApiKind::Messages
+    let Some((provider, adapter)) = port::route(request.uri().path()) else {
+        return error(id, StatusCode::NOT_FOUND, "invalid_request", true);
     };
-    if !anthropic::json_content_type(request.headers())
-        || request
-            .headers()
-            .get_all(header::CONTENT_ENCODING)
-            .iter()
-            .any(|v| v.as_bytes() != b"identity")
+    let provider = provider.id();
+    let api = adapter.kind();
+    let encoding = http::body_encoding(request.headers());
+    if !http::json_content_type(request.headers())
+        || encoding == http::BodyEncoding::Other
+        || (encoding == http::BodyEncoding::Zstd && !adapter.accepts_zstd())
     {
         return error(
             id,
@@ -405,6 +383,15 @@ async fn execute(
         Ok(b) => b,
         Err((status, code)) => return error(id, status, code, true),
     };
+    // 압축한 본문은 푼 크기에도 같은 상한을 쓴다. 업스트림에는 푼 본문을 보낸다.
+    let body = if encoding == http::BodyEncoding::Zstd {
+        match http::decode_zstd(body, limits.inference_body_bytes).await {
+            Ok(b) => b,
+            Err((status, code)) => return error(id, status, code, true),
+        }
+    } else {
+        body
+    };
     control.set_phase(RequestPhase::Preparing);
     let model = match request_model(&body).await {
         Ok(m) => m,
@@ -429,16 +416,6 @@ async fn execute(
     if body.len() > profile.max_body_bytes {
         return error(id, StatusCode::PAYLOAD_TOO_LARGE, "body_too_large", true);
     }
-    let provider = if api == ApiKind::DeepseekChat {
-        ProviderId::Deepseek
-    } else if matches!(
-        api,
-        ApiKind::Responses | ApiKind::OpenaiChat | ApiKind::Embeddings
-    ) {
-        ProviderId::Openai
-    } else {
-        ProviderId::Anthropic
-    };
     let Some(client) = state.gateway.clients.get(&provider) else {
         return error(id, StatusCode::BAD_REQUEST, "unsupported_model", true);
     };
@@ -470,17 +447,7 @@ async fn execute(
         );
     };
     let client = &client;
-    let validation = if api == ApiKind::DeepseekChat {
-        crate::providers::deepseek::validate(&body, profile).await
-    } else if matches!(
-        api,
-        ApiKind::Responses | ApiKind::OpenaiChat | ApiKind::Embeddings
-    ) {
-        crate::providers::openai::validate(&body, profile).await
-    } else {
-        anthropic::validate(&body, api, profile).await
-    };
-    let validated = match validation {
+    let validated = match adapter.validate(&body, profile).await {
         Ok(m) => m,
         Err(e) => {
             return error(
@@ -500,14 +467,7 @@ async fn execute(
     {
         return native_admission(id, e);
     }
-    let outbound = match if matches!(
-        api,
-        ApiKind::Responses | ApiKind::OpenaiChat | ApiKind::Embeddings | ApiKind::DeepseekChat
-    ) {
-        crate::providers::openai::approved_headers(&head.headers)
-    } else {
-        anthropic::approved_headers(&head.headers, profile)
-    } {
+    let outbound = match adapter.approved_headers(&head.headers, profile) {
         Ok(h) => h,
         Err(_) => return error(id, StatusCode::BAD_REQUEST, "unsupported_option", true),
     };
@@ -591,7 +551,7 @@ async fn execute(
     control.set_phase(RequestPhase::Relaying);
     progress.streaming = validated.stream;
     if validated.stream {
-        if api == ApiKind::Messages {
+        if adapter.settles_cutoff() {
             progress.stream.received =
                 crate::providers::transport::ReceivedOutput::with_output_limit(
                     validated.output_limit,
@@ -605,7 +565,7 @@ async fn execute(
             .relay(
                 permit,
                 body,
-                anthropic::SendOptions {
+                SendOptions {
                     api,
                     headers: &outbound,
                     profile,
@@ -654,18 +614,14 @@ async fn execute(
         );
     }
     let upstream = tokio::time::timeout_at(deadline, async {
-        let options = anthropic::SendOptions {
+        let options = SendOptions {
             api,
             headers: &outbound,
             profile,
             deadline,
             runtime: &state.runtime,
         };
-        if api == ApiKind::Embeddings {
-            client.send_embeddings(permit, body, options).await
-        } else {
-            client.send(permit, body, options).await
-        }
+        client.send(permit, body, options).await
     })
     .await;
     let (response, observation, failure) = match upstream {
@@ -675,7 +631,7 @@ async fn execute(
             (response, result.observation, None)
         }
         Err(_) => {
-            let e = crate::providers::anthropic::UpstreamError::Timeout;
+            let e = UpstreamError::Timeout;
             (
                 error(id, e.status(), e.code(), false),
                 failed_observation(e.code()),
@@ -721,17 +677,17 @@ async fn finalize_until(
 }
 /// 최종 usage 없이 끝난 요청을 어떻게 정산할지 정한다(결정 0005).
 /// - Provider가 HTTP 오류로 답했거나 첫 응답 전에 끊겼으면 0원이다.
-/// - Anthropic 스트림이 시작 event 뒤에 끊겼으면 정산 규칙을 쓴다. `received` 규칙이면 받은 내용을 센다.
-/// - 알 수 없는 응답, OpenAI·DeepSeek 스트림의 중간 끊김은 미정산이다.
+/// - 시작 event가 입력 토큰을 알려 주는 API([`port::Api::settles_cutoff`])의 스트림이 시작 event 뒤에
+///   끊겼으면 정산 규칙을 쓴다. `received` 규칙이면 받은 내용을 센다.
+/// - 알 수 없는 응답, 그 밖의 스트림의 중간 끊김은 미정산이다.
 async fn no_usage(
     state: &GatewayState,
     id: Uuid,
     progress: &ExecutionProgress,
     observation: &FinalObservation,
-    failure: Option<crate::providers::anthropic::UpstreamError>,
+    failure: Option<UpstreamError>,
     deadline: Instant,
 ) -> NoUsage {
-    use crate::providers::anthropic::UpstreamError;
     if observation.usage.is_some() {
         return NoUsage::Unknown;
     }
@@ -769,7 +725,7 @@ async fn no_usage(
             NoUsage::NoResponse
         };
     }
-    // 첫 event 전, 또는 Anthropic 시작 event(`message_start`) 전에 끊기면 입력 토큰도 모른다.
+    // 첫 event 전, 또는 시작 event(예: Anthropic `message_start`) 전에 끊기면 입력 토큰도 모른다.
     if !progress.stream.started || (progress.counter.is_some() && progress.stream.start.is_none()) {
         return NoUsage::NoResponse;
     }
@@ -1014,11 +970,20 @@ fn stamped(mut r: Response, id: Uuid) -> Response {
     r
 }
 
-/// route 선택 후 생성한 gateway 오류만 OpenAI wire로 바꾼다. Provider native body/status는 건드리지 않는다.
-#[derive(Clone)]
-struct OpenaiErrorBody;
-pub(crate) fn openai_error(mut response: Response) -> Response {
-    if response.extensions().get::<OpenaiErrorBody>().is_some() {
+/// route 선택 후 생성한 gateway 오류만 `{"detail": ...}` wire로 바꾼다. Provider native body/status는
+/// 건드리지 않는다.
+fn detail_error(response: Response) -> Response {
+    replace_error_body(
+        response,
+        |_, code| serde_json::json!({"detail":format!("Gateway request could not be completed: gateway_{code}")}),
+    )
+}
+/// 게이트웨이가 만든 오류(`x-gateway-error-code`가 있는 응답)의 본문을 한 번만 바꾼다.
+fn replace_error_body(
+    mut response: Response,
+    body: impl FnOnce(u16, &str) -> serde_json::Value,
+) -> Response {
+    if response.extensions().get::<ProjectedErrorBody>().is_some() {
         return response;
     }
     if let Some(code) = response
@@ -1026,16 +991,8 @@ pub(crate) fn openai_error(mut response: Response) -> Response {
         .get("x-gateway-error-code")
         .and_then(|v| v.to_str().ok())
     {
-        let status = response.status().as_u16();
-        let kind = match status {
-            400 | 408 | 409 | 413 | 415 => "invalid_request_error",
-            401 => "authentication_error",
-            403 => "permission_error",
-            429 => "rate_limit_error",
-            _ => "server_error",
-        };
-        let body = serde_json::json!({"error":{"message":"Gateway request could not be completed","type":kind,"param":null,"code":format!("gateway_{code}")}});
-        response.extensions_mut().insert(OpenaiErrorBody);
+        let body = body(response.status().as_u16(), code);
+        response.extensions_mut().insert(ProjectedErrorBody);
         *response.body_mut() = Body::from(serde_json::to_vec(&body).expect("고정 오류 projection"));
         for name in [
             header::CONTENT_LENGTH,
@@ -1050,6 +1007,22 @@ pub(crate) fn openai_error(mut response: Response) -> Response {
         );
     }
     response
+}
+/// 오류 본문을 이미 바꾼 응답의 표시. 두 번 바꾸지 않는다.
+#[derive(Clone)]
+struct ProjectedErrorBody;
+/// route 선택 후 생성한 gateway 오류만 OpenAI wire로 바꾼다. Provider native body/status는 건드리지 않는다.
+pub(crate) fn openai_error(response: Response) -> Response {
+    replace_error_body(response, |status, code| {
+        let kind = match status {
+            400 | 408 | 409 | 413 | 415 => "invalid_request_error",
+            401 => "authentication_error",
+            403 => "permission_error",
+            429 => "rate_limit_error",
+            _ => "server_error",
+        };
+        serde_json::json!({"error":{"message":"Gateway request could not be completed","type":kind,"param":null,"code":format!("gateway_{code}")}})
+    })
 }
 
 pub fn auth_config_digest(config: &ValidatedConfig) -> [u8; 32] {
@@ -1069,7 +1042,11 @@ mod tests {
 
     #[test]
     fn only_the_anthropic_sdk_beta_marker_query_is_accepted() {
-        for path in ANTHROPIC_ROUTES {
+        use crate::config::ApiKind;
+        let anthropic = [ApiKind::Messages, ApiKind::CountTokens]
+            .into_iter()
+            .flat_map(|kind| port::api(ProviderId::Anthropic, kind).unwrap().routes());
+        for path in anthropic {
             assert!(inference_query_allowed(path, None));
             assert!(inference_query_allowed(path, Some("beta=true")), "{path}");
             for query in [

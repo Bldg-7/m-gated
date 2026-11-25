@@ -15,6 +15,8 @@ status. A later decision that changes an earlier one gets a new file, and the ea
 | [0004](0004-filter-bars-stay-simple.md) | Filter bars get no summary line, reset button or "not applied" marker | Accepted |
 | [0005](0005-gateway-prices-and-cut-off-requests.md) | The catalog is the gateway's own price list; cut-off requests are settled at once; reservations are removed | Implemented |
 | [0006](0006-remove-handoff.md) | Remove the handoff maintenance command | Implemented |
+| [0007](0007-providers-plug-in-through-one-port.md) | Providers plug in through one port | Implemented |
+| [0008](0008-add-typesafe-and-decompress-zstd-requests.md) | Add TypeSafe, and decompress zstd request bodies in the gateway | Implemented |
 
 ## Format
 
