@@ -222,40 +222,65 @@ async fn limits_refuse_requests_and_make_responses_malformed() {
     let body = json!({"model":"synthetic-deepseek","messages":[{"role":"user","content":"x"}],"max_tokens":100,"thinking":{"type":"disabled"}}).to_string();
     let mut headers = HeaderMap::new();
     headers.insert("content-type", HeaderValue::from_static("application/json"));
-    for limits in [
-        Limits {
-            fuel_per_call: 1,
-            ..Limits::default()
-        },
-        Limits {
-            memory_bytes: 64 * 1024,
-            ..Limits::default()
-        },
+    // (상한, 비동기 호출이 실패하는지, 동기 호출이 실패하는지)
+    for (limits, async_fails, sync_fails) in [
+        (
+            Limits {
+                async_fuel: 1,
+                ..Limits::default()
+            },
+            true,
+            false,
+        ),
+        (
+            Limits {
+                sync_fuel: 1,
+                ..Limits::default()
+            },
+            false,
+            true,
+        ),
+        (
+            Limits {
+                memory_bytes: 64 * 1024,
+                ..Limits::default()
+            },
+            true,
+            true,
+        ),
     ] {
         let provider = load(limits);
         let api = chat(provider);
         assert_eq!(
             api.validate(body.as_bytes(), &p).await.err(),
-            Some(ApiError::AdapterFailed)
-        );
-        assert_eq!(
-            api.approved_headers(&headers, &p).err(),
-            Some(ApiError::AdapterFailed)
+            async_fails.then_some(ApiError::AdapterFailed),
+            "{limits:?}"
         );
         assert_eq!(
             api.read(StatusCode::OK, completion().to_string().as_bytes(), b"", &p)
                 .await
                 .err(),
-            Some(UpstreamError::Protocol)
+            async_fails.then_some(UpstreamError::Protocol),
+            "{limits:?}"
+        );
+        assert_eq!(
+            api.approved_headers(&headers, &p).err(),
+            sync_fails.then_some(ApiError::AdapterFailed),
+            "{limits:?}"
         );
         let (steps, closed, failed) =
             run_stream(api, &p, &(wire(&chunk(true)) + "data: [DONE]\n\n"));
-        assert!(steps.iter().all(|s| s == &Err(UpstreamError::Protocol)));
-        assert_eq!(closed, Err(UpstreamError::Protocol));
+        assert_eq!(
+            steps.iter().all(|s| s == &Err(UpstreamError::Protocol)),
+            sync_fails,
+            "{limits:?}"
+        );
+        assert_eq!(closed.is_err(), sync_fails, "{limits:?}");
         assert!(!failed);
         assert_eq!(
-            provider.check_profile(&p),
-            Err(StartupError::InvalidAdapter)
+            provider.check_profile(&p).err(),
+            sync_fails.then_some(StartupError::InvalidAdapter),
+            "{limits:?}"
         );
     }
 }

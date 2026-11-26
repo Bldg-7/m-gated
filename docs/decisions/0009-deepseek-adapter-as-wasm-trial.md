@@ -61,8 +61,9 @@ and puts it behind the port. In the rest of this record, "component" means this 
      - `provider-error` says if the provider reported a failure.
      - `close` is called when the stream ends. It returns the usage to settle and whether the
        provider reported a failure, or an error if the stream ended without an end event.
-     - `final-usage` returns the same usage as `close`. The host asks for it before the stream
-       ends, for example when the client disconnects after the end event.
+     - `final-usage` returns the same usage as `close`. The host asks for it when it cannot wait
+       for `close`, for example when the client disconnects after the end event but before the
+       connection to the provider closes.
    - `SideRequest` is not in this interface. It comes later, for adapters that need it.
 4. The host runs the component with wasmtime and the component model:
    - The component may have no imports, that is, no functions that the host lends to it. A
@@ -78,13 +79,21 @@ and puts it behind the port. In the rest of this record, "component" means this 
    - In wasmtime, a store holds one copy of the component's memory and state. Each call gets its
      own store, created from an instance that was prepared once at start. A streamed request keeps
      one store until the stream ends. No state is shared between requests.
-   - Each store has a memory limit (128 MiB) and a CPU limit (fuel, 20 billion units for each
-     call or stream event). The memory limit is large enough to copy and read a 16 MiB response
-     body, the largest that a model profile may allow.
-   - `validate` and `read` are async in the port. During these calls, the component gives control
-     back to tokio after each 10 million units of fuel. The other port methods are not async:
-     `check-profile`, `approved-headers` and the stream methods. The host runs those calls to the
-     end at once, and the fuel limit bounds their time.
+   - Each store has a memory limit (128 MiB). The memory limit is large enough to copy and read a
+     16 MiB response body, the largest that a model profile may allow.
+   - Each call also has a CPU limit. wasmtime counts the instructions that the component runs, in
+     units called fuel. When a call has used its fuel, wasmtime stops it, and the call fails.
+     Fuel counts instructions, not time, so the time that a limit allows depends on the
+     instructions. The limit for a call depends on whether the call is async:
+     - `validate` and `read` are async in the port. During these calls, the component gives
+       control back to tokio after each 10 million units of fuel, so a long call does not hold a
+       tokio worker thread. Each of these calls gets 20 billion units. This is 4 times the fuel
+       that reading a 16 MiB response needs.
+     - The other port methods are not async: `check-profile`, `approved-headers`, opening a stream
+       reader, and the stream methods. The host runs each of these calls to the end at once, so it
+       holds a tokio worker thread until the call ends. Each of these calls (for a stream, each
+       call for one event) gets 10 million units. This is 100 times the fuel that these calls
+       need, and the slowest instructions use it up in about 9 ms.
    - If the component traps (stops with a fault) or reaches a limit while checking a request, the
      gateway refuses the request with `500` and the error code `adapter_failed`, and does not send
      it. This is not the client's fault, so it is not a `400`. If the component fails while
@@ -105,9 +114,11 @@ and puts it behind the port. In the rest of this record, "component" means this 
      component and adds it to a second list for the whole process. This is called installing it.
      It happens before the model profiles are checked. Many places in the gateway find a provider
      by its name, and they find the installed component before the built-in adapter.
-   - One process uses one implementation for each provider. When a component is installed for a
-     provider, a later configuration in the same process must name the same file hash for that
-     provider. A configuration with another hash, or with no component, is refused.
+   - One process uses one implementation for each provider. The gateway reads its configuration
+     once at start, but the tests load many configurations in one process. When a component is
+     installed for a provider, each later configuration in the same process must name the same
+     file hash for that provider. A configuration with another hash, or with no component, is
+     refused.
 5. The repository becomes a Cargo workspace:
    - `crates/adapter-kit` holds the code that both the host and the component need. It does not
      use tokio. In step 1 it gets the JSON request checker (`json.rs`) and the stream decoders
@@ -124,8 +135,9 @@ and puts it behind the port. In the rest of this record, "component" means this 
      - `Step`: what one stream event told the reader. It says if the event ends the stream, if
        it is a provider error, and which output text it held.
      - `Usage`: the token counts that a response reports.
-     - `ReadError`: why a response could not be read: a wrong shape, a provider error event in a
-       stream that is larger than 64 KiB, or a body larger than the response size limit. If the response was a success, the request becomes
+     - `ReadError`: why a response could not be read. There are three causes. The response has a
+       wrong shape. A provider error event in a stream is larger than 64 KiB. The body is larger
+       than the response size limit. If the response was a success, the request becomes
        `unknown`. If it was an error response, the request is settled at 0 USD (decision 0005).
      - `Profile`: the part of a model profile that an adapter sees. This is the model name, the
        provider features that the profile turns on (for example tools or thinking), the values
@@ -159,8 +171,8 @@ and puts it behind the port. In the rest of this record, "component" means this 
      imports anything, and prints the component's SHA-256. The release workflow runs it.
    - A WASI target is not used. WASI is the standard set of system functions for WASM, so a
      build for it could add imports, and rule 4 refuses a component with any import.
-6. The work goes in five steps. The full test suite runs after each step. Steps 1 to 4 are done.
-   This record stays "Accepted, not implemented" until step 5 is done.
+6. The work goes in five steps. The full test suite runs after each step. All five steps are done.
+   This record stays "Accepted, not implemented" until the user makes the decision in rule 7.
    1. Create the workspace and `adapter-kit`, and make the host use it. Behavior does not change.
    2. Move the DeepSeek logic into `adapters/deepseek`, and link it into the host directly.
       Behavior does not change.
@@ -169,6 +181,8 @@ and puts it behind the port. In the rest of this record, "component" means this 
       and the config.
    5. Run the DeepSeek Postgres tests against the component. Measure the added latency per
       request, the cost of each event call, and the growth of the image size and the build time.
+      The tests use the component when `TEST_DEEPSEEK_ADAPTER` names its file. The measurement
+      suite is `tests/wasm_adapter_cost.rs`.
 7. After step 5, the user decides whether release images use the WASM DeepSeek adapter by
    default or only in tests.
 
@@ -191,8 +205,24 @@ settlements. Anthropic also needs `SideRequest`.
 
 ## Consequences
 
-- wasmtime is a large dependency. Step 5 measures its effect on the build time and the image size.
-- The WIT package has a version. The host refuses a component whose major version differs.
+- All 35 DeepSeek Postgres tests pass with the component.
+- Step 5 measured these costs, with release builds on one Apple silicon laptop. Times are
+  medians:
+  - Each call to the component takes about 20 µs more than the built-in adapter, because each
+    call gets a new store and instance. A request check takes 24 µs instead of 1.4 µs for a small
+    request, and 19 ms instead of 15 ms for an 8 MiB request. Reading a 4 KiB response takes
+    82 µs instead of 33 µs.
+  - Opening a stream reader takes 17 µs. Each stream event takes 2.7 µs instead of 0.6 µs.
+  - Loading the component at start takes 0.13 s.
+  - At the limit of a non-async call, the component holds a tokio worker thread for at most
+    about 9 ms. An async call can use about 16 to 17 s of CPU time at its limit, but it does not hold a
+    thread.
+  - wasmtime is a large dependency. The gateway binary grows from 15.9 MB to 29.9 MB, and the
+    release image from 171.7 MB to 190.3 MB. The Rust build in the release image takes 115 s
+    instead of 67 s. Building the component from nothing takes 8 s.
+  - The binary contains wasmtime whether a configuration names a component or not.
+- The WIT package has a version. The host accepts only a component that exports version 0.1.0.
+  A change to the interface needs a new version, and the host and the components change together.
 - Steps 1 and 2 move much host code, but they do not change behavior, so the existing tests check
   them.
 - Not in this trial:

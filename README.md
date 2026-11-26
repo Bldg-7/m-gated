@@ -938,6 +938,18 @@ cargo test --locked --test postgres_contract -- --ignored
 cargo test --locked --test auth_postgres -- --ignored
 ```
 
+To run the DeepSeek Postgres suite against the WASM component instead of the built-in adapter,
+build the component and give its path in `TEST_DEEPSEEK_ADAPTER`. Each test then checks that the
+component is installed. To measure the component's costs against the built-in adapter, run the
+measurement suite in release mode. It prints times and fuel, and checks nothing.
+
+```sh
+scripts/build-adapter.sh
+TEST_DEEPSEEK_ADAPTER=$PWD/target/adapters/deepseek.wasm \
+  cargo test --locked --test deepseek_postgres -- --ignored --test-threads=1
+cargo test --release --locked --test wasm_adapter_cost -- --ignored --nocapture --test-threads=1
+```
+
 The runners in `scripts/` handle the full regression: SDK compatibility through `tests/compat`,
 the real binary through `tests/process`, and browser end-to-end tests with Playwright. They also
 need Docker, `TEST_FNM_DIR` (a directory of the fnm Node version manager with Node 22.22.2 installed) and, for browser tests,

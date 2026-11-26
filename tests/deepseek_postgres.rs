@@ -40,16 +40,41 @@ fn configuration_features(options: &str, features: &str) -> config::ValidatedCon
         "          - synthetic-text",
         "          - synthetic-text\n          - synthetic-deepseek-version",
     );
+    let adapter = std::env::var("TEST_DEEPSEEK_ADAPTER").ok();
+    if let Some(path) = &adapter {
+        yaml = yaml.replacen(
+            "    base_url: https://api.deepseek.com\n",
+            &format!(
+                "    base_url: https://api.deepseek.com\n    adapter: {path}\n    adapter_sha256: {}\n",
+                adapter_sha256(path)
+            ),
+            1,
+        );
+    }
     yaml.push_str(options);
     let mut env = support::environment();
     env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
     env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
-    config::load(ConfigInputs {
+    let cfg = config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
         environment: &env,
     })
-    .unwrap()
+    .unwrap();
+    assert_eq!(
+        m_gated::providers::port::installed(config::ProviderId::Deepseek),
+        adapter.is_some()
+    );
+    cfg
+}
+/// `TEST_DEEPSEEK_ADAPTER`에 컴포넌트 경로가 있으면 모든 시험이 WASM 어댑터로 돈다(결정 0009).
+fn adapter_sha256(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).expect("TEST_DEEPSEEK_ADAPTER 파일을 읽는다");
+    Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 struct Harness {
     db: postgres::TestDb,

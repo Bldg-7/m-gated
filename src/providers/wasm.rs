@@ -3,7 +3,8 @@
 //! - 컴포넌트는 import를 가질 수 없다. 그래서 네트워크, 파일, 시계, 난수에 닿지 못한다.
 //! - 시작할 때 한 번 컴파일하고 인스턴스를 준비한다. 호출마다 store를 새로 만들어 요청 사이에
 //!   상태를 나누지 않는다. 스트림은 요청 하나가 store 하나를 끝까지 쓴다.
-//! - store마다 메모리 상한과 CPU 상한(fuel)이 있다. 긴 호출은 tokio에 실행을 넘긴다.
+//! - store마다 메모리 상한과 CPU 상한(fuel)이 있다. 비동기 호출(요청 검사, 응답 읽기)은 큰 상한을
+//!   받고, 긴 호출은 tokio에 실행을 넘긴다. 동기 호출은 tokio 작업 스레드를 붙잡으므로 작은 상한을 받는다.
 //! - 요청 검사 중에 멈추면 요청을 보내지 않고 거절한다. 응답을 읽다가 멈추면 형식 오류로
 //!   처리하므로 요청은 `unknown`이 된다.
 use super::{
@@ -50,14 +51,20 @@ const YIELD_FUEL: u64 = 10_000_000;
 pub struct Limits {
     /// 메모리 상한. 응답 본문(최대 16 MiB)을 복사하고 읽을 만큼이다.
     pub memory_bytes: usize,
-    /// 호출 하나(스트림은 event 하나)의 CPU 상한.
-    pub fuel_per_call: u64,
+    /// 비동기 호출(`validate`, `read`) 하나의 CPU 상한. 16 MiB 응답 읽기에 필요한 양(50억 이하)의
+    /// 4배다. 이 호출은 `YIELD_FUEL`마다 tokio에 실행을 넘긴다.
+    pub async_fuel: u64,
+    /// 동기 호출(`check-profile`, `approved-headers`, 스트림 열기, 스트림 메서드) 하나의 CPU 상한.
+    /// 이 호출은 끝날 때까지 tokio 작업 스레드를 붙잡는다. 필요한 양(10만 이하)의 100배이고,
+    /// 가장 느린 명령으로 다 써도 약 8 ms다.
+    pub sync_fuel: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
             memory_bytes: 128 * 1024 * 1024,
-            fuel_per_call: 20_000_000_000,
+            async_fuel: 20_000_000_000,
+            sync_fuel: 10_000_000,
         }
     }
 }
@@ -66,7 +73,7 @@ const DECODER_PATHS: usize = 256;
 const PATH_BYTES: usize = 256;
 
 /// 이 future는 fuel이 다 쓰여 실행을 넘길 때만 기다린다. 동기 port 메서드에서 끝날 때까지 poll한다.
-/// 컴포넌트는 import가 없어 다른 것을 기다리지 않고, fuel 상한이 전체 시간을 막는다.
+/// 컴포넌트는 import가 없어 다른 것을 기다리지 않고, 동기 호출의 fuel 상한이 전체 시간을 막는다.
 fn block<F: Future>(future: F) -> F::Output {
     let mut future = pin!(future);
     let mut cx = Context::from_waker(Waker::noop());
@@ -87,7 +94,7 @@ struct Shared {
     limits: Limits,
 }
 impl Shared {
-    fn store(&self) -> wasmtime::Result<Store<StoreLimits>> {
+    fn store(&self, fuel: u64) -> wasmtime::Result<Store<StoreLimits>> {
         let mut store = Store::new(
             &self.engine,
             StoreLimitsBuilder::new()
@@ -98,12 +105,12 @@ impl Shared {
                 .build(),
         );
         store.limiter(|limits| limits);
-        store.set_fuel(self.limits.fuel_per_call)?;
+        store.set_fuel(fuel)?;
         store.fuel_async_yield_interval(Some(YIELD_FUEL))?;
         Ok(store)
     }
-    async fn instance(&self) -> wasmtime::Result<(Store<StoreLimits>, Adapter)> {
-        let mut store = self.store()?;
+    async fn instance(&self, fuel: u64) -> wasmtime::Result<(Store<StoreLimits>, Adapter)> {
+        let mut store = self.store(fuel)?;
         let adapter = self.pre.instantiate_async(&mut store).await?;
         Ok((store, adapter))
     }
@@ -230,7 +237,7 @@ impl port::Provider for WasmProvider {
         }
         let name = api_name(api.kind());
         let result = block(async {
-            let (mut store, adapter) = self.shared.instance().await?;
+            let (mut store, adapter) = self.shared.instance(self.shared.limits.sync_fuel).await?;
             adapter
                 .m_gated_adapter_provider()
                 .call_check_profile(&mut store, name, &profile(p))
@@ -279,7 +286,8 @@ impl Api for WasmApi {
     ) -> BoxFuture<'a, Result<RequestMetadata, ApiError>> {
         Box::pin(async move {
             let result = async {
-                let (mut store, adapter) = self.shared.instance().await?;
+                let (mut store, adapter) =
+                    self.shared.instance(self.shared.limits.async_fuel).await?;
                 adapter
                     .m_gated_adapter_provider()
                     .call_validate(&mut store, api_name(self.kind), body, &profile(p))
@@ -311,7 +319,7 @@ impl Api for WasmApi {
             })
             .collect();
         let result = block(async {
-            let (mut store, adapter) = self.shared.instance().await?;
+            let (mut store, adapter) = self.shared.instance(self.shared.limits.sync_fuel).await?;
             adapter
                 .m_gated_adapter_provider()
                 .call_approved_headers(&mut store, api_name(self.kind), &headers)
@@ -341,7 +349,8 @@ impl Api for WasmApi {
     ) -> BoxFuture<'a, Result<Reading, UpstreamError>> {
         Box::pin(async move {
             let result = async {
-                let (mut store, adapter) = self.shared.instance().await?;
+                let (mut store, adapter) =
+                    self.shared.instance(self.shared.limits.async_fuel).await?;
                 adapter
                     .m_gated_adapter_provider()
                     .call_read(
@@ -370,7 +379,7 @@ impl Api for WasmApi {
             return None;
         }
         let opened: wasmtime::Result<_> = block(async {
-            let (mut store, adapter) = self.shared.instance().await?;
+            let (mut store, adapter) = self.shared.instance(self.shared.limits.sync_fuel).await?;
             let reader = adapter
                 .m_gated_adapter_provider()
                 .stream_reader()
@@ -387,7 +396,7 @@ impl Api for WasmApi {
             Ok((store, adapter, reader, decoder)) if decoder_from(&decoder).is_some() => {
                 WasmStream {
                     open: RefCell::new(Some(Open {
-                        fuel_per_call: self.shared.limits.fuel_per_call,
+                        fuel: self.shared.limits.sync_fuel,
                         store,
                         adapter,
                         reader,
@@ -430,7 +439,7 @@ fn decoder_from(d: &wit::Decoder) -> Option<SseDecoder> {
 }
 
 struct Open {
-    fuel_per_call: u64,
+    fuel: u64,
     store: Store<StoreLimits>,
     adapter: Adapter,
     reader: ResourceAny,
@@ -460,7 +469,7 @@ impl WasmStream {
         let mut open = self.open.borrow_mut();
         let o = open.as_mut()?;
         let result = block(async {
-            o.store.set_fuel(o.fuel_per_call)?;
+            o.store.set_fuel(o.fuel)?;
             f(&mut o.store, &o.adapter, o.reader).await
         });
         if result.is_err() {
@@ -583,7 +592,7 @@ pub fn load_with(
         limits: Limits::default(),
     }));
     let d = block(async {
-        let (mut store, adapter) = shared.instance().await?;
+        let (mut store, adapter) = shared.instance(shared.limits.sync_fuel).await?;
         adapter
             .m_gated_adapter_provider()
             .call_describe(&mut store)
