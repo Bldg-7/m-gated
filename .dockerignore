@@ -11,3 +11,4 @@ target
 gateway.local.yaml
 **/.artifacts
 scripts
+!scripts/build-adapter.sh

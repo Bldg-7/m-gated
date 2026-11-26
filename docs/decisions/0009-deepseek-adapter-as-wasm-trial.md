@@ -1,7 +1,7 @@
 # 0009. Run the DeepSeek adapter as a WASM component, as a trial
 
 - Date: 2026-11-25
-- Status: Accepted, not implemented
+- Status: Implemented
 
 ## Context
 
@@ -58,7 +58,8 @@ and puts it behind the port. In the rest of this record, "component" means this 
        `choices.*.delta.content`.
      - `accept` gets one event at a time, as those paths and their values. It says if the event
        ends the stream or is a provider error.
-     - `provider-error` says if the provider reported a failure.
+     - `provider-error` says if any event so far was a provider failure. The host asks for it
+       during the stream.
      - `close` is called when the stream ends. It returns the usage to settle and whether the
        provider reported a failure, or an error if the stream ended without an end event.
      - `final-usage` returns the same usage as `close`. The host asks for it when it cannot wait
@@ -168,11 +169,19 @@ and puts it behind the port. In the rest of this record, "component" means this 
      wit-bindgen 0.62.0 and wraps it with `wasm-tools component new`. It uses wasm-tools 1.259.0,
      which came out on the same day as wit-bindgen 0.62.0 and uses the same component encoding
      library (wit-component 0.259.0). The script refuses a component that
-     imports anything, and prints the component's SHA-256. The release workflow runs it.
+     imports anything. It writes the component's SHA-256 to a file next to the component.
+   - The component contains the source file paths of some crates, in its error messages. The
+     script replaces the absolute paths of the source directory and of the Cargo home directory
+     (`~/.cargo`, where Cargo keeps the downloaded crates) with fixed names. So the file does not
+     contain the builder's paths, and the same source on the same kind of machine gives the same
+     file.
+   - A build on another kind of machine (macOS, Linux amd64 or Linux arm64) gives a different
+     file. Cargo adds a hash to the name of each function, and the kind of machine is part of
+     that hash. When the names change, the compiler puts the functions in another order and
+     makes other choices, so the code changes too.
    - A WASI target is not used. WASI is the standard set of system functions for WASM, so a
      build for it could add imports, and rule 4 refuses a component with any import.
 6. The work goes in five steps. The full test suite runs after each step. All five steps are done.
-   This record stays "Accepted, not implemented" until the user makes the decision in rule 7.
    1. Create the workspace and `adapter-kit`, and make the host use it. Behavior does not change.
    2. Move the DeepSeek logic into `adapters/deepseek`, and link it into the host directly.
       Behavior does not change.
@@ -183,8 +192,27 @@ and puts it behind the port. In the rest of this record, "component" means this 
       request, the cost of each event call, and the growth of the image size and the build time.
       The tests use the component when `TEST_DEEPSEEK_ADAPTER` names its file. The measurement
       suite is `tests/wasm_adapter_cost.rs`.
-7. After step 5, the user decides whether release images use the WASM DeepSeek adapter by
-   default or only in tests.
+7. Release images contain the DeepSeek component, but the gateway uses it only when the config
+   names it. Without `adapter`, the built-in adapter runs:
+   - The component is at `/app/adapters/deepseek.wasm`. Its SHA-256 is in
+     `/app/adapters/deepseek.wasm.sha256` and in the image label
+     `m-gated.adapters.deepseek.sha256`. The files belong to root, so the gateway cannot change
+     them. The image check (`scripts/test-package.sh`) makes sure that the file matches its
+     SHA-256.
+   - The release workflow builds the component once, on Linux amd64, in its first job
+     (`verify`). The jobs that build the amd64 and arm64 images get that file. They give it to
+     Docker with `--build-context adapter=<directory>`, so Docker does not run the Dockerfile's
+     step that builds the component, and uses the given file. So both images contain the same
+     file, and one `adapter_sha256` fits both. A local `docker build` runs that step and builds
+     the component itself.
+   - An operator can use another component in the same way: put the file in the container, with
+     a volume or with an image built on the release image, and name its path and SHA-256 in the
+     config.
+   - The gateway does not download components from the network. If it did, it could not start
+     while the download source was down. The SHA-256 in the config already makes sure that the
+     file is the one the operator chose.
+   - Components are not signed. The SHA-256 in the config names the file. A signature would not
+     help if the config could not be trusted.
 
 ## Rejected alternatives
 
@@ -219,7 +247,8 @@ settlements. Anthropic also needs `SideRequest`.
     thread.
   - wasmtime is a large dependency. The gateway binary grows from 15.9 MB to 29.9 MB, and the
     release image from 171.7 MB to 190.3 MB. The Rust build in the release image takes 115 s
-    instead of 67 s. Building the component from nothing takes 8 s.
+    instead of 67 s. Building the component from nothing takes 8 s. The component itself adds
+    0.3 MB to the image.
   - The binary contains wasmtime whether a configuration names a component or not.
 - The WIT package has a version. The host accepts only a component that exports version 0.1.0.
   A change to the interface needs a new version, and the host and the components change together.
@@ -229,4 +258,5 @@ settlements. Anthropic also needs `SideRequest`.
   - Adding a provider with a new name. Today the database checks and the dashboard list the
     provider names, so a new name needs a migration and a dashboard change.
   - `SideRequest`.
-  - How operators ship their own components.
+  - Instructions and a template for operators who build their own components. Until a provider
+    with a new name can be added, an operator's component can only replace a built-in adapter.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # DeepSeek 어댑터를 WASM 컴포넌트로 빌드한다(결정 0009).
-# 결과: target/adapters/deepseek.wasm. 마지막 줄에 SHA-256을 쓴다.
+# 결과: target/adapters/deepseek.wasm과, 그 SHA-256을 담은 target/adapters/deepseek.wasm.sha256.
+# 마지막 줄에도 SHA-256을 쓴다.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,6 +17,11 @@ if ! "$WASM_TOOLS" --version 2>/dev/null | grep -q "^wasm-tools $WASM_TOOLS_VERS
   cargo install --locked --quiet --root "$TOOLS" "wasm-tools@$WASM_TOOLS_VERSION"
 fi
 
+# 컴포넌트에는 의존 crate의 오류 위치 문자열이 절대 경로로 들어간다. 경로를 고정된 이름으로 바꿔서
+# 빌드한 사람의 경로가 남지 않게 하고, 경로가 달라도 같은 파일이 나오게 한다. 빌드하는 컴퓨터의
+# 종류(macOS, Linux amd64, Linux arm64)가 다르면 Cargo가 crate마다 붙이는 해시가 달라서, 다른 파일이
+# 나온다. 릴리스 이미지는 Linux amd64에서 한 번 빌드한 파일을 쓴다.
+export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/m-gated"
 cargo build --locked --release --target wasm32-unknown-unknown -p m-gated-adapter-deepseek-component
 mkdir -p "$(dirname "$OUT")"
 "$WASM_TOOLS" component new "$CORE" -o "$OUT"
@@ -35,7 +41,9 @@ if ! grep -qE '^[[:space:]]*export m-gated:adapter/provider@0\.1\.0;' <<<"$WIT";
 fi
 
 if command -v sha256sum >/dev/null; then
-  sha256sum "$OUT"
+  SHA=$(sha256sum "$OUT" | cut -d' ' -f1)
 else
-  shasum -a 256 "$OUT"
+  SHA=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
 fi
+echo "$SHA" >"$OUT.sha256"
+echo "$SHA  $OUT"

@@ -278,7 +278,7 @@ both fields to the provider:
 ```yaml
   - provider: deepseek
     base_url: https://api.deepseek.com
-    adapter: /app/adapters/deepseek.wasm     # built by scripts/build-adapter.sh
+    adapter: /app/adapters/deepseek.wasm     # in the release image
     adapter_sha256: <64 lowercase hex digits>
 ```
 
@@ -288,8 +288,24 @@ sandbox with a 128 MiB memory limit and a CPU limit. If the component fails whil
 request, the gateway refuses the request with `500` and `x-gateway-error-code: adapter_failed`, and
 does not send it. If it fails while it reads a response, the response is malformed and the request
 becomes `unknown`. One process uses one implementation per provider, so every configuration that a
-process loads must name the same component for that provider. Release images do not contain the
-component yet.
+process loads must name the same component for that provider.
+
+Release images contain the component at `/app/adapters/deepseek.wasm`. Its SHA-256 is in
+`/app/adapters/deepseek.wasm.sha256` and in the image label `m-gated.adapters.deepseek.sha256`.
+The gateway uses the component only when the config names it. Without `adapter`, the built-in
+adapter runs. To get the value for `adapter_sha256`:
+
+```sh
+docker run --rm --entrypoint cat <image> /app/adapters/deepseek.wasm.sha256
+```
+
+The release workflow builds the component once, on Linux amd64, and puts the same file in the
+amd64 and arm64 images. So one `adapter_sha256` fits both. A build on another kind of machine
+(for example macOS, or Linux arm64) gives a different file with a different SHA-256, because Cargo
+puts the kind of machine into the names that it gives each crate.
+
+To use a component of your own, give its path and SHA-256 in the same two fields. Put the file in
+the container with a volume, or build an image `FROM` the release image that adds the file.
 
 | Profile field | Description |
 |---|---|
@@ -916,7 +932,7 @@ The DeepSeek adapter can also be built as a WebAssembly (WASM) component. This i
 `crates/adapter-kit/wit/adapter.wit`. To build it and run its tests:
 
 ```sh
-scripts/build-adapter.sh   # writes target/adapters/deepseek.wasm and prints its SHA-256
+scripts/build-adapter.sh   # writes target/adapters/deepseek.wasm and deepseek.wasm.sha256
 cargo test --locked --test wasm_adapter -- --ignored
 ```
 
@@ -924,7 +940,9 @@ The tests compare the component with the built-in DeepSeek adapter, and check th
 refusal of wrong files.
 
 The script adds the `wasm32-unknown-unknown` target, installs `wasm-tools` 1.259.0 in
-`target/tools`, and refuses a component that imports anything. The component's code compiles only
+`target/tools`, and refuses a component that imports anything. It replaces the absolute paths
+of the source and the Cargo home with fixed names, so the file does not contain your paths. A
+`docker build` of the release Dockerfile builds the component in its `adapter-build` stage. The component's code compiles only
 for wasm32, so check it with
 `cargo clippy --locked --target wasm32-unknown-unknown -p m-gated-adapter-deepseek-component -- -D warnings`.
 
@@ -997,10 +1015,13 @@ alternatives were rejected, one file for each decision.
 Pushing a `vX.Y.Z` tag runs [`.github/workflows/release-image.yml`](.github/workflows/release-image.yml):
 
 1. `verify`: dashboard tests and build, `cargo fmt`, `clippy` and `cargo test` (the `#[ignore]`d
-   suites above are not run in CI), and the WASM adapter's clippy and build.
-2. `build`: the image is built natively on amd64 and arm64 runners, pushed by digest, and checked
+   suites above are not run in CI), and the WASM adapter's clippy, build and tests. The adapter
+   file goes to the `build` job.
+2. `build`: the image is built natively on amd64 and arm64 runners, with the adapter file from
+   `verify` (`--build-context adapter=...`), pushed by digest, and checked
    with `scripts/test-package.sh` (non-root, no Node/npm/cargo in the runtime layer, read-only root,
-   refuses to start without a valid config).
+   the adapter file matches its SHA-256 and cannot be written, refuses to start without a valid
+   config).
 3. `publish tags`: both digests are combined into one multi-arch manifest tagged `X.Y.Z`, `X.Y`,
    `X` (from 1.0 on), `latest` (non-prerelease only) and `sha-<short>`.
 

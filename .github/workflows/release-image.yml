@@ -77,6 +77,17 @@ jobs:
           scripts/build-adapter.sh
           cargo test --locked --test wasm_adapter -- --ignored
 
+      # Both platform images get this one file, so one adapter_sha256 fits both. A build
+      # on another kind of machine gives a different file.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: adapter
+          path: |
+            target/adapters/deepseek.wasm
+            target/adapters/deepseek.wasm.sha256
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     name: build (${{ matrix.platform }})
     needs: verify
@@ -116,6 +127,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: adapter
+          path: ${{ runner.temp }}/adapter
+
+      - id: adapter
+        run: echo "sha256=$(cat "$RUNNER_TEMP/adapter/deepseek.wasm.sha256")" >> "$GITHUB_OUTPUT"
+
       # Pushed by digest only; tags are attached in the merge job after both
       # platforms pass the package check.
       - id: build
@@ -123,7 +142,11 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            m-gated.adapters.deepseek.sha256=${{ steps.adapter.outputs.sha256 }}
+          # The verify job built the WASM adapter once. This replaces the adapter stage.
+          build-contexts: adapter=${{ runner.temp }}/adapter
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}

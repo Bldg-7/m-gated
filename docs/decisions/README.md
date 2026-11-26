@@ -17,7 +17,7 @@ status. A later decision that changes an earlier one gets a new file, and the ea
 | [0006](0006-remove-handoff.md) | Remove the handoff maintenance command | Implemented |
 | [0007](0007-providers-plug-in-through-one-port.md) | Providers plug in through one port | Implemented |
 | [0008](0008-add-typesafe-and-decompress-zstd-requests.md) | Add TypeSafe, and decompress zstd request bodies in the gateway | Implemented |
-| [0009](0009-deepseek-adapter-as-wasm-trial.md) | Run the DeepSeek adapter as a WASM component, as a trial | Accepted, not implemented |
+| [0009](0009-deepseek-adapter-as-wasm-trial.md) | Run the DeepSeek adapter as a WASM component, as a trial | Implemented |
 
 ## Format
 
