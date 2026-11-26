@@ -5,7 +5,7 @@
 //! 본체의 안전 규칙은 그대로 지켜진다.
 //!
 //! Provider를 더하려면 [`ProviderId`]에 이름을 더하고, [`Provider`]와 [`Api`]를 구현한 뒤
-//! [`PROVIDERS`]에 넣는다.
+//! `NATIVE`에 넣는다. WASM 어댑터는 [`install`]로 설치한다(결정 0009).
 use super::transport::UpstreamError;
 use crate::{
     config::{ApiKind, ModelProfile, NativeFeature, ProviderId, StartupError},
@@ -15,7 +15,27 @@ use crate::{
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 pub use futures_util::future::BoxFuture;
 use m_gated_adapter_kit::adapter as kit;
-pub use m_gated_adapter_kit::adapter::{ApiError, ErrorFormat, RequestMetadata, Step};
+pub use m_gated_adapter_kit::adapter::{ErrorFormat, RequestMetadata, Step};
+use std::sync::RwLock;
+
+/// 요청 검사 실패.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApiError {
+    InvalidRequest,
+    UnsupportedOption,
+    UnsupportedModel,
+    /// WASM 어댑터가 멈췄거나 상한에 닿았다. 클라이언트 잘못이 아니므로 500으로 거절한다.
+    AdapterFailed,
+}
+impl From<kit::ApiError> for ApiError {
+    fn from(e: kit::ApiError) -> Self {
+        match e {
+            kit::ApiError::InvalidRequest => Self::InvalidRequest,
+            kit::ApiError::UnsupportedOption => Self::UnsupportedOption,
+            kit::ApiError::UnsupportedModel => Self::UnsupportedModel,
+        }
+    }
+}
 
 /// Provider 하나. 키 형식, 인증 헤더, 키 확인 경로와 이 Provider가 가진 API 목록을 알려 준다.
 pub trait Provider: Sync {
@@ -259,19 +279,73 @@ impl From<kit::ProfileError> for StartupError {
     }
 }
 
-/// 이 게이트웨이가 아는 Provider 전부.
-pub static PROVIDERS: [&dyn Provider; 4] = [
+/// 본체에 들어 있는 Provider 어댑터 전부.
+static NATIVE: [&dyn Provider; 4] = [
     &super::anthropic::PROVIDER,
     &super::openai::PROVIDER,
     &super::deepseek::PROVIDER,
     &super::typesafe::PROVIDER,
 ];
-
-pub fn provider(id: ProviderId) -> &'static dyn Provider {
-    *PROVIDERS
+/// 시작할 때 설치한 WASM 어댑터. 설치한 Provider는 본체 어댑터 대신 이것을 쓴다.
+/// 한 프로세스는 Provider마다 구현을 하나만 쓴다(결정 0009).
+static INSTALLED: RwLock<Vec<Installed>> = RwLock::new(Vec::new());
+struct Installed {
+    id: ProviderId,
+    sha256: [u8; 32],
+    provider: &'static dyn Provider,
+}
+/// WASM 어댑터를 설치한다. 같은 파일이 이미 설치돼 있으면 `load`를 부르지 않는다.
+/// 다른 파일이 설치돼 있으면 거절한다.
+pub fn install(
+    id: ProviderId,
+    sha256: [u8; 32],
+    load: impl FnOnce() -> Result<&'static dyn Provider, StartupError>,
+) -> Result<(), StartupError> {
+    let mut installed = INSTALLED.write().expect("INSTALLED lock");
+    if let Some(i) = installed.iter().find(|i| i.id == id) {
+        return if i.sha256 == sha256 {
+            Ok(())
+        } else {
+            Err(StartupError::InvalidAdapter)
+        };
+    }
+    let provider = load()?;
+    if provider.id() != id {
+        return Err(StartupError::InvalidAdapter);
+    }
+    installed.push(Installed {
+        id,
+        sha256,
+        provider,
+    });
+    Ok(())
+}
+/// 이 Provider에 WASM 어댑터가 설치돼 있는지.
+pub fn installed(id: ProviderId) -> bool {
+    INSTALLED
+        .read()
+        .expect("INSTALLED lock")
+        .iter()
+        .any(|i| i.id == id)
+}
+/// 이 게이트웨이가 아는 Provider 전부. 설치한 WASM 어댑터가 본체 어댑터를 대신한다.
+pub fn providers() -> [&'static dyn Provider; 4] {
+    NATIVE.map(|p| provider(p.id()))
+}
+/// 본체에 들어 있는 어댑터. WASM 어댑터가 내놓은 사실을 이것과 대조한다.
+pub fn native(id: ProviderId) -> &'static dyn Provider {
+    *NATIVE
         .iter()
         .find(|p| p.id() == id)
-        .expect("모든 ProviderId는 PROVIDERS에 있다")
+        .expect("모든 ProviderId는 NATIVE에 있다")
+}
+pub fn provider(id: ProviderId) -> &'static dyn Provider {
+    INSTALLED
+        .read()
+        .expect("INSTALLED lock")
+        .iter()
+        .find(|i| i.id == id)
+        .map_or_else(|| native(id), |i| i.provider)
 }
 pub fn api(id: ProviderId, kind: ApiKind) -> Option<&'static dyn Api> {
     provider(id)
@@ -282,11 +356,11 @@ pub fn api(id: ProviderId, kind: ApiKind) -> Option<&'static dyn Api> {
 }
 /// 게이트웨이 경로를 받는 Provider와 API.
 pub fn route(path: &str) -> Option<(&'static dyn Provider, &'static dyn Api)> {
-    PROVIDERS.iter().find_map(|p| {
+    providers().into_iter().find_map(|p| {
         p.apis()
             .iter()
             .find(|a| a.routes().contains(&path))
-            .map(|a| (*p, *a))
+            .map(|a| (p, *a))
     })
 }
 
@@ -296,12 +370,12 @@ mod tests {
     #[test]
     fn every_provider_id_has_one_adapter_and_routes_are_unique() {
         for id in ProviderId::ALL {
-            assert_eq!(PROVIDERS.iter().filter(|p| p.id() == id).count(), 1);
+            assert_eq!(NATIVE.iter().filter(|p| p.id() == id).count(), 1);
             assert!(!provider(id).apis().is_empty());
         }
-        assert_eq!(PROVIDERS.len(), ProviderId::ALL.len());
+        assert_eq!(NATIVE.len(), ProviderId::ALL.len());
         let mut seen = std::collections::BTreeSet::new();
-        for p in PROVIDERS {
+        for p in NATIVE {
             let mut kinds = std::collections::BTreeSet::new();
             for a in p.apis() {
                 assert!(kinds.insert(a.kind()));

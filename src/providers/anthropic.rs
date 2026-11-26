@@ -1245,11 +1245,7 @@ impl Visitor for ResponseMetadata {
                         ]
                         .contains(&json::string(raw, 32)?.as_str())
                 }
-                "usage" => {
-                    if kind != Kind::Object {
-                        self.invalid_usage = true;
-                    }
-                }
+                "usage" if kind != Kind::Object => self.invalid_usage = true,
                 "input_tokens" => self.counted = integer(raw).ok(),
                 _ => {}
             }

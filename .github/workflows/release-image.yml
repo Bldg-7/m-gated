@@ -75,6 +75,7 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo clippy --locked --target wasm32-unknown-unknown -p m-gated-adapter-deepseek-component -- -D warnings
           scripts/build-adapter.sh
+          cargo test --locked --test wasm_adapter -- --ignored
 
   build:
     name: build (${{ matrix.platform }})

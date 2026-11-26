@@ -27,6 +27,8 @@ pub enum StartupError {
     RuntimeFailure,
     MaintenanceFailure,
     RemovedProviderKeyEnv,
+    /// WASM 어댑터 파일을 읽지 못했거나, 해시가 다르거나, 규칙에 맞지 않는다.
+    InvalidAdapter,
 }
 impl StartupError {
     pub fn code(self) -> &'static str {
@@ -49,6 +51,7 @@ impl StartupError {
             Self::RuntimeFailure => "runtime_failed",
             Self::MaintenanceFailure => "maintenance_failed",
             Self::RemovedProviderKeyEnv => "config_provider_key_env_removed",
+            Self::InvalidAdapter => "config_adapter_invalid",
         }
     }
 }
@@ -201,6 +204,20 @@ pub enum ApiKind {
     DeepseekChat,
     Systemone,
 }
+impl ApiKind {
+    /// 설정 파일의 `api` 값. WASM 어댑터에도 이 이름을 넘긴다.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Messages => "messages",
+            Self::CountTokens => "count_tokens",
+            Self::Responses => "responses",
+            Self::OpenaiChat => "openai_chat",
+            Self::Embeddings => "embeddings",
+            Self::DeepseekChat => "deepseek_chat",
+            Self::Systemone => "systemone",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingClass {
@@ -213,6 +230,9 @@ pub enum BillingClass {
 struct RawProvider {
     provider: ProviderId,
     base_url: String,
+    /// WASM 어댑터 컴포넌트 파일(결정 0009). `adapter_sha256`과 함께 쓴다.
+    adapter: Option<String>,
+    adapter_sha256: Option<String>,
     #[serde(default)]
     profiles: Vec<ModelProfile>,
     catalog: Option<CatalogTemplate>,
@@ -343,9 +363,41 @@ pub struct ModelProfile {
 pub struct ProviderConfig {
     pub provider: ProviderId,
     pub base_url: Url,
+    /// 본체 어댑터 대신 쓰는 WASM 어댑터 컴포넌트.
+    pub adapter: Option<AdapterFile>,
     pub profiles: Vec<ModelProfile>,
     /// 있으면 이 공급사의 모델·가격은 DB 카탈로그에서 온다(`profiles` 는 비어 있어야 한다).
     pub catalog: Option<CatalogTemplate>,
+}
+/// WASM 어댑터 컴포넌트 파일과 그 SHA-256. 해시가 다르면 시작하지 않는다.
+#[derive(Clone, Debug)]
+pub struct AdapterFile {
+    pub path: String,
+    pub sha256: [u8; 32],
+}
+impl AdapterFile {
+    fn parse(path: Option<String>, sha256: Option<String>) -> Result<Option<Self>, StartupError> {
+        match (path, sha256) {
+            (None, None) => Ok(None),
+            (Some(path), Some(hex)) => {
+                let mut sha256 = [0u8; 32];
+                if path.is_empty()
+                    || hex.len() != 64
+                    || !hex
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(StartupError::InvalidAdapter);
+                }
+                for (i, byte) in sha256.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                        .map_err(|_| StartupError::InvalidAdapter)?;
+                }
+                Ok(Some(Self { path, sha256 }))
+            }
+            _ => Err(StartupError::InvalidAdapter),
+        }
+    }
 }
 pub struct AuthConfig {
     pub ca_certificate: Option<Vec<u8>>,
@@ -670,6 +722,7 @@ fn validate(
                 Ok(ProviderConfig {
                     provider: p.provider,
                     base_url: parse_url(&p.base_url)?,
+                    adapter: AdapterFile::parse(p.adapter, p.adapter_sha256)?,
                     profiles: p.profiles,
                     catalog: p.catalog,
                 })
@@ -832,6 +885,17 @@ impl ValidatedConfig {
         }
         let mut providers = BTreeSet::new();
         for provider in &self.providers {
+            // WASM 어댑터를 먼저 설치한다. 그 뒤의 검사는 설치한 어댑터를 거친다.
+            // 한 프로세스는 Provider마다 구현을 하나만 쓴다(결정 0009).
+            match &provider.adapter {
+                Some(a) => crate::providers::port::install(provider.provider, a.sha256, || {
+                    crate::providers::wasm::load(provider.provider, &a.path, a.sha256)
+                })?,
+                None if crate::providers::port::installed(provider.provider) => {
+                    return Err(StartupError::InvalidAdapter);
+                }
+                None => {}
+            }
             secure_url(&provider.base_url)?;
             if provider.base_url.as_str()
                 != format!(
@@ -1198,4 +1262,26 @@ fn check_yaml_budget(input: &str) -> Result<(), StartupError> {
         previous = b' ';
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn api_names_are_config_values() {
+        for kind in [
+            ApiKind::Messages,
+            ApiKind::CountTokens,
+            ApiKind::Responses,
+            ApiKind::OpenaiChat,
+            ApiKind::Embeddings,
+            ApiKind::DeepseekChat,
+            ApiKind::Systemone,
+        ] {
+            assert_eq!(
+                serde_json::from_value::<ApiKind>(serde_json::json!(kind.name())).unwrap(),
+                kind
+            );
+        }
+    }
 }

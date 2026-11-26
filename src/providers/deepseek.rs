@@ -17,7 +17,7 @@ pub async fn validate(body: &[u8], profile: &ModelProfile) -> Result<RequestMeta
     if profile.api != ApiKind::DeepseekChat {
         return Err(ApiError::UnsupportedOption);
     }
-    adapter::validate_with(body, &port::adapter_profile(profile), TokioYield).await
+    Ok(adapter::validate_with(body, &port::adapter_profile(profile), TokioYield).await?)
 }
 
 /// DeepSeek 어댑터.

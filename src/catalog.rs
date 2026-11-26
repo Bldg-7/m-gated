@@ -64,7 +64,7 @@ fn insert(parsed: &mut Parsed, provider: ProviderId, model: &str, candidate: Can
 
 pub fn parse_models_dev(body: &Value) -> Parsed {
     let mut parsed = Parsed::new();
-    for provider in crate::providers::port::PROVIDERS {
+    for provider in crate::providers::port::providers() {
         let Some(name) = provider.models_dev_name() else {
             continue;
         };

@@ -1741,8 +1741,8 @@ pub(crate) fn read_execution_snapshot(value: Value) -> Result<Value, LedgerError
         || e.profile_version.len() > 64
         || e.profile_version.chars().any(char::is_control)
         || !["chargeable", "guaranteed_free"].contains(&e.billing_class.as_str())
-        || !crate::providers::port::PROVIDERS
-            .iter()
+        || !crate::providers::port::providers()
+            .into_iter()
             .flat_map(|p| p.apis())
             .any(|api| api_name(api.kind()) == e.capability)
         || (e.billing_class == "guaranteed_free" && e.capability != "count_tokens")

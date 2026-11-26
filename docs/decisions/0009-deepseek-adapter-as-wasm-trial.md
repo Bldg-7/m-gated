@@ -58,24 +58,56 @@ and puts it behind the port. In the rest of this record, "component" means this 
        `choices.*.delta.content`.
      - `accept` gets one event at a time, as those paths and their values. It says if the event
        ends the stream or is a provider error.
-     - `final-usage` returns the usage to settle, after the end event.
      - `provider-error` says if the provider reported a failure.
-     - `close` is called when the stream ends. It returns the usage and the failure flag, or an
-       error if the stream ended without an end event.
+     - `close` is called when the stream ends. It returns the usage to settle and whether the
+       provider reported a failure, or an error if the stream ended without an end event.
+     - `final-usage` returns the same usage as `close`. The host asks for it before the stream
+       ends, for example when the client disconnects after the end event.
    - `SideRequest` is not in this interface. It comes later, for adapters that need it.
 4. The host runs the component with wasmtime and the component model:
    - The component may have no imports, that is, no functions that the host lends to it. A
      component with any import is refused at start. So it cannot reach the network, files, the
      clock or random numbers.
-   - In wasmtime, a store holds one copy of the component's memory and state. Each request gets
-     its own store, created from an instance that was prepared once at start. No state is shared
-     between requests.
-   - Each store has a memory limit and a CPU limit (fuel). Long calls yield to the async runtime.
+   - The host uses wasmtime 48.0.9, with only the features that it needs: the runtime, the
+     Cranelift compiler, the component model and async calls. wasmtime 48 is a long-term support
+     release. The host turns off the wasmtime features for garbage collection (GC) and threads,
+     because the adapters do not need them. Up to 48.0.8, a build without those features could
+     stop the whole host process on some faults. 48.0.9 fixes this, so the host uses it although
+     it is less than two weeks old. wasmtime 48 needs Rust 1.95, so the repository moves from Rust 1.93 to
+     1.95.
+   - In wasmtime, a store holds one copy of the component's memory and state. Each call gets its
+     own store, created from an instance that was prepared once at start. A streamed request keeps
+     one store until the stream ends. No state is shared between requests.
+   - Each store has a memory limit (128 MiB) and a CPU limit (fuel, 20 billion units for each
+     call or stream event). The memory limit is large enough to copy and read a 16 MiB response
+     body, the largest that a model profile may allow.
+   - `validate` and `read` are async in the port. During these calls, the component gives control
+     back to tokio after each 10 million units of fuel. The other port methods are not async:
+     `check-profile`, `approved-headers` and the stream methods. The host runs those calls to the
+     end at once, and the fuel limit bounds their time.
    - If the component traps (stops with a fault) or reaches a limit while checking a request, the
-     request is refused before it is sent. If that happens while reading a response, the gateway
-     treats it as a malformed response, so the request becomes `unknown`.
+     gateway refuses the request with `500` and the error code `adapter_failed`, and does not send
+     it. This is not the client's fault, so it is not a `400`. If the component fails while
+     reading a response, the gateway treats it as a malformed response, so the request becomes
+     `unknown`. If the component fails on one stream event, the host stops using that store. Every
+     later event of that stream is then malformed, and the request becomes `unknown`.
+   - `approved-headers` may return only names of headers that the client sent, and must include
+     `content-type`. Other answers count as a failure of the component.
    - The config names the component file (`providers[].adapter`) and its SHA-256
-     (`adapter_sha256`). The gateway does not start if the file's hash differs.
+     (`adapter_sha256`), as 64 lowercase hex digits. The gateway does not start if the file's hash
+     differs, if the file is larger than 64 MiB, or if the component does not export
+     `m-gated:adapter/provider@0.1.0`.
+   - In this trial, the provider name and the API names that `describe()` returns must be ones
+     that the built-in adapter has, and each API's token rule must match the built-in one. This is
+     because the database checks, the ledger and the dashboard list these names, so a new name
+     needs a host change. The other facts come from the component.
+   - The built-in adapters are in a fixed list in the port. At start, the gateway loads the
+     component and adds it to a second list for the whole process. This is called installing it.
+     It happens before the model profiles are checked. Many places in the gateway find a provider
+     by its name, and they find the installed component before the built-in adapter.
+   - One process uses one implementation for each provider. When a component is installed for a
+     provider, a later configuration in the same process must name the same file hash for that
+     provider. A configuration with another hash, or with no component, is refused.
 5. The repository becomes a Cargo workspace:
    - `crates/adapter-kit` holds the code that both the host and the component need. It does not
      use tokio. In step 1 it gets the JSON request checker (`json.rs`) and the stream decoders
@@ -92,12 +124,13 @@ and puts it behind the port. In the rest of this record, "component" means this 
      - `Step`: what one stream event told the reader. It says if the event ends the stream, if
        it is a provider error, and which output text it held.
      - `Usage`: the token counts that a response reports.
-     - `ReadError`: why a response could not be read: a wrong shape, a stream event over its
-       limit, or a body over its limit. If the response was a success, the request becomes
+     - `ReadError`: why a response could not be read: a wrong shape, a provider error event in a
+       stream that is larger than 64 KiB, or a body larger than the response size limit. If the response was a success, the request becomes
        `unknown`. If it was an error response, the request is settled at 0 USD (decision 0005).
      - `Profile`: the part of a model profile that an adapter sees. This is the model name, the
-       provider features that the profile turns on (for example tools or thinking), the provider
-       beta header values that it allows, the output limit, and the names of its prices (for
+       provider features that the profile turns on (for example tools or thinking), the values
+       of Anthropic's `anthropic-beta` header that it allows (other providers have no such
+       header), the output limit, and the names of its prices (for
        example `input` and `cache_read`). An adapter checks which prices exist, not their amounts.
      - `Header`: one client header, as a name and a value.
    - The port uses `ApiError`, `RequestMetadata`, `ErrorFormat` and `Step` without change, so it
@@ -110,7 +143,8 @@ and puts it behind the port. In the rest of this record, "component" means this 
    - Some code is shared between adapters. It moves to `adapter-kit`, and `openai.rs` uses it from
      there:
      - DeepSeek and OpenAI accept only keys that start with `sk-`.
-     - DeepSeek and OpenAI refuse a model profile that allows beta header values. They also refuse a profile
+     - DeepSeek and OpenAI refuse a model profile that allows `anthropic-beta` values, because
+       they have no beta header. They also refuse a profile
        that turns on the cache but has no cache read price.
      - DeepSeek and OpenAI read a Chat Completions response and an error body in the same way.
      - DeepSeek, OpenAI and TypeSafe forward only one client header, a JSON `content-type`.
@@ -125,7 +159,8 @@ and puts it behind the port. In the rest of this record, "component" means this 
      imports anything, and prints the component's SHA-256. The release workflow runs it.
    - A WASI target is not used. WASI is the standard set of system functions for WASM, so a
      build for it could add imports, and rule 4 refuses a component with any import.
-6. The work goes in five steps. The full test suite runs after each step. Steps 1 to 3 are done.
+6. The work goes in five steps. The full test suite runs after each step. Steps 1 to 4 are done.
+   This record stays "Accepted, not implemented" until step 5 is done.
    1. Create the workspace and `adapter-kit`, and make the host use it. Behavior does not change.
    2. Move the DeepSeek logic into `adapters/deepseek`, and link it into the host directly.
       Behavior does not change.

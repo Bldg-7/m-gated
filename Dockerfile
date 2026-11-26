@@ -5,7 +5,7 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY web/ ./
 RUN npm run build && test -f dist/.vite/manifest.json && ! find dist -name '*.map' | grep .
 
-FROM rust:1.93.0-bookworm AS binary
+FROM rust:1.95.0-bookworm AS binary
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/

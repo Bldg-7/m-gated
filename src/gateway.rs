@@ -449,18 +449,7 @@ async fn execute(
     let client = &client;
     let validated = match adapter.validate(&body, profile).await {
         Ok(m) => m,
-        Err(e) => {
-            return error(
-                id,
-                StatusCode::BAD_REQUEST,
-                match e {
-                    ApiError::UnsupportedOption => "unsupported_option",
-                    ApiError::UnsupportedModel => "unsupported_model",
-                    ApiError::InvalidRequest => "invalid_request",
-                },
-                true,
-            );
-        }
+        Err(e) => return api_error(id, e),
     };
     if !validated.stream
         && let Err(e) = lease.acquire_nonstream()
@@ -469,6 +458,7 @@ async fn execute(
     }
     let outbound = match adapter.approved_headers(&head.headers, profile) {
         Ok(h) => h,
+        Err(ApiError::AdapterFailed) => return api_error(id, ApiError::AdapterFailed),
         Err(_) => return error(id, StatusCode::BAD_REQUEST, "unsupported_option", true),
     };
     let mut spec = RequestSpec::from_profile(provider, profile, validated.output_limit);
@@ -922,6 +912,16 @@ pub(crate) fn native_admission(id: Uuid, e: crate::runtime::AdmissionError) -> R
         _ => "not_ready",
     };
     error(id, r.status(), code, true)
+}
+/// 요청 검사 실패를 클라이언트에 알린다. 요청은 업스트림에 보내지 않았다.
+fn api_error(id: Uuid, e: ApiError) -> Response {
+    let (status, code) = match e {
+        ApiError::UnsupportedOption => (StatusCode::BAD_REQUEST, "unsupported_option"),
+        ApiError::UnsupportedModel => (StatusCode::BAD_REQUEST, "unsupported_model"),
+        ApiError::InvalidRequest => (StatusCode::BAD_REQUEST, "invalid_request"),
+        ApiError::AdapterFailed => (StatusCode::INTERNAL_SERVER_ERROR, "adapter_failed"),
+    };
+    error(id, status, code, true)
 }
 fn error(id: Uuid, status: StatusCode, code: &'static str, not_dispatched: bool) -> Response {
     let kind = match status.as_u16() {

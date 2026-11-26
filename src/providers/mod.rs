@@ -11,3 +11,4 @@ pub mod openai_chat;
 
 pub mod deepseek;
 pub mod typesafe;
+pub mod wasm;
