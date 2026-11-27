@@ -68,4 +68,4 @@ END $$;
 ALTER TABLE gw_commands DROP CONSTRAINT gw_commands_operation_check;
 ALTER TABLE gw_commands ADD CONSTRAINT gw_commands_operation_check CHECK(operation IN ('issue_key','revoke_key','create_service','update_service','replace_policy','settle_unknown','release_inference_pause','retention_delete','handoff','set_provider_credential','retire_provider_credential','sync_model_catalog','approve_model_catalog','add_provider_credential','replace_provider_credential','update_provider_credential','bind_key_credential','authorize_principal_credentials','set_budget_timezone'));
 ALTER TABLE gw_commands DROP CONSTRAINT gw_commands_target_kind_check;
-ALTER TABLE gw_commands ADD CONSTRAINT gw_commands_target_kind_check CHECK(target_kind IN ('key','principal','policy','request','ledger','credential','catalog','settings','access'));
+ALTER TABLE gw_commands ADD CONSTRAINT gw_commands_target_kind_check CHECK(target_kind IN ('key','principal','policy','request','ledger','credential','catalog','settings','access','management_token'));

@@ -7,6 +7,7 @@
  * - Provider 키 추가·교체에서 API 키에 `reject` 가 들어 있으면 422 provider_credential_rejected
  * - Provider 키 추가·교체에서 API 키에 `unverified` 가 들어 있으면 502 provider_credential_unverified
  * - 가상 키 발급에서 키 이름이 `quota` 로 시작하면 409 key_quota_exceeded
+ * - 관리 토큰은 관리자마다 활성 토큰 30개까지다. 넘으면 409 management_token_quota_exceeded
  *
  * 로그인 방식: 기본은 SSO 방식이다. 환경 변수 `MOCK_AUTH_MODE=password` 로 띄우면 비밀번호 방식(결정 0011)으로 답한다.
  * 비밀번호 방식에서 대시보드는 항상 관리자(admin@example.test)로 로그인되며, 로그아웃하면 다시 로그인할 때까지 /api/* 가 401 이다.
@@ -36,7 +37,8 @@ const fail = (status: number, code: string, details: Json = {}): never => { thro
 const text = (value: unknown) => typeof value === 'string' ? value : '';
 const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every(x => b.includes(x));
 
-function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
+/** openapi: 저장소의 OpenAPI 문서(api/management.openapi.json). 읽지 못했으면 null 이다. */
+function api(state: MockState, mode: AuthMode, log: (line: string) => void, openapi: () => unknown) {
   const now = () => new Date().toISOString();
   // 비밀번호 방식의 로그인 상태와 링크. SSO 방식에서는 쓰지 않는다.
   const login = { signedIn: true };
@@ -460,6 +462,22 @@ function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
     expect(expected, a.version);
     return a;
   };
+  // ── 관리 토큰(결정 0014) ──
+  const days = { '30_days': 30, '90_days': 90, '1_year': 365 } as const;
+  const createToken = (body: Json, commandId: string): Reply => {
+    const name = text(body.name), scope = text(body.scope), validity = text(body.validity);
+    if (Object.keys(body).some(k => !['name', 'scope', 'validity'].includes(k)) || !name || name.length > 64 || name.trim() !== name || (scope !== 'read' && scope !== 'write') || !(validity in days)) fail(400, 'invalid_request');
+    if (state.tokens.filter(t => t.owner.id === ADMIN_ID && t.active).length >= 30) fail(409, 'management_token_quota_exceeded');
+    const token = { id: crypto.randomUUID(), name, scope: scope as 'read' | 'write', validity: validity as keyof typeof days, owner: { id: ADMIN_ID, email: FIXED, display_name: principal(ADMIN_ID).display_name }, created_at: now(), expires_at: iso(Date.now() + days[validity as keyof typeof days] * 86400000), revoked_at: null, revoked_by_email: null, last_used_at: null, active: true };
+    state.tokens.unshift(token);
+    return { status: 201, body: ack(commandId, 'create_management_token', 'management_token', token.id, null, true, { token, secret: `mgt_fake${crypto.randomUUID().replace(/-/g, '')}xxxxxxxxx` }) };
+  };
+  const revokeToken = (id: string, commandId: string): Reply => {
+    const token = state.tokens.find(t => t.id === id) ?? fail(404, 'resource_not_found');
+    const changed = token.revoked_at === null;
+    if (changed) { token.revoked_at = now(); token.revoked_by_email = FIXED; token.active = false; }
+    return { status: 200, body: ack(commandId, 'revoke_management_token', 'management_token', id, null, changed, { token }) };
+  };
   const addAccess = (body: Json, commandId: string): Reply => {
     const email = text(body.email).trim().toLowerCase(), role = text(body.role);
     if (!email.includes('@') || (role !== 'user' && role !== 'admin')) fail(400, 'invalid_request');
@@ -547,6 +565,7 @@ function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
     if (s[1] !== 'admin') {
       if (method === 'GET' && path === '/api/me') return ok(me());
       if (method === 'POST' && path === '/api/me/password') return changePassword(body);
+      if (method === 'GET' && path === '/api/openapi.json') return ok(openapi() ?? fail(404, 'resource_not_found'));
       if (method === 'GET' && path === '/api/csrf') return ok({ token: 'mock-csrf-token', expires_at: iso(Date.now() + 600000) });
       if (method === 'GET' && path === '/api/usage') return ok(usage(query, ADMIN_ID));
       if (method === 'GET' && path === '/api/usage/models') return ok({ items: [...new Map(state.requests.filter(r => r.principal_id === ADMIN_ID).map(r => [`${r.provider}/${r.model}`, { provider: r.provider, model: r.model }])).values()] });
@@ -575,6 +594,9 @@ function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
       case 'GET /api/admin/model-catalog': if (s.length === 3) return ok(catalogView()); break;
       case 'POST /api/admin/model-catalog': if (s[3] === 'sync') return syncCatalog(commandId); if (s[3] === 'approve') return approveCatalog(body, commandId); break;
       case 'PUT /api/admin/model-catalog': if (s[3] === 'rates' && s.length === 4) return editRates(body, commandId); break;
+      case 'GET /api/admin/management-tokens': if (s.length === 3) return ok({ items: state.tokens }); break;
+      case 'POST /api/admin/management-tokens': if (s.length === 3) return createToken(body, commandId); break;
+      case 'DELETE /api/admin/management-tokens': if (s.length === 4) return revokeToken(s[3], commandId); break;
       case 'GET /api/admin/access': if (s.length === 3) return ok({ items: state.access.map(accessView) }); break;
       case 'POST /api/admin/access': if (s.length === 3) return addAccess(body, commandId); if (s.length === 5 && s[4] === 'link') return accessLink(s[3], commandId); break;
       case 'PATCH /api/admin/access': if (s.length === 4) return updateAccess(s[3], body, commandId); break;
@@ -598,7 +620,12 @@ export function mockApi(): Plugin {
     configureServer(server) {
       const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
       const mode: AuthMode = env.MOCK_AUTH_MODE === 'password' ? 'password' : 'sso';
-      const mock = api(createState(), mode, line => server.config.logger.info(line));
+      // API 문서 화면이 읽는 OpenAPI 문서는 저장소의 파일을 그대로 준다. web/ 만 있는 곳(Docker 의 대시보드 빌드)에서는
+      // 이 파일이 없으므로, 개발 서버를 띄울 때 읽고 없으면 그 화면만 비워 둔다.
+      let document: unknown = null;
+      void import(/* @vite-ignore */ new URL('../../api/management.openapi.json', import.meta.url).href, { with: { type: 'json' } })
+        .then((module: { default: unknown }) => { document = module.default; }, () => server.config.logger.warn('  [mock] api/management.openapi.json 을 읽지 못했습니다. API 문서 화면은 비어 있습니다.'));
+      const mock = api(createState(), mode, line => server.config.logger.info(line), () => document);
       const send = (res: Res, status: number, body?: unknown, type = 'application/json', headers: Record<string, string> = {}) => {
         res.statusCode = status; res.setHeader('Cache-Control', 'no-store');
         for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);

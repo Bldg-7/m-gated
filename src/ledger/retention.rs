@@ -148,7 +148,7 @@ impl PgLedger {
         let ack = json!({"command_id":ctx.command_id,"operation":"retention_delete","target":{"kind":"ledger","id":target},"result_version":null,"effect":if deleted.is_empty(){"noop"}else{"changed"}});
         let detail = json!({"deleted_requests":deleted.len(),"next_after":roots.last(),"request_ids":deleted});
         sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection) VALUES($1,$2,$3,'retention_delete','ledger',$2,200,$4)").bind(ctx.actor).bind(ctx.command_id).bind(digest.as_slice()).bind(&ack).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot,reason,evidence_ref) VALUES('human',$1,$2,$3,'retention_delete','ledger',$2,'{}',$4,$5,$6)").bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(&detail).bind(&input.reason).bind(&input.approval_ref).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot,reason,evidence_ref) VALUES('human',$1,$7,$2,$3,'retention_delete','ledger',$2,'{}',$4,$5,$6)").bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(&detail).bind(&input.reason).bind(&input.approval_ref).bind(ctx.token).execute(&mut *tx).await?;
         tx.commit().await?;
         crate::telemetry::add(crate::telemetry::Metric::Deleted, deleted.len() as u64);
         let mut ack = ack;

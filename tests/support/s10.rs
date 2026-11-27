@@ -224,6 +224,7 @@ async fn retention_carries_atomic_month_totals_keeps_unknown_and_replays_once() 
     let grants = serde_json::json!([]);
     let ctx = CommandContext {
         actor: principal,
+        token: None,
         command_id: uuid::Uuid::new_v4(),
         method: "MAINTENANCE",
         path: "retention_delete",
@@ -462,6 +463,7 @@ async fn retention_preserves_manual_null_tokens_in_both_scopes_and_latest_event_
     let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
     let ctx = CommandContext {
         actor: principal,
+        token: None,
         command_id: uuid::Uuid::new_v4(),
         method: "POST",
         path: "/api/keys",
@@ -692,6 +694,7 @@ async fn retention_protects_entire_safety_family_then_deletes_child_before_root(
     let grants = serde_json::json!([]);
     let ctx = CommandContext {
         actor: principal,
+        token: None,
         command_id: uuid::Uuid::new_v4(),
         method: "MAINTENANCE",
         path: "retention_delete",
@@ -1271,6 +1274,7 @@ async fn retention_all_finite_presets_expire_at_utc_calendar_month_end_including
         let grants = serde_json::json!([]);
         let ctx = CommandContext {
             actor,
+            token: None,
             command_id: uuid::Uuid::new_v4(),
             method: "MAINTENANCE",
             path: "retention",
@@ -1384,6 +1388,7 @@ async fn retention_page_preserves_totals_and_remaining_references() {
     let grants = serde_json::json!([]);
     let ctx = CommandContext {
         actor,
+        token: None,
         command_id: uuid::Uuid::new_v4(),
         method: "MAINTENANCE",
         path: "retention",

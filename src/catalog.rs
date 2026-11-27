@@ -623,11 +623,11 @@ impl CatalogService {
                 break;
             }
         }
-        sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'approve_model_catalog','catalog',$4,$5,$6)")
+        sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$7,$2,$3,'approve_model_catalog','catalog',$4,$5,$6)")
             .bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(target)
             .bind(json!({"version":version,"models":current.len()}))
             .bind(json!({"version":next,"models":entries.len(),"proposal_id":proposal_id,"changes":listed}))
-            .execute(&mut *tx).await?;
+            .bind(ctx.token).execute(&mut *tx).await?;
         tx.commit().await?;
         let mut body = ack;
         body["replayed"] = json!(false);
@@ -715,11 +715,11 @@ impl CatalogService {
             .bind(ctx.actor).bind(ctx.command_id).bind(digest.as_slice()).bind(target).bind(next).bind(&ack)
             .execute(&mut *tx).await?;
         if changed {
-            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'edit_model_catalog_rates','catalog',$4,$5,$6)")
+            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$7,$2,$3,'edit_model_catalog_rates','catalog',$4,$5,$6)")
                 .bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(target)
                 .bind(json!({"version":version,"provider":provider,"model":model,"rates":before}))
                 .bind(json!({"version":next,"provider":provider,"model":model,"rates":after}))
-                .execute(&mut *tx).await?;
+                .bind(ctx.token).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         let mut body = ack;

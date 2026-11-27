@@ -113,6 +113,14 @@ pub(super) fn error(e: ManagementError) -> Response {
                 json!({"key_id":id}),
             );
         }
+        TokenQuota => (409, "management_token_quota_exceeded"),
+        TokenSecretUnavailable(id) => {
+            return details(
+                StatusCode::CONFLICT,
+                "management_token_secret_unavailable",
+                json!({"token_id":id}),
+            );
+        }
         Query(q) => return query_error(q),
     };
     let mut r = failure(StatusCode::from_u16(status).expect("status"), code);
@@ -175,7 +183,7 @@ pub(super) fn acknowledged(result: CommandResult, command_id: Uuid) -> Response 
 }
 pub(super) fn command_context<'a>(
     state: &'a ApiState,
-    actor: Uuid,
+    actor: &Actor,
     command_id: Uuid,
     method: &'a Method,
     path: &'a str,
@@ -183,7 +191,8 @@ pub(super) fn command_context<'a>(
     execution_running: bool,
 ) -> CommandContext<'a> {
     CommandContext {
-        actor,
+        actor: actor.human.current.id,
+        token: actor.human.token.as_ref().map(|t| t.id),
         command_id,
         method: method.as_str(),
         path,
@@ -502,7 +511,7 @@ async fn command(
     let grants = state.api.grants();
     let ctx = command_context(
         state,
-        actor.human.current.id,
+        actor,
         command_id,
         &head.method,
         &path,
@@ -836,15 +845,7 @@ async fn run_credential_command(
     command: CredentialCommand,
 ) -> Response {
     let grants = state.api.grants();
-    let ctx = command_context(
-        state,
-        actor.human.current.id,
-        command_id,
-        &head.method,
-        path,
-        &grants,
-        false,
-    );
+    let ctx = command_context(state, actor, command_id, &head.method, path, &grants, false);
     match service.execute(&ctx, command).await {
         Ok(result) => {
             // 이 프로세스는 즉시, 다른 프로세스는 상태 점검 주기에 맞춰 반영한다.
@@ -909,7 +910,7 @@ pub(super) async fn token_check(
     let grants = state.api.grants();
     let ctx = command_context(
         &state,
-        actor.human.current.id,
+        &actor,
         Uuid::nil(),
         request.method(),
         request.uri().path(),
@@ -954,7 +955,7 @@ async fn setting(
     let grants = state.api.grants();
     let ctx = command_context(
         state,
-        actor.human.current.id,
+        actor,
         command_id.unwrap_or_else(Uuid::nil),
         &head.method,
         head.uri.path(),
@@ -1096,7 +1097,7 @@ async fn access(
     };
     let ctx = command_context(
         state,
-        actor.human.current.id,
+        actor,
         command_id.unwrap_or_else(Uuid::nil),
         &head.method,
         &path,
@@ -1240,6 +1241,166 @@ access_handler!(
     Access::Remove
 );
 
+// ---- 관리 토큰(결정 0014) ----
+
+/// `GET /api/admin/management-tokens`. 모든 관리자의 토큰.
+pub(super) async fn list_management_tokens(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    if request.uri().query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    let grants = state.api.grants();
+    let path = request.uri().path().to_owned();
+    let ctx = command_context(
+        &state,
+        &actor,
+        Uuid::nil(),
+        request.method(),
+        &path,
+        &grants,
+        false,
+    );
+    respond(state.api.store.management_tokens(&ctx).await)
+}
+
+/// `POST /api/admin/management-tokens`. 토큰을 만들고 비밀값을 이 응답에서 한 번만 준다.
+pub(super) async fn create_management_token(
+    State(state): State<ApiState>,
+    actor: Actor,
+    CommandId(command_id): CommandId,
+    request: Request,
+) -> Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Create {
+        name: String,
+        scope: String,
+        validity: String,
+    }
+    let (head, body) = request.into_parts();
+    let Some(command_id) = command_id else {
+        return error(ManagementError::Invalid);
+    };
+    if !identity_encoding(&head.headers) {
+        return unsupported_media_type();
+    }
+    let bytes = match read_body(&state, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if head.uri.query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    if !crate::http::json_content_type(&head.headers) {
+        return unsupported_media_type();
+    }
+    let Ok(input) = serde_json::from_slice::<Create>(&bytes) else {
+        return error(ManagementError::Invalid);
+    };
+    let (Some(scope), Some(validity)) = (
+        crate::auth::TokenScope::parse(&input.scope),
+        crate::ledger::management_tokens::Validity::parse(&input.validity),
+    ) else {
+        return error(ManagementError::Invalid);
+    };
+    let secret = match crate::auth::management_token::generate() {
+        Ok(s) => s,
+        Err(e) => return crate::http::authentication_error(e),
+    };
+    let grants = state.api.grants();
+    let path = head.uri.path().to_owned();
+    let ctx = command_context(
+        &state,
+        &actor,
+        command_id,
+        &head.method,
+        &path,
+        &grants,
+        false,
+    );
+    match state
+        .api
+        .store
+        .create_management_token(
+            &ctx,
+            &input.name,
+            scope,
+            validity,
+            &crate::auth::management_token::hash(&secret),
+        )
+        .await
+    {
+        Ok(mut result) => {
+            if let Some(body) = result.body.as_mut() {
+                body["secret"] = json!(secret);
+            }
+            acknowledged(result, command_id)
+        }
+        Err(e) => {
+            // 같은 명령을 다시 보냈다. 가상 키처럼 명령 ID와 재전송 표시를 붙인다.
+            let replayed = matches!(e, ManagementError::TokenSecretUnavailable(_));
+            let mut response = error(e);
+            if replayed {
+                response.headers_mut().insert(
+                    "x-gateway-command-id",
+                    HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
+                );
+                response.headers_mut().insert(
+                    "x-gateway-command-replayed",
+                    HeaderValue::from_static("true"),
+                );
+            }
+            response
+        }
+    }
+}
+
+/// `DELETE /api/admin/management-tokens/{id}`. 토큰을 폐기한다. 본문과 조회 조건이 없다.
+pub(super) async fn revoke_management_token(
+    State(state): State<ApiState>,
+    actor: Actor,
+    params: Params,
+    CommandId(command_id): CommandId,
+    request: Request,
+) -> Response {
+    let (head, body) = request.into_parts();
+    let Some(command_id) = command_id else {
+        return error(ManagementError::Invalid);
+    };
+    if !identity_encoding(&head.headers) {
+        return unsupported_media_type();
+    }
+    let bytes = match read_body(&state, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let Some(id) = params.uuid("id") else {
+        return error(ManagementError::Invalid);
+    };
+    if !bytes.is_empty() || head.uri.query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    let grants = state.api.grants();
+    // 명령 기록의 경로는 등록한 경로 모양과 표준 UUID로 만든다(결정 0010 규칙 5).
+    let path = format!("/api/admin/management-tokens/{id}");
+    let ctx = command_context(
+        &state,
+        &actor,
+        command_id,
+        &head.method,
+        &path,
+        &grants,
+        false,
+    );
+    match state.api.store.revoke_management_token(&ctx, id).await {
+        Ok(result) => acknowledged(result, command_id),
+        Err(e) => error(e),
+    }
+}
+
 // ---- 모델·가격 카탈로그 ----
 
 /// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인, 단가 고치기(결정 0012).
@@ -1291,7 +1452,7 @@ async fn catalog(
     let grants = state.api.grants();
     let ctx = command_context(
         state,
-        actor.human.current.id,
+        actor,
         command_id,
         &head.method,
         head.uri.path(),
@@ -1466,6 +1627,18 @@ mod error_matrix_tests {
                 409,
                 "key_secret_unavailable",
                 json!({"key_id":key}),
+            ),
+            (
+                ManagementError::TokenQuota,
+                409,
+                "management_token_quota_exceeded",
+                json!({}),
+            ),
+            (
+                ManagementError::TokenSecretUnavailable(key),
+                409,
+                "management_token_secret_unavailable",
+                json!({"token_id":key}),
             ),
             (
                 ManagementError::Query(crate::ledger::dashboard::QueryError::InvalidCursor),

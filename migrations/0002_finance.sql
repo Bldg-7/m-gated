@@ -210,6 +210,8 @@ CREATE TABLE gw_audit_events (
  occurred_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  actor_kind text NOT NULL CHECK(actor_kind IN ('human','system')),
  actor_principal_id uuid REFERENCES gw_principals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+ -- 관리 토큰으로 보낸 명령이면 그 토큰(결정 0014). 사람이 대시보드에서 보낸 명령이면 비어 있다.
+ actor_token_id uuid REFERENCES gw_management_tokens(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
  command_id uuid,
  executor_id uuid,
  request_id uuid,
@@ -222,6 +224,7 @@ CREATE TABLE gw_audit_events (
  reason text CHECK(char_length(reason) BETWEEN 1 AND 1000 AND octet_length(reason)<=4096 AND reason !~ '[[:cntrl:]]'),
  evidence_ref text CHECK(octet_length(evidence_ref) BETWEEN 1 AND 2048 AND evidence_ref !~ '[[:cntrl:]]'),
  FOREIGN KEY(actor_principal_id,command_id) REFERENCES gw_commands(actor_principal_id,command_id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+ CONSTRAINT gw_audit_token_actor CHECK(actor_token_id IS NULL OR actor_kind='human'),
  CHECK(((actor_kind='human' AND actor_principal_id IS NOT NULL AND executor_id IS NULL)
  OR (actor_kind='system' AND actor_principal_id IS NULL AND command_id IS NULL AND executor_id IS NOT NULL AND request_id IS NOT NULL AND operation='inference_auto_pause')) IS TRUE)
 );

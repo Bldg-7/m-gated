@@ -1,4 +1,7 @@
 //! 이메일/비밀번호 로그인(결정 0011). 실제 라우터에 HTTP 요청을 보내 확인한다. 메일은 메모리에 모은다.
+#[path = "support/openapi.rs"]
+#[allow(dead_code)]
+mod openapi;
 #[path = "support/postgres.rs"]
 mod postgres;
 mod support;
@@ -134,6 +137,15 @@ impl Harness {
         });
         let retry_after = header("retry-after");
         let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        // 관리 API의 응답은 OpenAPI 문서(결정 0014 규칙 4)에 맞아야 한다.
+        if path.starts_with("/api/") {
+            let parsed: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+            if let Err(e) =
+                openapi::Document::shared().check_path(method, path, status, parsed.as_ref())
+            {
+                panic!("OpenAPI 문서와 다른 응답: {e}\n{parsed:?}");
+            }
+        }
         Answer {
             status,
             body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),

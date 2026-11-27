@@ -1,6 +1,9 @@
 #[path = "support/finance.rs"]
 #[allow(dead_code)]
 mod finance;
+#[path = "support/openapi.rs"]
+#[allow(dead_code)]
+mod openapi;
 #[path = "support/postgres.rs"]
 mod postgres;
 #[path = "support/provider.rs"]
@@ -191,6 +194,15 @@ impl Harness {
         let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
+        // 관리 API의 응답은 OpenAPI 문서(결정 0014 규칙 4)에 맞아야 한다.
+        if path.starts_with("/api/") {
+            let parsed: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+            if let Err(e) =
+                openapi::Document::shared().check_path(method, path, status, parsed.as_ref())
+            {
+                panic!("OpenAPI 문서와 다른 응답: {e}\n{parsed:?}");
+            }
+        }
         let mut value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         if let (Some(code), Value::Object(map)) = (code, &mut value) {
             map.insert("gateway_error_code".into(), json!(code));

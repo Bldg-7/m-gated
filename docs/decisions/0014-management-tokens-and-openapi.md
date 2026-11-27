@@ -1,7 +1,7 @@
 # 0014. Let scripts call the management API with management tokens, and describe the API in an OpenAPI document
 
 - Date: 2026-11-27
-- Status: Accepted, not implemented
+- Status: Implemented
 
 ## Context
 
@@ -13,15 +13,17 @@ read. Signed-in people and tokens can get the document, and the dashboard shows 
 Terms used below:
 
 - A **virtual key** (starts with `mgw_`) is the credential that a client sends with inference
-  requests, the requests that the gateway forwards to a provider such as Anthropic or OpenAI. These
-  are the **inference routes**, such as `/v1/messages`.
+  requests, the requests that the gateway forwards to a provider such as Anthropic or OpenAI. The
+  routes for these requests are the **inference routes**, such as `/v1/messages`.
 - A **service principal** is a non-human account for inference, for example for a batch job. An
-  admin creates it and names a person as its **owner**. When the owner is suspended or loses
-  access, the service principal is blocked too.
+  admin creates it and names a person as its **owner**. When the owner is suspended (an admin
+  blocked the account with the *Suspend account* button) or is removed from the access list, the
+  service principal is blocked too.
 - A **provider key** is the gateway's own API key for a provider. An admin decides which people and
   service principals may use which provider keys.
 - The **access list** (`gw_access`) holds the e-mail addresses that may use the gateway, each with the
-  role `user` or `admin`. Admins edit it on the dashboard. Both sign-in modes use it.
+  role `user` or `admin`. Admins edit it on the dashboard. The gateway uses it in both sign-in
+  modes, `sso` and `password`.
 - The **command log** (`gw_commands`) keeps the result of each management write, so that a repeated
   command gives the same result. The **audit log** (`gw_audit_events`) keeps who changed what, with
   the values before and after.
@@ -49,11 +51,12 @@ Two things are missing:
 
 Facts that limit the solution:
 
-- Every management write needs an `X-Gateway-Command-ID` header with a UUID. A repeated command with
-  the same ID and input gives the same result, so a script can retry safely.
-- A browser write that uses a cookie needs a CSRF token (a value from `GET /api/csrf` that proves
-  the write came from the dashboard). A browser never adds an `Authorization` header by itself, so a
-  credential in that header needs no CSRF token.
+- Every management write except `POST /api/me/password` needs an `X-Gateway-Command-ID` header with
+  a UUID. Such a write is called a **command**. A repeated command with the same ID and input gives
+  the same result, so a script can retry safely.
+- The dashboard sends the sign-in token in a cookie. A write with a cookie needs a CSRF token (a
+  value from `GET /api/csrf` that proves the write came from the dashboard). A browser never adds an
+  `Authorization` header by itself, so a credential in that header needs no CSRF token.
 - The handlers build most response bodies as JSON values, not as typed Rust structs. So a tool that
   reads Rust types to write an API description would not find the bodies.
 - The dashboard loads nothing from external sites (its content security policy forbids it).
@@ -65,8 +68,8 @@ Facts that limit the solution:
      (`/dashboard/admin/tokens`) or with `POST /api/admin/management-tokens`. The body has a name
      (1 to 64 characters), a scope and a validity period.
    - The scope is `read` or `write`. A `read` token can call only `GET` routes. A write call with a
-     `read` token gets `403 management_token_not_allowed`. A `write` token can call all routes,
-     `GET` and writes, except the routes that rule 2 forbids for all tokens.
+     `read` token gets `403 management_token_not_allowed`. A `write` token can call all management
+     routes, `GET` and writes, except the routes that rule 2 forbids for all tokens.
    - The validity period is `30_days`, `90_days` or `1_year`. There is no unlimited period.
    - The secret starts with `mgt_` and is shown once. The gateway stores only its SHA-256, as for
      virtual keys and sessions.
@@ -84,17 +87,19 @@ Facts that limit the solution:
    - The gateway records the last use of each token at most once per minute.
    - The tokens work the same way in `sso` and `password` mode.
 2. **How a token is sent, and what it may call.**
-   - A token goes in `Authorization: Bearer mgt_...`. A token in a cookie or in the `x-api-key`
-     header (where Anthropic clients send an API key) gets
-     `401 invalid_credentials`. On an inference route, a valid token gets
-     `403 virtual_key_required`, the same answer as for a sign-in token.
+   - A token goes in `Authorization: Bearer mgt_...`. On every route, a token in a cookie or in the
+     `x-api-key` header (where Anthropic clients send an API key) gets `401 invalid_credentials`.
+     On an inference route, a valid token in `Authorization` gets `403 virtual_key_required`, the
+     same answer as for a sign-in token.
    - A call with a token needs no CSRF token. Writes still need `X-Gateway-Command-ID`.
    - A token cannot call the routes that manage tokens (`/api/admin/management-tokens`), so a token
      that leaks cannot make more tokens. It also cannot call three routes that serve a person at a
      browser: `/api/me/password` (change one's password), `/api/csrf` (get a CSRF token) and
-     `/auth/login` (go to the dashboard after sign-in). These calls get
-     `403 management_token_not_allowed`. The other routes under `/auth/` (password sign-in,
-     sign-out, and setting a password from a link) ignore a token.
+     `/auth/login` (the browser's entry point, which sends a signed-in person to the dashboard).
+     These calls get `403 management_token_not_allowed`. The other routes under `/auth/` exist
+     only in `password` mode: sign-in with e-mail and password, sign-out, and setting a password
+     from an invitation or reset link. They take no credential from the `Authorization` header, so
+     a token changes nothing there.
 3. **Audit.** The command log records a token's commands under the token's owner, in the same way
    as the commands that the owner sends from the dashboard. The audit log gets a new column,
    `actor_token_id`, with the token's ID, so it shows which writes came from a token. Issuing and
@@ -116,20 +121,26 @@ Facts that limit the solution:
        routes, that is, every route under `/api/`, including `/api/admin/`.
      - The management route test (`management_routes_postgres`) sends requests to every management
        route and records the results in `tests/golden/management_routes.txt`. It also checks each
-       response body against the document's schema for that route and status.
-     - Every error code that the management API can return is in the document.
+       response body against the document's schema for that route and status. Five other tests
+       that send requests to the management API (`management_postgres`, `access_postgres`,
+       `catalog_postgres`, `credentials_postgres`, `password_postgres`) check their responses in
+       the same way.
+     - Every error code that the management API can return is in the document. A test collects
+       the codes from the code that builds the error responses, and checks each one.
 5. **Dashboard.**
    - *Admin → Management tokens* lists the tokens, issues a token (and shows the secret once), and
      revokes tokens.
    - *API reference* (`/dashboard/api`, for every signed-in person) shows the OpenAPI document: the
-     routes by group, and for each route its role, scope, parameters, bodies and error codes, with
-     a `curl` example. It is part of the dashboard's own code and loads nothing from outside.
+     routes in the document's groups (such as *Virtual keys*), and for each route its role, scope,
+     parameters, bodies and error codes. A
+     route that a token can call also has a `curl` example. The screen is part of the dashboard's
+     own code and loads nothing from outside.
 6. **README.** A new section, *Management API*, explains management tokens, links the document and
    the *API reference* screen, and shows the service principal flow as `curl` calls.
 
 ## Rejected alternatives
 
-**Give a service principal an admin role and a management key.** Service principals are identities
+**Give a service principal an admin role and a key for the management API.** Service principals are identities
 for inference, with allowed models, limits and virtual keys. A management role would mix two kinds of
 identity in one account. A management token instead acts as a person, so the audit log shows which
 admin is responsible for each change.
@@ -154,7 +165,8 @@ system that the gateway does not control, and `password` mode has no authorizati
 
 ## Consequences
 
-- The schema changes in the existing migration files, so existing databases must be recreated.
+- The database schema changes in the existing migration files, so existing databases must be
+  recreated.
 - The command and audit logs gain the new operations, and the audit log gains the `actor_token_id`
   column.
 - Each change to a management route must also change the OpenAPI document, or the tests fail.

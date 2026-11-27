@@ -30,6 +30,8 @@ pub const SCREENS: &[&str] = &[
     "/dashboard/signin",
     "/dashboard/password",
     "/dashboard/admin/settings",
+    "/dashboard/admin/tokens",
+    "/dashboard/api",
 ];
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

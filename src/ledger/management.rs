@@ -62,6 +62,10 @@ pub enum ManagementError {
     CatalogSourcesUnavailable,
     /// 변경안을 만든 뒤 카탈로그가 이미 다른 버전으로 바뀌었다. 다시 동기화해야 한다.
     CatalogProposalStale,
+    /// 이 관리자는 이미 활성 관리 토큰을 상한만큼 가지고 있다(결정 0014).
+    TokenQuota,
+    /// 같은 명령 ID로 이미 만든 관리 토큰이다. 비밀값은 다시 줄 수 없다.
+    TokenSecretUnavailable(Uuid),
 }
 impl From<sqlx::Error> for ManagementError {
     fn from(e: sqlx::Error) -> Self {

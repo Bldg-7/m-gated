@@ -168,14 +168,14 @@ impl PgIdentityStore {
                 .execute(&mut *tx)
                 .await?;
             if changed {
-                sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'set_settlement_rule','settings',$4,$5,$6)")
+                sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$7,$2,$3,'set_settlement_rule','settings',$4,$5,$6)")
                     .bind(ctx.actor)
                     .bind(ctx.command_id)
                     .bind(ctx.digest.as_slice())
                     .bind(Uuid::nil())
                     .bind(&before)
                     .bind(&after)
-                    .execute(&mut *tx)
+                    .bind(ctx.token).execute(&mut *tx)
                     .await?;
             }
             tx.commit().await?;
@@ -274,14 +274,14 @@ impl PgIdentityStore {
                 .execute(&mut *tx)
                 .await?;
             if changed {
-                sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'set_budget_timezone','settings',$4,$5,$6)")
+                sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$7,$2,$3,'set_budget_timezone','settings',$4,$5,$6)")
                     .bind(ctx.actor)
                     .bind(ctx.command_id)
                     .bind(ctx.digest.as_slice())
                     .bind(Uuid::nil())
                     .bind(&before)
                     .bind(&after)
-                    .execute(&mut *tx)
+                    .bind(ctx.token).execute(&mut *tx)
                     .await?;
             }
             tx.commit().await?;

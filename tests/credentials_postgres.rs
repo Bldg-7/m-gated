@@ -1,6 +1,9 @@
 #[path = "support/finance.rs"]
 #[allow(dead_code)]
 mod finance;
+#[path = "support/openapi.rs"]
+#[allow(dead_code)]
+mod openapi;
 #[path = "support/postgres.rs"]
 mod postgres;
 #[path = "support/provider.rs"]
@@ -148,6 +151,7 @@ async fn provider_credentials_rotate_replay_shred_and_refresh_across_instances()
     let ceiling = m_gated::ledger::policy::PolicyLimits::default();
     let ctx = |command_id| CommandContext {
         actor,
+        token: None,
         command_id,
         method: "PUT",
         path: "/api/admin/provider-credentials/anthropic",
@@ -517,6 +521,15 @@ impl Http {
         let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
+        // 관리 API의 응답은 OpenAPI 문서(결정 0014 규칙 4)에 맞아야 한다.
+        if path.starts_with("/api/") {
+            let parsed: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+            if let Err(e) =
+                openapi::Document::shared().check_path(method, path, status, parsed.as_ref())
+            {
+                panic!("OpenAPI 문서와 다른 응답: {e}\n{parsed:?}");
+            }
+        }
         let mut value: serde_json::Value =
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         if let (Some(code), serde_json::Value::Object(map)) = (code, &mut value) {
@@ -1963,5 +1976,160 @@ async fn admin_reads_request_models_and_key_owner() {
     within["limits"]["rpm"] = json!(5);
     let (status, v) = h.call("POST", "/api/keys", &h.bob, Some(within)).await;
     assert_eq!(status, 201, "{v}");
+    h.db.close().await;
+}
+
+/// 결정 0014: 스크립트가 `write` 관리 토큰만으로 서비스 principal을 만들고, 정책과 Provider 키 인가를
+/// 주고, 가상 키를 발급하고 회수한다. README의 "Management API" 예시와 같은 순서다.
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn a_write_management_token_runs_the_service_principal_flow() {
+    let h = Http::new().await;
+    // 관리자가 대시보드에서 하는 일: Provider 키를 등록하고 관리 토큰을 발급한다.
+    let (status, added) = h
+        .call(
+            "POST",
+            &format!("{CREDS}/anthropic"),
+            &h.alice,
+            Some(json!({"label":"batch","secret":KEY_A})),
+        )
+        .await;
+    assert_eq!(status, 201, "{added}");
+    let (status, issued) = h
+        .call(
+            "POST",
+            "/api/admin/management-tokens",
+            &h.alice,
+            Some(json!({"name":"nightly","scope":"write","validity":"30_days"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{issued}");
+    let token = issued["secret"].as_str().unwrap().to_owned();
+    let token_id = id_of(&issued["token"]["id"]);
+
+    // 여기부터는 토큰만 쓴다. 1. 주인이 될 사람을 찾아 서비스 principal을 만든다.
+    let (status, people) = h
+        .call("GET", "/api/admin/principals?kind=human", &token, None)
+        .await;
+    assert_eq!(status, 200, "{people}");
+    let owner = people["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["email"] == "alice@example.test")
+        .map(|p| id_of(&p["id"]))
+        .unwrap();
+    let (status, created) = h
+        .call(
+            "POST",
+            "/api/admin/principals",
+            &token,
+            Some(json!({"display_name":"nightly-batch","management_owner_id":owner})),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let service = id_of(&created["target"]["id"]);
+    let path = format!("/api/admin/principals/{service}");
+
+    // 2. 쓸 수 있는 모델을 정한다. expected_version은 지금 정책 버전이다.
+    let grants =
+        json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]);
+    let limits = json!({"budget":null,"rpm":null,"tpm":null,"count_rpm":null});
+    let (status, detail) = h.call("GET", &path, &token, None).await;
+    assert_eq!(status, 200, "{detail}");
+    let version = detail["principal"]["policy"]["version"].clone();
+    assert_eq!(version, "1");
+    let (status, policy) = h
+        .call(
+            "PUT",
+            &format!("{path}/policy"),
+            &token,
+            Some(json!({"expected_version":version,"disabled":false,"reason":"nightly batch","grants":grants,"limits":limits})),
+        )
+        .await;
+    assert_eq!(status, 200, "{policy}");
+
+    // 3. Provider 키를 찾아 쓰게 해 준다.
+    let (status, credentials) = h.call("GET", CREDS, &token, None).await;
+    assert_eq!(status, 200, "{credentials}");
+    let credential = credentials["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["provider"] == "anthropic")
+        .map(|p| id_of(&p["credentials"][0]["id"]))
+        .unwrap();
+    let (status, authorized) = h
+        .call(
+            "PUT",
+            &format!("{path}/provider-credentials"),
+            &token,
+            Some(authorize(&[credential], &[])),
+        )
+        .await;
+    assert_eq!(status, 200, "{authorized}");
+
+    // 4. 서비스 principal의 가상 키를 발급한다. 그 키로 추론이 된다.
+    let (status, key) = h
+        .call(
+            "POST",
+            "/api/keys",
+            &token,
+            Some(json!({"name":"nightly","service_principal_id":service,"validity":"3_months","grants":grants,"limits":limits,"provider_credentials":{"anthropic":credential}})),
+        )
+        .await;
+    assert_eq!(status, 201, "{key}");
+    let secret = key["key"].as_str().unwrap().to_owned();
+    assert!(secret.starts_with("mgw_"));
+    let (status, sent, used) = h.infer(&secret).await;
+    assert_eq!(
+        (status, sent.as_deref(), used),
+        (200, Some(KEY_A), Some(credential))
+    );
+
+    // 5. 가상 키를 회수한다. expected_version은 키 목록의 버전이다.
+    let (status, keys) = h
+        .call(
+            "GET",
+            &format!("/api/admin/keys?principal_id={service}"),
+            &token,
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{keys}");
+    let listed = &keys["items"][0];
+    assert_eq!(listed["id"], key["metadata"]["id"]);
+    let (status, _) = h
+        .call(
+            "DELETE",
+            &format!(
+                "/api/keys/{}?expected_version={}",
+                listed["id"].as_str().unwrap(),
+                listed["version"].as_str().unwrap()
+            ),
+            &token,
+            None,
+        )
+        .await;
+    assert_eq!(status, 204);
+    assert_eq!(h.infer(&secret).await.0, 401);
+
+    // 다섯 명령은 모두 토큰의 주인 이름으로 남고, 감사 기록에 토큰이 있다.
+    let operations: Vec<String> = sqlx::query_scalar("SELECT a.operation FROM gw_audit_events a JOIN gw_commands c USING(actor_principal_id,command_id) WHERE a.actor_token_id=$1 AND a.actor_principal_id=$2 ORDER BY a.id")
+        .bind(token_id)
+        .bind(owner)
+        .fetch_all(h.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        operations,
+        [
+            "create_service",
+            "replace_policy",
+            "authorize_principal_credentials",
+            "issue_key",
+            "revoke_key"
+        ]
+    );
     h.db.close().await;
 }

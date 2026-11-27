@@ -11,15 +11,19 @@ import { GrantTable } from '../../ui/grant-table';
 import { ProviderLogo } from '../../ui/provider-logo';
 import { EditKeyModal } from './keys-edit';
 
-/** 발급된 키와 복사 버튼. 사용자가 누를 때만 클립보드에 쓰고, 키 창이 닫히면 상태도 함께 사라진다. */
-function SecretValue({ value }: { value: string }) {
+/**
+ * 발급된 비밀값(가상 키, 관리 토큰)과 복사 버튼. 사용자가 누를 때만 클립보드에 쓰고, 창이 닫히면 상태도 함께 사라진다.
+ * copyLabel: 복사 버튼의 이름. 기본은 '키 복사'다.
+ */
+export function SecretValue({ value, copyLabel }: { value: string; copyLabel?: string }) {
   const { t } = useTranslation();
+  const label = copyLabel ?? t('키 복사');
   const [copy, setCopy] = useState<'idle' | 'done' | 'failed'>('idle');
   const write = async () => {
     try { await navigator.clipboard.writeText(value); setCopy('done'); } catch { setCopy('failed'); }
   };
   return <>
-    <div className="secret-value"><code>{value}</code><button type="button" className="secret-copy" aria-label={t('키 복사')} title={t('키 복사')} onClick={() => void write()}>
+    <div className="secret-value"><code>{value}</code><button type="button" className="secret-copy" aria-label={label} title={label} onClick={() => void write()}>
       <svg className="icon" width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{copy === 'done' ? <path d="M3.5 8.5l3 3 6-6.5" /> : <><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" /></>}</svg>
     </button></div>
     {copy !== 'idle' && <p role="status" className="plain meta">{copy === 'done' ? t('클립보드에 복사했습니다.') : t('복사하지 못했습니다. 키를 직접 선택해 복사하세요.')}</p>}

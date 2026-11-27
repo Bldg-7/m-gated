@@ -1,6 +1,9 @@
 #[path = "support/finance.rs"]
 #[allow(dead_code)]
 mod finance;
+#[path = "support/openapi.rs"]
+#[allow(dead_code)]
+mod openapi;
 #[path = "support/postgres.rs"]
 mod postgres;
 #[path = "support/sso.rs"]
@@ -68,6 +71,7 @@ fn ctx<'a>(
 ) -> CommandContext<'a> {
     CommandContext {
         actor,
+        token: None,
         command_id,
         settings,
         grants,
@@ -747,6 +751,13 @@ impl Harness {
         } else {
             serde_json::from_slice(&bytes).unwrap()
         };
+        // 관리 API의 응답은 OpenAPI 문서(결정 0014 규칙 4)에 맞아야 한다. 추론 경로는 문서에 없다.
+        if path.starts_with("/api/") {
+            let body = (!bytes.is_empty()).then_some(&value);
+            if let Err(e) = openapi::Document::shared().check_path(method, path, status, body) {
+                panic!("OpenAPI 문서와 다른 응답: {e}\n{value}");
+            }
+        }
         (status, value, headers)
     }
     async fn close(self) {
@@ -4506,5 +4517,404 @@ async fn management_body_limit_applies_to_content_length_and_chunked_wire_at_bou
     }
     server.abort();
     let _ = server.await;
+    h.close().await;
+}
+
+/// 관리 토큰을 하나 만든다(결정 0014). 비밀값과 토큰 ID를 돌려준다.
+async fn management_token(h: &Harness, by: &str, scope: &str) -> (String, String) {
+    let (s, v, _) = h
+        .request(
+            "POST",
+            "/api/admin/management-tokens",
+            Some(by),
+            false,
+            Some(json!({"name":format!("{scope} 토큰"),"scope":scope,"validity":"30_days"})),
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    (
+        v["secret"].as_str().unwrap().to_owned(),
+        v["token"]["id"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn management_tokens_act_as_their_admin_owner_within_their_scope() {
+    let h = Harness::new().await;
+    // 발급: 비밀값은 이 응답에만 있고, 같은 명령을 다시 보내면 비밀값 대신 오류다.
+    let command = Uuid::new_v4();
+    let input = json!({"name":"배포 스크립트","scope":"write","validity":"30_days"});
+    let (s, v, headers) = h
+        .request(
+            "POST",
+            "/api/admin/management-tokens",
+            Some(&h.token),
+            false,
+            Some(input.clone()),
+            Some(command),
+            &[],
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(headers["x-gateway-command-replayed"], "false");
+    assert_eq!(v["operation"], "create_management_token");
+    assert_eq!(v["token"]["scope"], "write");
+    assert_eq!(v["token"]["owner"]["email"], "alice@example.test");
+    assert_eq!(v["token"]["active"], true);
+    let write = v["secret"].as_str().unwrap().to_owned();
+    let write_id = v["token"]["id"].as_str().unwrap().to_owned();
+    assert!(write.starts_with("mgt_") && write.len() == 47);
+    let stored: Vec<u8> =
+        sqlx::query_scalar("SELECT token_hash FROM gw_management_tokens WHERE id=$1::uuid")
+            .bind(&write_id)
+            .fetch_one(h.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        stored,
+        m_gated::auth::management_token::hash(&write).to_vec()
+    );
+    let (s, v, headers) = h
+        .request(
+            "POST",
+            "/api/admin/management-tokens",
+            Some(&h.token),
+            false,
+            Some(input),
+            Some(command),
+            &[],
+        )
+        .await;
+    assert_eq!(s, 409);
+    assert_eq!(v["error"]["code"], "management_token_secret_unavailable");
+    assert_eq!(v["error"]["details"]["token_id"], write_id.as_str());
+    assert_eq!(headers["x-gateway-command-replayed"], "true");
+    let (read, read_id) = management_token(&h, &h.token, "read").await;
+
+    // 토큰은 소유자로 동작한다. 쓰기 명령은 소유자 이름으로 기록하고, 감사 기록에 토큰을 남긴다.
+    let (s, me, _) = h
+        .request("GET", "/api/me", Some(&write), false, None, None, &[])
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["role"], "admin");
+    assert_eq!(me["principal"]["id"], h.actor.to_string());
+    let (s, v, _) = h
+        .request(
+            "POST",
+            "/api/admin/access",
+            Some(&write),
+            false,
+            Some(json!({"email":"carol@example.test","role":"user"})),
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let row = sqlx::query("SELECT a.actor_principal_id,a.actor_token_id::text AS token,c.actor_principal_id AS command_actor FROM gw_audit_events a JOIN gw_commands c USING(actor_principal_id,command_id) WHERE a.operation='add_access'")
+        .fetch_one(h.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(row.get::<Uuid, _>("actor_principal_id"), h.actor);
+    assert_eq!(row.get::<Uuid, _>("command_actor"), h.actor);
+    assert_eq!(
+        row.get::<Option<String>, _>("token").as_deref(),
+        Some(write_id.as_str())
+    );
+    let issued: Vec<Option<String>> = sqlx::query_scalar("SELECT actor_token_id::text FROM gw_audit_events WHERE operation='create_management_token'")
+        .fetch_all(h.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(issued, vec![None, None]);
+
+    // read 토큰은 GET만 부른다.
+    let (s, _, _) = h
+        .request(
+            "GET",
+            "/api/admin/access",
+            Some(&read),
+            false,
+            None,
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, v, _) = h
+        .request(
+            "POST",
+            "/api/admin/access",
+            Some(&read),
+            false,
+            Some(json!({"email":"dave@example.test","role":"user"})),
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"]["code"].as_str()),
+        (403, Some("management_token_not_allowed"))
+    );
+
+    // 토큰 관리, 비밀번호·CSRF, 로그인 경로는 어느 토큰으로도 부를 수 없다.
+    for token in [&write, &read] {
+        for (method, path) in [
+            ("GET", "/api/admin/management-tokens"),
+            ("GET", "/api/csrf"),
+            ("GET", "/auth/login"),
+        ] {
+            let (s, v, _) = h
+                .request(method, path, Some(token), false, None, None, &[])
+                .await;
+            assert_eq!(
+                (s, v["error"]["code"].as_str()),
+                (403, Some("management_token_not_allowed")),
+                "{path}"
+            );
+        }
+    }
+    let (s, v, _) = h
+        .request(
+            "DELETE",
+            &format!("/api/admin/management-tokens/{read_id}"),
+            Some(&write),
+            false,
+            None,
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"]["code"].as_str()),
+        (403, Some("management_token_not_allowed"))
+    );
+
+    // 토큰은 Authorization 헤더로만 받는다. 추론 경로에서는 가상 키를 요구한다.
+    let (s, v, _) = h
+        .request(
+            "GET",
+            "/api/me",
+            None,
+            false,
+            None,
+            None,
+            &[("x-api-key", &write)],
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"]["code"].as_str()),
+        (401, Some("invalid_credentials"))
+    );
+    let (s, _, _) = h
+        .request("GET", "/api/me", Some(&write), true, None, None, &[])
+        .await;
+    assert_eq!(s, 401);
+    let (s, v, headers) = h
+        .request(
+            "POST",
+            "/anthropic/v1/messages",
+            Some(&write),
+            false,
+            Some(json!({"model":"synthetic-text","max_tokens":16,"messages":[{"role":"user","content":"synthetic-only"}]})),
+            None,
+            &[("anthropic-version", "2023-06-01")],
+        )
+        .await;
+    assert_eq!(
+        (s, headers["x-gateway-error-code"].to_str().unwrap()),
+        (403, "virtual_key_required"),
+        "{v}"
+    );
+    assert!(h.provider.calls.lock().await.is_empty());
+
+    // 소유자가 관리자가 아니면 403이고, 다시 관리자가 되면 토큰이 다시 쓰인다.
+    demote_alice(&h.db).await;
+    let (s, v, _) = h
+        .request("GET", "/api/me", Some(&write), false, None, None, &[])
+        .await;
+    assert_eq!(
+        (s, v["error"]["code"].as_str()),
+        (403, Some("access_denied"))
+    );
+    sqlx::query(
+        "UPDATE gw_access SET role='admin',version=version+1 WHERE email='alice@example.test'",
+    )
+    .execute(h.db.store.pool())
+    .await
+    .unwrap();
+    let (s, _, _) = h
+        .request("GET", "/api/me", Some(&write), false, None, None, &[])
+        .await;
+    assert_eq!(s, 200);
+
+    // 목록은 모든 관리자의 토큰과 마지막 사용 시각을 보여 준다.
+    let (s, list, _) = h
+        .request(
+            "GET",
+            "/api/admin/management-tokens",
+            Some(&h.token),
+            false,
+            None,
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(s, 200);
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let listed = items.iter().find(|t| t["id"] == write_id.as_str()).unwrap();
+    assert!(listed["last_used_at"].is_string());
+    assert!(items.iter().find(|t| t["id"] == read_id.as_str()).unwrap()["revoked_at"].is_null());
+
+    // 다른 관리자도 폐기할 수 있다. 이미 폐기된 토큰을 다시 폐기하면 바뀌는 것이 없다.
+    let mut claims = sso::claims();
+    claims["sub"] = json!("human-2");
+    claims["email"] = json!("bob@example.test");
+    let bob = sso::Signer::shared().sign(&claims, "key1");
+    let path = format!("/api/admin/management-tokens/{write_id}");
+    let (s, v, _) = h
+        .request(
+            "DELETE",
+            &path,
+            Some(&bob),
+            false,
+            None,
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["effect"], "changed");
+    assert_eq!(v["token"]["revoked_by_email"], "bob@example.test");
+    assert_eq!(v["token"]["active"], false);
+    let (s, v, _) = h
+        .request(
+            "DELETE",
+            &path,
+            Some(&h.token),
+            false,
+            None,
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!((s, v["effect"].as_str()), (200, Some("noop")));
+    let revokes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gw_audit_events WHERE operation='revoke_management_token'",
+    )
+    .fetch_one(h.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(revokes, 1);
+    let (s, v, _) = h
+        .request("GET", "/api/me", Some(&write), false, None, None, &[])
+        .await;
+    assert_eq!(
+        (s, v["error"]["code"].as_str()),
+        (401, Some("invalid_credentials"))
+    );
+    let (s, _, _) = h
+        .request(
+            "DELETE",
+            &format!("/api/admin/management-tokens/{}", Uuid::new_v4()),
+            Some(&h.token),
+            false,
+            None,
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!(s, 404);
+
+    // 기한이 지난 토큰은 401이다.
+    sqlx::query("UPDATE gw_management_tokens SET created_at=clock_timestamp()-interval '40 days',expires_at=clock_timestamp()-interval '1 day' WHERE id=$1::uuid")
+        .bind(&read_id)
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let (s, _, _) = h
+        .request("GET", "/api/me", Some(&read), false, None, None, &[])
+        .await;
+    assert_eq!(s, 401);
+    h.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
+async fn management_token_input_and_active_limit_per_admin() {
+    let h = Harness::new().await;
+    for bad in [
+        json!({"name":"","scope":"read","validity":"30_days"}),
+        json!({"name":" ci","scope":"read","validity":"30_days"}),
+        json!({"name":"가".repeat(65),"scope":"read","validity":"30_days"}),
+        json!({"name":"ci","scope":"admin","validity":"30_days"}),
+        json!({"name":"ci","scope":"read","validity":"unlimited"}),
+        json!({"name":"ci","scope":"read","validity":"30_days","owner":"bob"}),
+        json!({"name":"ci","scope":"read"}),
+    ] {
+        let (s, v, _) = h
+            .request(
+                "POST",
+                "/api/admin/management-tokens",
+                Some(&h.token),
+                false,
+                Some(bad.clone()),
+                Some(Uuid::new_v4()),
+                &[],
+            )
+            .await;
+        assert_eq!(
+            (s, v["error"]["code"].as_str()),
+            (400, Some("invalid_request")),
+            "{bad}"
+        );
+    }
+    let mut ids = Vec::new();
+    for _ in 0..30 {
+        ids.push(management_token(&h, &h.token, "read").await.1);
+    }
+    let over = || {
+        h.request(
+            "POST",
+            "/api/admin/management-tokens",
+            Some(&h.token),
+            false,
+            Some(json!({"name":"하나 더","scope":"read","validity":"1_year"})),
+            Some(Uuid::new_v4()),
+            &[],
+        )
+    };
+    let (s, v, _) = over().await;
+    assert_eq!(
+        (s, v["error"]["code"].as_str()),
+        (409, Some("management_token_quota_exceeded"))
+    );
+    // 폐기한 토큰과 기한이 지난 토큰은 세지 않는다.
+    let (s, _, _) = h
+        .request(
+            "DELETE",
+            &format!("/api/admin/management-tokens/{}", ids[0]),
+            Some(&h.token),
+            false,
+            None,
+            Some(Uuid::new_v4()),
+            &[],
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, v, _) = over().await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["token"]["validity"], "1_year");
+    sqlx::query("UPDATE gw_management_tokens SET created_at=clock_timestamp()-interval '40 days',expires_at=clock_timestamp()-interval '1 day' WHERE id=$1::uuid")
+        .bind(&ids[1])
+        .execute(h.db.store.pool())
+        .await
+        .unwrap();
+    let (s, _, _) = over().await;
+    assert_eq!(s, 201);
+    let (s, _, _) = over().await;
+    assert_eq!(s, 409);
     h.close().await;
 }

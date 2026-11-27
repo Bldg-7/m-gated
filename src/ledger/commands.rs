@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 pub struct CommandContext<'a> {
     pub actor: Uuid,
+    /// 관리 토큰으로 보낸 명령이면 그 토큰의 ID(결정 0014). 감사 기록의 `actor_token_id`에 남는다.
+    pub token: Option<Uuid>,
     pub command_id: Uuid,
     pub method: &'a str,
     pub path: &'a str,
@@ -587,7 +589,7 @@ impl PgLedger {
         let ack = json!({"command_id":ctx.command_id,"operation":command.operation(),"target":{"kind":kind,"id":result_target},"result_version":result_version.map(|v|v.to_string()),"effect":if changed{"changed"}else{"noop"}});
         sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_version,result_projection,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz)").bind(ctx.actor).bind(ctx.command_id).bind(digest.as_slice()).bind(command.operation()).bind(kind).bind(result_target).bind(status as i16).bind(result_version).bind(&ack).bind(&now).execute(&mut *tx).await?;
         if changed {
-            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot,reason,evidence_ref,occurred_at) VALUES('human',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::timestamptz)").bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(command.operation()).bind(kind).bind(result_target).bind(before).bind(after).bind(reason).bind(evidence).bind(&now).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot,reason,evidence_ref,occurred_at) VALUES('human',$1,$12,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::timestamptz)").bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(command.operation()).bind(kind).bind(result_target).bind(before).bind(after).bind(reason).bind(evidence).bind(&now).bind(ctx.token).execute(&mut *tx).await?;
         }
         let body = if let Some(secret) = secret {
             Some(json!({"key":secret,"metadata":key_metadata(&mut tx,result_target).await?}))

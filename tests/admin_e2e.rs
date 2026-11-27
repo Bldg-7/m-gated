@@ -244,7 +244,7 @@ async fn administrator_browser_commands_queries_and_current_authority() {
             sqlx::query("UPDATE gw_fixture_clock SET observed=(SELECT GREATEST(r.finished_at,(SELECT max(e.observed_at) FROM gw_usage_events e WHERE e.request_id=r.id))+interval '3 months' FROM gw_requests r WHERE r.id=$1)").bind(retention_request).execute(store.pool()).await.unwrap();
             let cfg=config();let settings=AccessSettings::from_config(&cfg);let grants=json!([]);
             let ledger=PgLedger::new(store.clone(),m_gated::gateway::auth_config_digest(&cfg));
-            let ctx=CommandContext{actor:retention_actor,command_id:Uuid::new_v4(),method:"MAINTENANCE",path:"retention",settings:&settings,grants:&grants,digest:[1;32],ceiling:cfg.execution_ceiling(),execution_running:false};
+            let ctx=CommandContext{actor:retention_actor,token:None,command_id:Uuid::new_v4(),method:"MAINTENANCE",path:"retention",settings:&settings,grants:&grants,digest:[1;32],ceiling:cfg.execution_ceiling(),execution_running:false};
             let result=ledger.retention_delete(&ctx,&Retention{ledger:Some(DurationPreset::ThreeMonths),audit:None,commands:None},&RetentionDelete{after:None,limit:50,deletion_approved:true,approval_ref:"synthetic-browser-local-D7".into(),reason:"실제 삭제 후 UI 캐시 제거".into()}).await.unwrap();
             let deleted=result["result"]["deleted_requests"].as_u64().unwrap();
             assert_eq!(deleted,1,"실제 선택 가족 삭제 건수");

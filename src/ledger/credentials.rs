@@ -892,9 +892,9 @@ impl CredentialService {
             .bind(ctx.actor).bind(ctx.command_id).bind(digest.as_slice()).bind(command.operation()).bind(target_kind).bind(target).bind(status as i16).bind(version).bind(&ack)
             .execute(&mut *tx).await?;
         if changed {
-            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,$4,$5,$6,$7,$8)")
+            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$9,$2,$3,$4,$5,$6,$7,$8)")
                 .bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(command.operation()).bind(target_kind).bind(target).bind(before).bind(&after)
-                .execute(&mut *tx).await?;
+                .bind(ctx.token).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         let mut body = ack;

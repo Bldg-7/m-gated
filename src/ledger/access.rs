@@ -125,7 +125,7 @@ async fn record(
         .bind(&ack)
         .execute(&mut *c)
         .await?;
-    sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,$4,'access',$5,$6,$7)")
+    sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$8,$2,$3,$4,'access',$5,$6,$7)")
         .bind(ctx.actor)
         .bind(ctx.command_id)
         .bind(ctx.digest.as_slice())
@@ -133,7 +133,7 @@ async fn record(
         .bind(id)
         .bind(before)
         .bind(after)
-        .execute(&mut *c)
+        .bind(ctx.token).execute(&mut *c)
         .await?;
     Ok(CommandResult {
         status,
@@ -377,13 +377,13 @@ impl PgIdentityStore {
                 .bind(&ack)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'send_access_link','access',$4,'{}',$5)")
+            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,actor_token_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$6,$2,$3,'send_access_link','access',$4,'{}',$5)")
                 .bind(ctx.actor)
                 .bind(ctx.command_id)
                 .bind(ctx.digest.as_slice())
                 .bind(id)
                 .bind(&link)
-                .execute(&mut *tx)
+                .bind(ctx.token).execute(&mut *tx)
                 .await?;
             tx.commit().await?;
             Ok(CommandResult {

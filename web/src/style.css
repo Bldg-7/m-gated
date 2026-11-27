@@ -328,3 +328,31 @@ details > :not(summary) { margin: 16px; }
 .auth-card { width: 100%; max-width: 420px; }
 .auth-title { font-size: 20px; line-height: 28px; font-weight: 600; }
 .auth-foot { display: flex; justify-content: flex-end; }
+
+/* ── API 문서(결정 0014) ─────────────────── */
+.api-ref { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.api-nav { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
+.api-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.api-nav a { display: flex; align-items: baseline; gap: 8px; min-height: 32px; padding: 6px 8px; border-radius: var(--radius-md); color: var(--gray-700); text-decoration: none; font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.api-nav a:hover { background: var(--gray-50); color: var(--gray-900); }
+.api-nav a[aria-current="page"] { background: var(--blue-50); color: var(--blue-700); }
+.api-detail { min-width: 0; }
+.api-operation-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 18px; line-height: 26px; }
+.api-method { flex: none; display: inline-block; min-width: 56px; padding: 0 6px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; line-height: 20px; font-weight: 700; text-align: center; color: var(--neutral-fg); background: var(--neutral-bg); }
+.api-method-get { color: var(--info-fg); background: var(--info-bg); }
+.api-method-post { color: var(--success-fg); background: var(--success-bg); }
+.api-method-put, .api-method-patch { color: var(--warning-fg); background: var(--warning-bg); }
+.api-method-delete { color: var(--critical-fg); background: var(--critical-bg); }
+.api-status { display: inline-block; min-width: 40px; padding: 0 6px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 12px; line-height: 20px; font-weight: 700; text-align: center; color: var(--neutral-fg); background: var(--neutral-bg); }
+.api-status-2 { color: var(--success-fg); background: var(--success-bg); }
+.api-status-4 { color: var(--warning-fg); background: var(--warning-bg); }
+.api-status-5 { color: var(--critical-fg); background: var(--critical-bg); }
+.api-response { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-top: 1px solid var(--gray-100); }
+.api-schema { list-style: none; margin: 4px 0 0; padding: 0 0 0 16px; border-left: 2px solid var(--gray-100); display: flex; flex-direction: column; gap: 6px; }
+.api-required { color: var(--critical-fg); background: var(--critical-bg); border-color: var(--critical-bd); height: 20px; padding: 0 6px; font-size: 11px; }
+.api-prose { max-width: 80ch; }
+.api-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+@media (max-width: 820px) {
+  .api-ref { grid-template-columns: minmax(0, 1fr); }
+  .api-nav { position: static; max-height: none; }
+}

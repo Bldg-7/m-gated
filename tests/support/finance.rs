@@ -131,6 +131,7 @@ pub async fn virtual_key(
         m_gated::ledger::PgLedger::new(store.clone(), m_gated::gateway::auth_config_digest(cfg));
     let ctx = CommandContext {
         actor: principal,
+        token: None,
         command_id: Uuid::new_v4(),
         method: "POST",
         path: "/api/keys",

@@ -331,6 +331,11 @@ pub fn authentication_error(error: crate::auth::AuthError) -> Response {
             "virtual_key_required",
             "추론 요청은 가상 키로만 보낼 수 있습니다.",
         ),
+        AuthError::ManagementTokenNotAllowed => (
+            StatusCode::FORBIDDEN,
+            "management_token_not_allowed",
+            "관리 토큰으로는 이 요청을 보낼 수 없습니다.",
+        ),
         AuthError::DatabaseUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "db_unavailable",
@@ -344,6 +349,12 @@ pub fn authentication_error(error: crate::auth::AuthError) -> Response {
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     }
     response
+}
+
+/// 등록되지 않은 경로의 응답. 관리 API 문서의 오류 코드 시험(`admin::openapi_tests`)이 쓴다.
+#[cfg(test)]
+pub(crate) async fn route_not_found_for_test() -> Response {
+    route_not_found().await
 }
 
 #[cfg(test)]

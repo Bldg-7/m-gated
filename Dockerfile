@@ -12,6 +12,7 @@ COPY src/ ./src/
 COPY crates/ ./crates/
 COPY adapters/ ./adapters/
 COPY migrations/ ./migrations/
+COPY api/ ./api/
 RUN cargo build --locked --release
 
 # DeepSeek와 OpenAI WASM 어댑터(결정 0009, 0013). 설정에 `adapter`를 적은 경우에만 쓴다. 릴리스

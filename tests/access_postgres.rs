@@ -1,4 +1,7 @@
 //! 접근 목록(결정 0001)의 관리 API와 규칙. 실제 라우터에 HTTP 요청을 보내 확인한다.
+#[path = "support/openapi.rs"]
+#[allow(dead_code)]
+mod openapi;
 #[path = "support/postgres.rs"]
 mod postgres;
 #[path = "support/sso.rs"]
@@ -110,6 +113,15 @@ impl Harness {
         let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status().as_u16();
         let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        // 관리 API의 응답은 OpenAPI 문서(결정 0014 규칙 4)에 맞아야 한다.
+        if path.starts_with("/api/") {
+            let parsed: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+            if let Err(e) =
+                openapi::Document::shared().check_path(method, path, status, parsed.as_ref())
+            {
+                panic!("OpenAPI 문서와 다른 응답: {e}\n{parsed:?}");
+            }
+        }
         (
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),

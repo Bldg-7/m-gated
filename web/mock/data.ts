@@ -5,6 +5,7 @@
  */
 import type { Grant, Limits, Validity } from '../src/lib/types';
 import type { CatalogEntry, CatalogProposal, RequestDetail, Safety } from '../src/features/admin/types';
+import type { ManagementToken } from '../src/features/admin/tokens';
 
 export type MockPrincipal = { id: string; kind: 'human' | 'service'; display_name: string; email: string | null; management_owner_id: string | null; version: number; policy: { id: string; version: number; disabled: boolean; grants: Grant[]; limits: Limits }; safety: Safety; scope_id: string };
 export type MockCredential = { id: string; provider: string; label: string; hint: string; version: number; state: 'active' | 'retired'; decryptable: boolean; verified_at: string; created_at: string; created_by: string; retired_at: string | null; retired_by: string | null };
@@ -25,6 +26,8 @@ export type MockState = {
   authorizationVersion: number;
   /** 접근 목록(결정 0001). 고정 관리자는 admin@example.test 다. password_set: 비밀번호를 정했는지(결정 0011, 비밀번호 방식에서만 화면에 보인다). */
   access: { id: string; email: string; role: 'user' | 'admin'; added_by_email: string | null; added_at: string; version: number; password_set: boolean }[];
+  /** 관리 토큰(결정 0014). 비밀값은 두지 않는다. */
+  tokens: ManagementToken[];
 };
 
 const DAY = 86400000;
@@ -207,5 +210,10 @@ export function createState(): MockState {
     access: [
       ...principals.filter(p => p.kind === 'human' && p.email).map((p, i) => ({ id: `acc-${i + 1}`, email: p.email!, role: (p.email === 'admin@example.test' ? 'admin' : 'user') as 'user' | 'admin', added_by_email: p.email === 'admin@example.test' ? null : 'admin@example.test', added_at: ago(30), version: 1, password_set: true })),
       { id: 'acc-new', email: 'new-hire@example.test', role: 'user' as const, added_by_email: 'admin@example.test', added_at: ago(1), version: 1, password_set: false },
+    ],
+    tokens: [
+      { id: uid(9, 1), name: '배포 스크립트', scope: 'write', validity: '90_days', owner: { id: ADMIN_ID, email: 'admin@example.test', display_name: '관리자' }, created_at: ago(20), expires_at: iso(now + 70 * DAY), revoked_at: null, revoked_by_email: null, last_used_at: ago(0, 2), active: true },
+      { id: uid(9, 2), name: '사용량 대시보드', scope: 'read', validity: '1_year', owner: { id: ADMIN_ID, email: 'admin@example.test', display_name: '관리자' }, created_at: ago(40), expires_at: iso(now + 325 * DAY), revoked_at: null, revoked_by_email: null, last_used_at: null, active: true },
+      { id: uid(9, 3), name: '옛 CI 작업', scope: 'write', validity: '30_days', owner: { id: ADMIN_ID, email: 'admin@example.test', display_name: '관리자' }, created_at: ago(25), expires_at: iso(now + 5 * DAY), revoked_at: ago(3), revoked_by_email: 'admin@example.test', last_used_at: ago(4), active: false },
     ] };
 }

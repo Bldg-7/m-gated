@@ -170,167 +170,211 @@ impl DashboardApi {
             auth: AuthRoute::CookieOnly,
             admin: false,
             key_owner: false,
+            tokens: false,
         };
         let key = Checks::Management {
             auth: AuthRoute::Management,
             admin: false,
             key_owner: true,
+            tokens: true,
         };
-        let router = Router::new()
-            .route("/auth/login", route(&s, Checks::Login, "GET", get(login)))
-            .route("/api/me", route(&s, Checks::Dashboard, "GET", get(me)))
-            .route(
-                "/api/usage",
-                route(&s, Checks::Dashboard, "GET", get(usage)),
-            )
-            .route(
-                "/api/usage/models",
-                route(&s, Checks::Dashboard, "GET", get(usage_models)),
-            )
-            .route("/api/csrf", route(&s, csrf, "GET", get(m::csrf_token)))
-            .route(
-                "/api/keys",
-                route(&s, user, "GET, POST", get(m::list_keys).post(m::issue_key)),
-            )
-            .route(
-                "/api/keys/{id}",
-                route(
-                    &s,
-                    key,
-                    "DELETE, PATCH",
-                    delete(m::revoke_key).patch(m::edit_key),
-                ),
-            )
-            .route(
-                "/api/admin/principals",
-                route(
-                    &s,
-                    admin,
-                    "GET, POST",
-                    get(m::list_principals).post(m::create_principal),
-                ),
-            )
-            .route(
-                "/api/admin/principals/{id}",
-                route(
-                    &s,
-                    admin,
-                    "GET, PATCH",
-                    get(m::principal_detail).patch(m::update_principal),
-                ),
-            )
-            .route(
-                "/api/admin/principals/{id}/policy",
-                route(&s, admin, "PUT", put(m::set_policy)),
-            )
-            .route(
-                "/api/admin/principals/{id}/inference-pause/release",
-                route(&s, admin, "POST", post(m::release_pause)),
-            )
-            .route(
-                "/api/admin/principals/{id}/provider-credentials",
-                route(&s, admin, "PUT", put(m::authorize_credentials)),
-            )
-            .route(
-                "/api/admin/keys",
-                route(&s, admin, "GET", get(m::list_keys)),
-            )
-            .route(
-                "/api/admin/keys/{id}/provider-credential",
-                route(&s, admin, "PUT", put(m::bind_key_credential)),
-            )
-            .route(
-                "/api/admin/provider-credentials",
-                route(&s, admin, "GET", get(m::list_credentials)),
-            )
-            .route(
-                "/api/admin/provider-credentials/{provider}",
-                route(&s, admin, "POST", post(m::add_credential)),
-            )
-            .route(
-                "/api/admin/provider-credentials/{provider}/{id}",
-                route(
-                    &s,
-                    admin,
-                    "POST, PUT, PATCH, DELETE",
-                    post(m::credential_item)
-                        .put(m::credential_item)
-                        .patch(m::credential_item)
-                        .delete(m::credential_item),
-                ),
-            )
-            .route(
-                "/api/admin/access",
-                route(
-                    &s,
-                    admin,
-                    "GET, POST",
-                    get(m::access_list).post(m::add_access),
-                ),
-            )
-            .route(
-                "/api/admin/access/{id}",
-                route(
-                    &s,
-                    admin,
-                    "DELETE, PATCH",
-                    delete(m::remove_access).patch(m::update_access),
-                ),
-            )
-            .route(
-                "/api/admin/settings",
-                route(&s, admin, "GET", get(m::settings_view)),
-            )
-            .route(
-                "/api/admin/settings/budget-timezone",
-                route(&s, admin, "PUT", put(m::set_budget_timezone)),
-            )
-            .route(
-                "/api/admin/settings/cutoff-rule",
-                route(&s, admin, "PUT", put(m::set_cutoff_rule)),
-            )
-            .route(
-                "/api/admin/token-check",
-                route(&s, admin, "GET", get(m::token_check)),
-            )
-            .route(
-                "/api/admin/model-catalog",
-                route(&s, admin, "GET", get(m::catalog_view)),
-            )
-            .route(
-                "/api/admin/model-catalog/sync",
-                route(&s, admin, "POST", post(m::catalog_sync)),
-            )
-            .route(
-                "/api/admin/model-catalog/approve",
-                route(&s, admin, "POST", post(m::catalog_approve)),
-            )
-            .route(
-                "/api/admin/model-catalog/rates",
-                route(&s, admin, "PUT", put(m::catalog_rates)),
-            )
-            .route(
-                "/api/admin/usage",
-                route(&s, admin, "GET", get(m::admin_usage)),
-            )
-            .route(
-                "/api/admin/requests",
-                route(&s, admin, "GET", get(m::list_requests)),
-            )
-            .route(
-                "/api/admin/requests/models",
-                route(&s, admin, "GET", get(m::request_models)),
-            )
-            .route(
-                "/api/admin/requests/{id}",
-                route(&s, admin, "GET", get(m::request_detail)),
-            )
-            .route(
-                "/api/admin/requests/{id}/settlement",
-                route(&s, admin, "PUT", put(m::settle)),
-            );
+        let table = Table {
+            router: Router::new().route("/auth/login", route(&s, Checks::Login, "GET", get(login))),
+            state: s.clone(),
+            added: Vec::new(),
+        }
+        .at("/api/me", Checks::Dashboard, "GET", get(me))
+        .at("/api/openapi.json", Checks::Dashboard, "GET", get(openapi))
+        .at("/api/usage", Checks::Dashboard, "GET", get(usage))
+        .at(
+            "/api/usage/models",
+            Checks::Dashboard,
+            "GET",
+            get(usage_models),
+        )
+        .at("/api/csrf", csrf, "GET", get(m::csrf_token))
+        .at(
+            "/api/keys",
+            user,
+            "GET, POST",
+            get(m::list_keys).post(m::issue_key),
+        )
+        .at(
+            "/api/keys/{id}",
+            key,
+            "DELETE, PATCH",
+            delete(m::revoke_key).patch(m::edit_key),
+        )
+        .at(
+            "/api/admin/principals",
+            admin,
+            "GET, POST",
+            get(m::list_principals).post(m::create_principal),
+        )
+        .at(
+            "/api/admin/principals/{id}",
+            admin,
+            "GET, PATCH",
+            get(m::principal_detail).patch(m::update_principal),
+        )
+        .at(
+            "/api/admin/principals/{id}/policy",
+            admin,
+            "PUT",
+            put(m::set_policy),
+        )
+        .at(
+            "/api/admin/principals/{id}/inference-pause/release",
+            admin,
+            "POST",
+            post(m::release_pause),
+        )
+        .at(
+            "/api/admin/principals/{id}/provider-credentials",
+            admin,
+            "PUT",
+            put(m::authorize_credentials),
+        )
+        .at("/api/admin/keys", admin, "GET", get(m::list_keys))
+        .at(
+            "/api/admin/keys/{id}/provider-credential",
+            admin,
+            "PUT",
+            put(m::bind_key_credential),
+        )
+        .at(
+            "/api/admin/provider-credentials",
+            admin,
+            "GET",
+            get(m::list_credentials),
+        )
+        .at(
+            "/api/admin/provider-credentials/{provider}",
+            admin,
+            "POST",
+            post(m::add_credential),
+        )
+        .at(
+            "/api/admin/provider-credentials/{provider}/{id}",
+            admin,
+            "POST, PUT, PATCH, DELETE",
+            post(m::credential_item)
+                .put(m::credential_item)
+                .patch(m::credential_item)
+                .delete(m::credential_item),
+        )
+        .at(
+            "/api/admin/access",
+            admin,
+            "GET, POST",
+            get(m::access_list).post(m::add_access),
+        )
+        .at(
+            "/api/admin/access/{id}",
+            admin,
+            "DELETE, PATCH",
+            delete(m::remove_access).patch(m::update_access),
+        )
+        .at(
+            "/api/admin/management-tokens",
+            Checks::ADMIN_NO_TOKEN,
+            "GET, POST",
+            get(m::list_management_tokens).post(m::create_management_token),
+        )
+        .at(
+            "/api/admin/management-tokens/{id}",
+            Checks::ADMIN_NO_TOKEN,
+            "DELETE",
+            delete(m::revoke_management_token),
+        )
+        .at("/api/admin/settings", admin, "GET", get(m::settings_view))
+        .at(
+            "/api/admin/settings/budget-timezone",
+            admin,
+            "PUT",
+            put(m::set_budget_timezone),
+        )
+        .at(
+            "/api/admin/settings/cutoff-rule",
+            admin,
+            "PUT",
+            put(m::set_cutoff_rule),
+        )
+        .at("/api/admin/token-check", admin, "GET", get(m::token_check))
+        .at(
+            "/api/admin/model-catalog",
+            admin,
+            "GET",
+            get(m::catalog_view),
+        )
+        .at(
+            "/api/admin/model-catalog/sync",
+            admin,
+            "POST",
+            post(m::catalog_sync),
+        )
+        .at(
+            "/api/admin/model-catalog/approve",
+            admin,
+            "POST",
+            post(m::catalog_approve),
+        )
+        .at(
+            "/api/admin/model-catalog/rates",
+            admin,
+            "PUT",
+            put(m::catalog_rates),
+        )
+        .at("/api/admin/usage", admin, "GET", get(m::admin_usage))
+        .at("/api/admin/requests", admin, "GET", get(m::list_requests))
+        .at(
+            "/api/admin/requests/models",
+            admin,
+            "GET",
+            get(m::request_models),
+        )
+        .at(
+            "/api/admin/requests/{id}",
+            admin,
+            "GET",
+            get(m::request_detail),
+        )
+        .at(
+            "/api/admin/requests/{id}/settlement",
+            admin,
+            "PUT",
+            put(m::settle),
+        );
+        let password_mode = s.api.mode == crate::config::AuthMode::Password;
         // 비밀번호 방식의 경로(결정 0011). SSO 방식에는 없다.
-        let router = if s.api.mode == crate::config::AuthMode::Password {
+        let table = if password_mode {
+            use password as pw;
+            table
+                .at(
+                    "/api/me/password",
+                    Checks::USER_NO_TOKEN,
+                    "POST",
+                    post(pw::change_password),
+                )
+                .at(
+                    "/api/admin/access/{id}/link",
+                    admin,
+                    "POST",
+                    post(pw::send_link),
+                )
+        } else {
+            table
+        };
+        debug_assert_eq!(
+            {
+                let mut added = table.added.clone();
+                added.sort();
+                added
+            },
+            route_table(password_mode),
+            "관리 API 경로 표(ROUTES)와 등록한 경로가 다르다"
+        );
+        let router = if password_mode {
             use password as pw;
             let open = |allow: &'static str, handler: axum::routing::MethodRouter<ApiState>| {
                 handler.fallback(move || async move {
@@ -342,24 +386,123 @@ impl DashboardApi {
                     response
                 })
             };
-            router
+            table
+                .router
                 .route("/auth/password", open("POST", post(pw::sign_in)))
                 .route("/auth/password/link", open("POST", post(pw::link_info)))
                 .route("/auth/password/set", open("POST", post(pw::set_password)))
                 .route("/auth/logout", open("POST", post(pw::sign_out)))
-                .route(
-                    "/api/me/password",
-                    route(&s, user, "POST", post(pw::change_password)),
-                )
-                .route(
-                    "/api/admin/access/{id}/link",
-                    route(&s, admin, "POST", post(pw::send_link)),
-                )
         } else {
-            router
+            table.router
         };
         router.with_state(s)
     }
+}
+/// 관리 API의 경로 표(결정 0014 규칙 4): 경로, 허용 메서드, 비밀번호 방식에만 있는지.
+/// `/api/` 아래 경로만 둔다. `routes`가 등록하는 경로와 OpenAPI 문서의 경로는 이 표와 같아야 한다.
+pub const ROUTES: &[(&str, &str, bool)] = &[
+    ("/api/me", "GET", false),
+    ("/api/me/password", "POST", true),
+    ("/api/openapi.json", "GET", false),
+    ("/api/usage", "GET", false),
+    ("/api/usage/models", "GET", false),
+    ("/api/csrf", "GET", false),
+    ("/api/keys", "GET, POST", false),
+    ("/api/keys/{id}", "DELETE, PATCH", false),
+    ("/api/admin/principals", "GET, POST", false),
+    ("/api/admin/principals/{id}", "GET, PATCH", false),
+    ("/api/admin/principals/{id}/policy", "PUT", false),
+    (
+        "/api/admin/principals/{id}/inference-pause/release",
+        "POST",
+        false,
+    ),
+    (
+        "/api/admin/principals/{id}/provider-credentials",
+        "PUT",
+        false,
+    ),
+    ("/api/admin/keys", "GET", false),
+    ("/api/admin/keys/{id}/provider-credential", "PUT", false),
+    ("/api/admin/provider-credentials", "GET", false),
+    ("/api/admin/provider-credentials/{provider}", "POST", false),
+    (
+        "/api/admin/provider-credentials/{provider}/{id}",
+        "POST, PUT, PATCH, DELETE",
+        false,
+    ),
+    ("/api/admin/access", "GET, POST", false),
+    ("/api/admin/access/{id}", "DELETE, PATCH", false),
+    ("/api/admin/access/{id}/link", "POST", true),
+    ("/api/admin/management-tokens", "GET, POST", false),
+    ("/api/admin/management-tokens/{id}", "DELETE", false),
+    ("/api/admin/settings", "GET", false),
+    ("/api/admin/settings/budget-timezone", "PUT", false),
+    ("/api/admin/settings/cutoff-rule", "PUT", false),
+    ("/api/admin/token-check", "GET", false),
+    ("/api/admin/model-catalog", "GET", false),
+    ("/api/admin/model-catalog/sync", "POST", false),
+    ("/api/admin/model-catalog/approve", "POST", false),
+    ("/api/admin/model-catalog/rates", "PUT", false),
+    ("/api/admin/usage", "GET", false),
+    ("/api/admin/requests", "GET", false),
+    ("/api/admin/requests/models", "GET", false),
+    ("/api/admin/requests/{id}", "GET", false),
+    ("/api/admin/requests/{id}/settlement", "PUT", false),
+];
+/// 한 로그인 방식에서 등록하는 경로와 허용 메서드. 경로 순서로 정렬한다.
+pub fn route_table(password: bool) -> Vec<(&'static str, &'static str)> {
+    let mut table: Vec<_> = ROUTES
+        .iter()
+        .filter(|(_, _, only)| password || !only)
+        .map(|(path, allow, _)| (*path, *allow))
+        .collect();
+    table.sort();
+    table
+}
+/// 경로를 등록하면서 등록한 경로와 허용 메서드를 모은다.
+struct Table {
+    router: Router<ApiState>,
+    state: ApiState,
+    added: Vec<(&'static str, &'static str)>,
+}
+impl Table {
+    fn at(
+        mut self,
+        path: &'static str,
+        checks: guard::Checks,
+        allow: &'static str,
+        methods: axum::routing::MethodRouter<ApiState>,
+    ) -> Self {
+        self.router = self
+            .router
+            .route(path, guard::route(&self.state, checks, allow, methods));
+        self.added.push((path, allow));
+        self
+    }
+}
+/// OpenAPI 문서(결정 0014 규칙 4). 바이너리에 넣어 두고 그대로 준다.
+pub const OPENAPI: &str = include_str!("../api/management.openapi.json");
+/// `GET /api/openapi.json`. 로그인한 사람과 관리 토큰에 관리 API 문서를 준다.
+async fn openapi(request: Request) -> Response {
+    if request.uri().query().is_some() {
+        return query_error(QueryError::InvalidFilter);
+    }
+    let mut r = (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        OPENAPI,
+    )
+        .into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r.headers_mut().insert(
+        "x-gateway-request-id",
+        HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).expect("UUID"),
+    );
+    r
 }
 #[derive(Clone)]
 struct ApiState {
@@ -531,5 +674,385 @@ fn query_error(error: QueryError) -> Response {
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         }
         r
+    }
+}
+
+/// 관리 API가 낼 수 있는 오류 코드가 모두 OpenAPI 문서에 있는지 본다(결정 0014 규칙 4).
+/// 오류를 만드는 함수는 이 crate 밖에서 부를 수 없으므로 여기서 시험한다.
+#[cfg(test)]
+mod openapi_tests {
+    use super::{management::error, query_error};
+    use crate::{auth::AuthError, ledger::management::ManagementError, runtime::AdmissionError};
+    use axum::{http::StatusCode, response::Response};
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    /// `/auth/` 아래 비밀번호 로그인 경로만 내는 코드. 문서는 `/auth/`를 설명하지 않는다(결정 0014 규칙 4).
+    /// - `sign_in_locked`: `POST /auth/password`가 실패를 거듭한 이메일을 잠깐 막는다.
+    /// - `link_invalid`: `POST /auth/password/link`, `POST /auth/password/set`이 모르는 링크를 거절한다.
+    const AUTH_ONLY: &[&str] = &["sign_in_locked", "link_invalid"];
+
+    /// 원문에서 오류 코드를 직접 넘기는 곳을 찾을 파일. 시험 모듈은 빼고 읽는다.
+    const SOURCES: &[(&str, &str)] = &[
+        ("src/admin.rs", include_str!("admin.rs")),
+        ("src/admin/guard.rs", include_str!("admin/guard.rs")),
+        (
+            "src/admin/management.rs",
+            include_str!("admin/management.rs"),
+        ),
+        ("src/admin/password.rs", include_str!("admin/password.rs")),
+        ("src/http.rs", include_str!("http.rs")),
+    ];
+
+    fn code(response: &Response) -> (u16, String) {
+        let code = response
+            .headers()
+            .get("x-gateway-error-code")
+            .and_then(|v| v.to_str().ok())
+            .expect("오류 응답에는 x-gateway-error-code가 있다");
+        (response.status().as_u16(), code.to_owned())
+    }
+
+    /// 모든 `AuthError`. 값이 늘면 아래 `match`가 컴파일되지 않으므로 목록도 함께 고친다.
+    fn auth_errors() -> Vec<AuthError> {
+        use AuthError::*;
+        let all = vec![
+            InvalidCredentials,
+            AuthSourceForbidden,
+            AccessDenied,
+            OwnerInactive,
+            DependencyUnavailable,
+            DatabaseUnavailable,
+            VirtualKeyRequired,
+            ManagementTokenNotAllowed,
+        ];
+        for e in &all {
+            match e {
+                InvalidCredentials
+                | AuthSourceForbidden
+                | AccessDenied
+                | OwnerInactive
+                | DependencyUnavailable
+                | DatabaseUnavailable
+                | VirtualKeyRequired
+                | ManagementTokenNotAllowed => {}
+            }
+        }
+        all
+    }
+
+    /// 모든 `QueryError`. 값이 늘면 `match`가 컴파일되지 않는다.
+    fn query_errors() -> Vec<crate::ledger::dashboard::QueryError> {
+        use crate::ledger::dashboard::QueryError::{self, *};
+        let all = vec![
+            InvalidFilter,
+            InvalidCursor,
+            NotFound,
+            AccessDenied,
+            Database,
+            Invariant,
+            DetailUnavailable("2026-01-01T00:00:00.000000Z".into()),
+        ];
+        for e in &all {
+            match e {
+                QueryError::InvalidFilter
+                | InvalidCursor
+                | NotFound
+                | AccessDenied
+                | Database
+                | Invariant
+                | DetailUnavailable(_) => {}
+            }
+        }
+        all
+    }
+
+    /// 모든 `ManagementError`. 값이 늘면 `match`가 컴파일되지 않는다.
+    fn management_errors() -> Vec<ManagementError> {
+        use ManagementError::*;
+        let id = Uuid::nil();
+        let mut all = vec![
+            Invalid,
+            Forbidden,
+            NotFound,
+            Database,
+            Busy,
+            Invariant,
+            CommandConflict,
+            Version(1),
+            SecretUnavailable(id),
+            Quota,
+            LimitExceeded,
+            PolicyPeriod,
+            ConfigurationConflict,
+            SecurityFence,
+            AccessDuplicate,
+            AccessProtected,
+            SettlementConflict,
+            ExecutionNotFinal,
+            CredentialRejected,
+            CredentialUnverified,
+            CredentialDuplicate(id),
+            CredentialLabelTaken,
+            CredentialInUse { bound_keys: 1 },
+            BindingConflict(None),
+            AuthorizationConflict(vec![id]),
+            AuthorizationInUse(1),
+            CredentialNotAuthorized,
+            CredentialRequired,
+            CatalogSourcesUnavailable,
+            CatalogProposalStale,
+            TokenQuota,
+            TokenSecretUnavailable(id),
+        ];
+        all.extend(query_errors().into_iter().map(Query));
+        for e in &all {
+            match e {
+                Invalid
+                | Forbidden
+                | NotFound
+                | Database
+                | Busy
+                | Invariant
+                | CommandConflict
+                | Version(_)
+                | SecretUnavailable(_)
+                | Quota
+                | LimitExceeded
+                | PolicyPeriod
+                | ConfigurationConflict
+                | SecurityFence
+                | AccessDuplicate
+                | AccessProtected
+                | SettlementConflict
+                | ExecutionNotFinal
+                | Query(_)
+                | CredentialRejected
+                | CredentialUnverified
+                | CredentialDuplicate(_)
+                | CredentialLabelTaken
+                | CredentialInUse { .. }
+                | BindingConflict(_)
+                | AuthorizationConflict(_)
+                | AuthorizationInUse(_)
+                | CredentialNotAuthorized
+                | CredentialRequired
+                | CatalogSourcesUnavailable
+                | CatalogProposalStale
+                | TokenQuota
+                | TokenSecretUnavailable(_) => {}
+            }
+        }
+        all
+    }
+
+    /// 모든 `AdmissionError`. 값이 늘면 `match`가 컴파일되지 않는다.
+    fn admission_errors() -> Vec<AdmissionError> {
+        use AdmissionError::*;
+        let all = vec![
+            NotReady,
+            Draining,
+            HttpCapacity,
+            AuthenticationCapacity,
+            Concurrency,
+            InvalidTransition,
+        ];
+        for e in &all {
+            match e {
+                NotReady
+                | Draining
+                | HttpCapacity
+                | AuthenticationCapacity
+                | Concurrency
+                | InvalidTransition => {}
+            }
+        }
+        all
+    }
+
+    /// `failure(상태, "코드")`, `route_error(상태, "코드", …)`처럼 코드를 글자로 넘기는 곳을 원문에서 찾는다.
+    /// 둘째 인자가 문자열일 때만 센다. 변수로 넘기는 곳은 위의 열거형 시험이 다룬다.
+    fn literal_codes() -> Vec<(String, u16, String)> {
+        let statuses = [
+            ("BAD_REQUEST", StatusCode::BAD_REQUEST),
+            ("UNAUTHORIZED", StatusCode::UNAUTHORIZED),
+            ("FORBIDDEN", StatusCode::FORBIDDEN),
+            ("NOT_FOUND", StatusCode::NOT_FOUND),
+            ("METHOD_NOT_ALLOWED", StatusCode::METHOD_NOT_ALLOWED),
+            ("REQUEST_TIMEOUT", StatusCode::REQUEST_TIMEOUT),
+            ("CONFLICT", StatusCode::CONFLICT),
+            ("PAYLOAD_TOO_LARGE", StatusCode::PAYLOAD_TOO_LARGE),
+            ("UNSUPPORTED_MEDIA_TYPE", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            ("UNPROCESSABLE_ENTITY", StatusCode::UNPROCESSABLE_ENTITY),
+            ("TOO_MANY_REQUESTS", StatusCode::TOO_MANY_REQUESTS),
+            (
+                "REQUEST_HEADER_FIELDS_TOO_LARGE",
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            ),
+            ("INTERNAL_SERVER_ERROR", StatusCode::INTERNAL_SERVER_ERROR),
+            ("BAD_GATEWAY", StatusCode::BAD_GATEWAY),
+            ("SERVICE_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
+        ];
+        let mut found = Vec::new();
+        for (file, text) in SOURCES {
+            let text = text.split("#[cfg(test)]").next().unwrap_or_default();
+            for call in ["failure(", "route_error("] {
+                for (at, _) in text.match_indices(call) {
+                    let before = text[..at].chars().next_back();
+                    if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                        continue;
+                    }
+                    let args = arguments(&text[at + call.len()..]);
+                    let Some(code) = args
+                        .get(1)
+                        .and_then(|a| a.strip_prefix('"'))
+                        .and_then(|a| a.strip_suffix('"'))
+                    else {
+                        continue;
+                    };
+                    let name = args[0].trim_start_matches("StatusCode::");
+                    let status = statuses
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .unwrap_or_else(|| panic!("{file}: 상태 `{}`를 표에 더한다", args[0]))
+                        .1;
+                    found.push((file.to_string(), status.as_u16(), code.to_owned()));
+                }
+            }
+        }
+        found
+    }
+
+    /// 여는 괄호 뒤의 글에서 맨 바깥 인자들을 잘라 낸다. 문자열 안의 괄호와 쉼표는 세지 않는다.
+    fn arguments(text: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut current = String::new();
+        let mut depth = 0;
+        let mut quoted = false;
+        let mut escaped = false;
+        for c in text.chars() {
+            if quoted {
+                current.push(c);
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => quoted = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => {
+                    quoted = true;
+                    current.push(c);
+                }
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    current.push(c);
+                }
+                ')' | ']' | '}' if depth > 0 => {
+                    depth -= 1;
+                    current.push(c);
+                }
+                ')' => break,
+                ',' if depth == 0 => args.push(std::mem::take(&mut current).trim().to_owned()),
+                _ => current.push(c),
+            }
+        }
+        if !current.trim().is_empty() {
+            args.push(current.trim().to_owned());
+        }
+        args
+    }
+
+    /// 문서가 이 상태로 선언한 오류 코드: 어느 operation의 `x-error-codes`이거나 `x-common-errors`.
+    fn documented() -> BTreeSet<(u16, String)> {
+        let doc: Value = serde_json::from_str(super::OPENAPI).expect("OpenAPI 문서는 JSON이다");
+        let mut codes = BTreeSet::new();
+        let mut add = |status: &str, list: &Value| {
+            for c in list.as_array().into_iter().flatten() {
+                codes.insert((
+                    status.parse().expect("상태 코드"),
+                    c.as_str().expect("코드").to_owned(),
+                ));
+            }
+        };
+        for (status, list) in doc["x-common-errors"].as_object().expect("x-common-errors") {
+            add(status, list);
+        }
+        for item in doc["paths"].as_object().expect("paths").values() {
+            for operation in item.as_object().expect("path item").values() {
+                for (status, response) in operation["responses"].as_object().into_iter().flatten() {
+                    add(status, &response["x-error-codes"]);
+                }
+            }
+        }
+        codes
+    }
+
+    #[tokio::test]
+    async fn every_management_error_code_is_in_the_openapi_document() {
+        let mut produced: Vec<(String, u16, String)> = Vec::new();
+        for e in auth_errors() {
+            // 가상 키가 필요하다는 답은 추론 경로만 낸다. 관리 API의 인증은 이 값을 내지 않는다.
+            if e == AuthError::VirtualKeyRequired {
+                continue;
+            }
+            let (s, c) = code(&crate::http::authentication_error(e));
+            produced.push((format!("authentication_error({e:?})"), s, c));
+        }
+        for e in management_errors() {
+            let label = format!("error({e:?})");
+            let (s, c) = code(&error(e));
+            produced.push((label, s, c));
+        }
+        for e in query_errors() {
+            let label = format!("query_error({e:?})");
+            let (s, c) = code(&query_error(e));
+            produced.push((label, s, c));
+        }
+        for e in admission_errors() {
+            let (s, c) = code(&crate::http::admission_error(e));
+            produced.push((format!("admission_error({e:?})"), s, c));
+        }
+        let (s, c) = code(&crate::http::method_not_allowed());
+        produced.push(("method_not_allowed()".into(), s, c));
+        let (s, c) = code(&crate::http::route_not_found_for_test().await);
+        produced.push(("route_not_found()".into(), s, c));
+        let literals = literal_codes();
+        for expected in [
+            "origin_denied",
+            "csrf_invalid",
+            "body_too_large",
+            "request_body_timeout",
+            "unsupported_media_type",
+            "header_limit",
+            "mail_failed",
+            "password_invalid",
+            "current_password_invalid",
+        ] {
+            assert!(
+                literals.iter().any(|(_, _, c)| c == expected),
+                "원문 검색이 `{expected}`를 찾지 못했다"
+            );
+        }
+        for (file, s, c) in literals {
+            if AUTH_ONLY.contains(&c.as_str()) {
+                continue;
+            }
+            produced.push((file, s, c));
+        }
+        let documented = documented();
+        let missing: Vec<String> = produced
+            .iter()
+            .filter(|(_, s, c)| !documented.contains(&(*s, c.clone())))
+            .map(|(from, s, c)| format!("{s} {c} ({from})"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "OpenAPI 문서에 없는 오류 코드:\n{}",
+            missing.join("\n")
+        );
     }
 }

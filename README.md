@@ -29,6 +29,9 @@ Key properties:
   set by `auth.mode`: RS256 JWTs from an external SSO (verified against a JWKS), or e-mail and
   password with admin invitations sent by e-mail. From the dashboard users issue scoped virtual keys,
   which are the only credentials accepted for inference.
+- **A management API for scripts.** Admins issue management tokens. A script uses such a token to
+  call the same JSON API as the dashboard, for example to create a service principal and issue its
+  virtual keys. An OpenAPI document describes the API ([Management API](#management-api)).
 - **Single binary.** Written in Rust (Tokio, axum, reqwest, sqlx). It serves the React dashboard at
   `/dashboard/` and listens on port `4000`.
 
@@ -522,6 +525,7 @@ refresh tokens.
 | SSO JWT in `Authorization: Bearer` or `x-api-key` | **no** (`403 virtual_key_required`) | yes | if admin |
 | SSO JWT in the access cookie (browser) | **no** | yes (writes need CSRF) | if admin |
 | Virtual key (starts with `mgw_`) | yes, within the key's grants and limits | no | no |
+| Management token (starts with `mgt_`) in `Authorization: Bearer` (see [Management API](#management-api)) | **no** (`403 virtual_key_required`) | yes, as the admin who issued it | yes, except `/api/admin/management-tokens` |
 
 In `password` mode, the session token from the `mgated_session` cookie (or the same token in
 `Authorization: Bearer`) takes the place of the SSO JWT in this table. See [Password mode](#password-mode).
@@ -880,9 +884,123 @@ It has no inline scripts and loads nothing from external CDNs.
 | Model & price catalog (sync, compare, approve, edit rates) | `/dashboard/admin/models` | admins |
 | Token check against Anthropic's usage report | `/dashboard/admin/token-check` | admins |
 | Settings (budget time zone, cut-off rule, correction) | `/dashboard/admin/settings` | admins |
+| Management tokens (issue, list, revoke) | `/dashboard/admin/tokens` | admins |
+| API reference (the OpenAPI document of the management API) | `/dashboard/api` | users |
 
 The JSON API behind it is under `/api/` (`me`, `usage`, `csrf`, `keys`, and the `admin/*`
-routes). It is same-origin only, with no CORS. The UI is in Korean by default; a language switch in the header changes it to English (the choice is remembered in that browser only).
+routes). It sends no CORS headers, so a web page on another origin cannot call it. Scripts can
+call it; see [Management API](#management-api). The UI is in Korean by default; a language switch in the header changes it to English (the choice is remembered in that browser only).
+
+## Management API
+
+The management API is the set of routes under `/api/` (a person's own data and virtual keys) and
+`/api/admin/` (admin work). The dashboard uses it, and scripts and CI jobs can use it with a
+**management token** ([decision 0014](docs/decisions/0014-management-tokens-and-openapi.md)).
+
+**The API document.** The gateway describes every route under `/api/` in an OpenAPI 3.1 document.
+Its source is the file `api/management.openapi.json` in the repository. For each route the document
+gives:
+
+- the role that may call it (`user` or `admin`);
+- the token scope that it needs (`read` or `write`), or a note that management tokens cannot call
+  it;
+- whether it needs `X-Gateway-Command-ID`;
+- the parameters, the request body and the response bodies;
+- the error codes, for each status.
+
+A signed-in person or a management token gets the document from `GET /api/openapi.json`. A request
+without a credential gets `401`. The dashboard shows the document on the *API reference* screen
+(`/dashboard/api`). Each route that a token can call has a `curl` example there.
+
+**Management tokens.**
+
+- Only admins issue them, on *Admin → Management tokens* (`/dashboard/admin/tokens`) or with
+  `POST /api/admin/management-tokens`. The admin sends that call with a sign-in credential (the SSO
+  JWT or the session), not with a management token. The body is
+  `{"name": "...", "scope": "read" | "write", "validity": "30_days" | "90_days" | "1_year"}`. The
+  name has 1 to 64 characters. There is no unlimited validity.
+- The answer holds the secret (`"secret": "mgt_..."`). It is shown only this once. The gateway
+  stores only its SHA-256.
+- A `read` token can call only `GET` routes. A `write` token can also call the writes (`POST`,
+  `PUT`, `PATCH`, `DELETE`).
+- Each admin can have up to 30 active tokens, that is, tokens that are not revoked and not expired.
+  A request for one more gets `409 management_token_quota_exceeded`.
+- A token acts as the admin who issued it, its owner. At each call, the gateway checks that the
+  owner is on the access list, has the `admin` role and is not suspended. If one of these checks
+  fails, the call gets `403 access_denied`. The token is not revoked, so it works again when the
+  owner passes all three checks again.
+- `GET /api/admin/management-tokens` lists the tokens of all admins: name, owner, scope, expiry,
+  revoke time and last use. The last use is recorded at most once per minute.
+- Any admin can revoke any token, with the revoke button or with
+  `DELETE /api/admin/management-tokens/{id}` (no body).
+- An unknown, expired or revoked token gets `401 invalid_credentials`.
+
+**Calls with a token.**
+
+- Send the token only in `Authorization: Bearer mgt_...`. A token in a cookie or in `x-api-key` gets
+  `401 invalid_credentials`, also when `Authorization` holds the same token. On an inference route,
+  a valid token in `Authorization` gets `403 virtual_key_required`.
+- A call with a token needs no CSRF token. Writes still need `X-Gateway-Command-ID`.
+- A token cannot call the routes under `/api/admin/management-tokens` (list, issue and revoke), so
+  a leaked token cannot make more tokens. It also cannot call `/api/me/password` and `/api/csrf`,
+  or `/auth/login`, where a browser starts the sign-in. These calls, and a write with a `read`
+  token, get `403 management_token_not_allowed`.
+- The gateway records a token's writes under the token's owner, in the same two tables as the
+  owner's writes from the dashboard: the stored command results (`gw_commands`) and the audit log
+  (`gw_audit_events`, who changed what). The audit log also holds the token's ID, in the column
+  `actor_token_id`. Issuing and revoking a token are in the audit log too, as
+  `create_management_token` and `revoke_management_token`.
+
+**Example: a service principal and its virtual key.** The calls below use a `write` token. Replace
+each value in angle brackets. The comments say where each ID comes from.
+
+```sh
+export M_GATED=https://gateway.example.com
+export M_GATED_TOKEN=mgt_...
+get() { curl -sS -H "Authorization: Bearer $M_GATED_TOKEN" "$M_GATED$1"; }
+# send uses the command ID in COMMAND_ID, or makes a new one.
+send() { curl -sS -X "$1" -H "Authorization: Bearer $M_GATED_TOKEN" \
+  -H "X-Gateway-Command-ID: ${COMMAND_ID:-$(uuidgen)}" -H 'Content-Type: application/json' \
+  "$M_GATED$2" -d "$3"; }
+
+# 1. Create the service principal. The owner is a person who has signed in at least once:
+#    get '/api/admin/principals?kind=human'
+send POST /api/admin/principals \
+  '{"display_name": "nightly-batch", "management_owner_id": "<owner id>"}'
+# The answer is 201. The new principal's ID is in "target": {"id": ...}.
+
+# 2. Set the models that it may use. expected_version is the policy version from
+#    get /api/admin/principals/<service id>. A new principal has version 1.
+send PUT /api/admin/principals/<service id>/policy \
+  '{"expected_version": "1", "disabled": false, "reason": "nightly batch",
+    "grants": [{"provider": "anthropic", "model": "<model>", "capabilities": ["messages"]}],
+    "limits": {"budget": null, "rpm": null, "tpm": null, "count_rpm": null}}'
+
+# 3. Let it use a provider key: get /api/admin/provider-credentials
+send PUT /api/admin/principals/<service id>/provider-credentials \
+  '{"provider": "anthropic", "credential_ids": ["<credential id>"], "expected": {"credential_ids": []}}'
+
+# 4. Issue a virtual key for it. The key ("key": "mgw_...") is shown only in this answer. The
+#    key's ID is in "metadata": {"id": ...}.
+send POST /api/keys \
+  '{"name": "nightly", "service_principal_id": "<service id>", "validity": "3_months",
+    "grants": [{"provider": "anthropic", "model": "<model>", "capabilities": ["messages"]}],
+    "limits": {"budget": null, "rpm": null, "tpm": null, "count_rpm": null},
+    "provider_credentials": {"anthropic": "<credential id>"}}'
+
+# 5. Revoke the virtual key. expected_version is the key's version from
+#    get '/api/admin/keys?principal_id=<service id>'
+curl -sS -X DELETE -H "Authorization: Bearer $M_GATED_TOKEN" -H "X-Gateway-Command-ID: $(uuidgen)" \
+  "$M_GATED/api/keys/<key id>?expected_version=1"
+```
+
+If a call fails on the network, send it again with the same `X-Gateway-Command-ID` (with `send`,
+set `COMMAND_ID` to one UUID for both attempts). The gateway then returns the first result and does
+not run the write twice. There is one exception: the gateway cannot return a secret a second time.
+A repeated `POST /api/keys` gets `409 key_secret_unavailable`, and a repeated
+`POST /api/admin/management-tokens` gets `409 management_token_secret_unavailable`. The key or
+token of the first attempt exists, and the error's `details` hold its ID. Revoke it and issue a new
+one.
 
 ## Operations
 
@@ -1223,6 +1341,14 @@ with these values:
 Then the test compares the lines with `tests/golden/management_routes.txt`. When you intend to
 change an answer, write the file again with `UPDATE_GOLDEN=1`. Then read the changes in the file
 with `git diff` before you commit the file.
+
+The same test also checks each answer against the OpenAPI document
+(`api/management.openapi.json`): the status must be in the document for that route, the body must
+match its schema, and the error code must be listed. Five other tests check their answers against
+the document in the same way: `management_postgres`, `access_postgres`, `catalog_postgres`,
+`credentials_postgres` and `password_postgres`. `tests/openapi.rs` checks that the document has exactly
+the routes of the router's table (`ROUTES` in `src/admin.rs`). So when you add or change a
+management route, change the document in the same commit.
 
 ```sh
 cargo test --locked --test management_routes_postgres -- --ignored

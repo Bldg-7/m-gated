@@ -388,7 +388,7 @@ pub(super) async fn send_link(
     let path = format!("/api/admin/access/{id}/link");
     let ctx = command_context(
         &state,
-        actor.human.current.id,
+        &actor,
         command_id,
         &head.method,
         &path,

@@ -5,7 +5,7 @@
 //! 그 뒤에 더한 처리 함수가 우리 `Allow` 헤더로 거절한다.
 use super::{ApiState, management::error, query_error, redirect};
 use crate::{
-    auth::{AuthRoute, AuthenticatedHuman, Credential, csrf},
+    auth::{AuthError, AuthRoute, AuthenticatedHuman, Credential, TokenScope, csrf},
     config::ProviderId,
     ledger::{dashboard::QueryError, management::ManagementError},
     runtime::{HttpAdmission, RequestLease, RouteClass},
@@ -39,6 +39,8 @@ pub(super) enum Checks {
         admin: bool,
         /// `DELETE /api/keys/{id}`에서 키 주인을 CSRF 검사보다 먼저 확인한다.
         key_owner: bool,
+        /// 관리 토큰으로 부를 수 있는지(결정 0014 규칙 2).
+        tokens: bool,
     },
 }
 impl Checks {
@@ -46,11 +48,27 @@ impl Checks {
         auth: AuthRoute::Management,
         admin: false,
         key_owner: false,
+        tokens: true,
     };
     pub(super) const ADMIN: Self = Self::Management {
         auth: AuthRoute::Management,
         admin: true,
         key_owner: false,
+        tokens: true,
+    };
+    /// 관리 토큰으로 부를 수 없는 관리자 경로. 토큰을 관리하는 경로다.
+    pub(super) const ADMIN_NO_TOKEN: Self = Self::Management {
+        auth: AuthRoute::Management,
+        admin: true,
+        key_owner: false,
+        tokens: false,
+    };
+    /// 관리 토큰으로 부를 수 없는 사용자 경로. 브라우저 앞의 사람을 위한 경로다.
+    pub(super) const USER_NO_TOKEN: Self = Self::Management {
+        auth: AuthRoute::Management,
+        admin: false,
+        key_owner: false,
+        tokens: false,
     };
 }
 
@@ -164,6 +182,7 @@ async fn guard(State(guard): State<Guard>, request: Request, next: Next) -> Resp
             auth,
             admin,
             key_owner,
+            tokens,
         } => {
             let write = request.method() != Method::GET;
             let Some(http) = request.extensions().get::<HttpAdmission>().cloned() else {
@@ -193,6 +212,7 @@ async fn guard(State(guard): State<Guard>, request: Request, next: Next) -> Resp
                     auth,
                     admin,
                     key_owner,
+                    tokens,
                 ),
             )
             .await;
@@ -265,7 +285,7 @@ async fn dashboard(guard: Guard, mut request: Request, next: Next) -> Response {
     lease.bind_response(result.unwrap_or_else(|_| query_error(QueryError::Database)))
 }
 
-/// 관리 API의 인증, 관리자 권한, 키 주인, CSRF 검사. 이 순서를 바꾸면 응답이 바뀐다.
+/// 관리 API의 인증, 관리자 권한, 관리 토큰, 키 주인, CSRF 검사. 이 순서를 바꾸면 응답이 바뀐다.
 #[allow(clippy::too_many_arguments)]
 async fn management(
     state: &ApiState,
@@ -275,6 +295,7 @@ async fn management(
     auth: AuthRoute,
     admin: bool,
     key_owner: bool,
+    tokens: bool,
 ) -> Response {
     let now = now();
     let (mut parts, body) = request.into_parts();
@@ -287,6 +308,12 @@ async fn management(
     }
     if admin && !human.current.admin {
         return error(ManagementError::Forbidden);
+    }
+    // 관리 토큰은 막힌 경로를 부를 수 없고, `read` 토큰은 `GET`만 부를 수 있다(결정 0014).
+    if let Some(token) = &human.token
+        && (!tokens || (token.scope == TokenScope::Read && parts.method != Method::GET))
+    {
+        return crate::http::authentication_error(AuthError::ManagementTokenNotAllowed);
     }
     if key_owner && parts.method == Method::DELETE {
         let params = path_params(&mut parts, &()).await;

@@ -63,6 +63,24 @@ CREATE TABLE gw_sessions (
  CHECK(expires_at>created_at)
 );
 CREATE INDEX gw_sessions_email ON gw_sessions(email);
+-- 관리 토큰(결정 0014). 관리자가 스크립트용으로 발급한다. 토큰은 SHA-256만 둔다.
+-- 토큰은 발급한 관리자(owner_id)로 동작한다. 폐기하거나 기한이 지나면 쓸 수 없다.
+CREATE TABLE gw_management_tokens (
+ id uuid PRIMARY KEY,
+ token_hash bytea NOT NULL UNIQUE CHECK(octet_length(token_hash)=32),
+ owner_id uuid NOT NULL REFERENCES gw_principals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+ name text NOT NULL CHECK(char_length(name) BETWEEN 1 AND 64 AND octet_length(name)<=256 AND name !~ '[[:cntrl:]]'),
+ scope text NOT NULL CHECK(scope IN ('read','write')),
+ validity text NOT NULL CHECK(validity IN ('30_days','90_days','1_year')),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ expires_at timestamptz NOT NULL,
+ revoked_at timestamptz,
+ revoked_by uuid REFERENCES gw_principals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+ last_used_at timestamptz,
+ CHECK(expires_at>created_at),
+ CHECK((revoked_at IS NULL)=(revoked_by IS NULL))
+);
+CREATE INDEX gw_management_tokens_owner ON gw_management_tokens(owner_id,created_at);
 -- 이메일별 연속 로그인 실패. 5번 실패하면 15분 동안 막는다.
 CREATE TABLE gw_sign_in_failures (
  email text PRIMARY KEY CHECK(octet_length(email) BETWEEN 1 AND 320),

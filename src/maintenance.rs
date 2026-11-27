@@ -120,6 +120,7 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
     };
     let ctx = CommandContext {
         actor: human.current.id,
+        token: None,
         command_id: envelope.command_id,
         method: "MAINTENANCE",
         path,

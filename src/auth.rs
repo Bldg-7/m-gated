@@ -1,5 +1,6 @@
 pub mod csrf;
 pub mod key;
+pub mod management_token;
 pub mod password;
 use axum::http::HeaderMap;
 
@@ -13,6 +14,8 @@ pub enum AuthError {
     DatabaseUnavailable,
     /// 유효한 SSO 로그인 토큰이지만 추론에는 쓸 수 없다. 추론은 가상 키로만 받는다.
     VirtualKeyRequired,
+    /// 유효한 관리 토큰이지만 이 경로는 관리 토큰으로 부를 수 없다(결정 0014 규칙 2).
+    ManagementTokenNotAllowed,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthRoute {
@@ -406,6 +409,35 @@ pub struct AuthenticatedHuman {
     pub identity: VerifiedIdentity,
     pub current: crate::ledger::CurrentHuman,
     pub source: CredentialSource,
+    /// 관리 토큰으로 온 요청이면 그 토큰. 로그인 토큰으로 온 요청이면 없다.
+    pub token: Option<ManagementToken>,
+}
+/// 관리 토큰의 범위(결정 0014 규칙 1). `read`는 `GET` 경로만 부를 수 있다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenScope {
+    Read,
+    Write,
+}
+impl TokenScope {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+/// 요청이 쓴 관리 토큰.
+#[derive(Clone, Copy, Debug)]
+pub struct ManagementToken {
+    pub id: uuid::Uuid,
+    pub scope: TokenScope,
 }
 /// 사람의 자격 증명을 확인하는 방법(결정 0011). 게이트웨이마다 하나만 쓴다.
 enum Method {
@@ -564,6 +596,9 @@ impl Authenticator {
             self.store.authenticate_key(&credential.token).await?;
             return Err(AuthError::AuthSourceForbidden);
         }
+        if management_token::is_token(&credential.token) {
+            return self.authenticate_token(headers, &credential, route).await;
+        }
         if credential.token.len() > self.token_bytes {
             return Err(AuthError::InvalidCredentials);
         }
@@ -603,10 +638,52 @@ impl Authenticator {
                 identity,
                 current,
                 source: credential.source,
+                token: None,
             })
         })
         .await
         .map_err(|_| AuthError::DependencyUnavailable)?
+    }
+    /// 관리 토큰(결정 0014). `Authorization` 헤더로만 받는다. 토큰이 유효하면 소유자로 인증한다.
+    /// `/auth/login`과 `/api/csrf`는 토큰이 유효해도 거절한다.
+    async fn authenticate_token(
+        &self,
+        headers: &HeaderMap,
+        credential: &Credential,
+        route: AuthRoute,
+    ) -> Result<AuthenticatedHuman, AuthError> {
+        if credential.source != CredentialSource::Header
+            || headers.contains_key("x-api-key")
+            || !management_token::plausible(&credential.token)
+        {
+            return Err(AuthError::InvalidCredentials);
+        }
+        let _operation = self
+            .operations
+            .try_acquire()
+            .map_err(|_| AuthError::DependencyUnavailable)?;
+        let owner = self
+            .store
+            .management_token_owner(&management_token::hash(&credential.token))
+            .await?;
+        if matches!(route, AuthRoute::Login | AuthRoute::CookieOnly) {
+            return Err(AuthError::ManagementTokenNotAllowed);
+        }
+        Ok(AuthenticatedHuman {
+            identity: VerifiedIdentity {
+                issuer: owner.issuer,
+                subject: owner.subject,
+                email: owner.email,
+                display_name: owner.display_name,
+                expires_at: owner.expires_at,
+            },
+            current: owner.current,
+            source: CredentialSource::Header,
+            token: Some(ManagementToken {
+                id: owner.id,
+                scope: owner.scope,
+            }),
+        })
     }
     /// SSO 방식은 JWKS를 다시 확인한다. 비밀번호 방식은 JWKS가 없으므로 늘 건강하다.
     pub async fn refresh_health(&self, runtime: &crate::runtime::Runtime) -> bool {

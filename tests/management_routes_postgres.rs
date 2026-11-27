@@ -2,6 +2,11 @@
 //! 응답의 상태 코드, 본문의 오류 코드, 헤더 몇 개(`Allow`, `Location`, `Content-Type`,
 //! `x-gateway-error-code`, `Retry-After`)를 `tests/golden/management_routes.txt`와 맞춘다.
 //! 표를 다시 쓰려면 `UPDATE_GOLDEN=1`을 준다. 표를 바꾸는 것은 응답이 바뀌는 것이므로 결정이 있어야 한다.
+//! `/api/` 아래 응답은 OpenAPI 문서(결정 0014 규칙 4)와도 맞춘다. 상태 코드와 오류 코드가 문서에 있고,
+//! 본문이 그 응답의 schema에 맞아야 한다.
+#[path = "support/openapi.rs"]
+#[allow(dead_code)]
+mod openapi;
 #[path = "support/postgres.rs"]
 mod postgres;
 #[path = "support/sso.rs"]
@@ -35,6 +40,7 @@ const ID: &str = "00000000-0000-4000-8000-000000000001";
 const PATHS: &[&str] = &[
     "/auth/login",
     "/api/me",
+    "/api/openapi.json",
     "/api/usage",
     "/api/usage/models",
     "/api/csrf",
@@ -52,6 +58,8 @@ const PATHS: &[&str] = &[
     "/api/admin/provider-credentials/{provider}/{id}",
     "/api/admin/access",
     "/api/admin/access/{id}",
+    "/api/admin/management-tokens",
+    "/api/admin/management-tokens/{id}",
     "/api/admin/settings",
     "/api/admin/settings/budget-timezone",
     "/api/admin/settings/cutoff-rule",
@@ -90,14 +98,20 @@ enum Credential {
     UserBearer,
     AdminCookie,
     AdminCookieCsrf,
+    /// 관리자의 `read` 관리 토큰(결정 0014).
+    ReadToken,
+    /// 관리자의 `write` 관리 토큰.
+    WriteToken,
 }
 impl Credential {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::AdminBearer,
         Self::UserBearer,
         Self::AdminCookie,
         Self::AdminCookieCsrf,
+        Self::ReadToken,
+        Self::WriteToken,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -106,6 +120,8 @@ impl Credential {
             Self::UserBearer => "user-bearer",
             Self::AdminCookie => "admin-cookie",
             Self::AdminCookieCsrf => "admin-cookie-csrf",
+            Self::ReadToken => "read-token",
+            Self::WriteToken => "write-token",
         }
     }
 }
@@ -158,6 +174,8 @@ struct Harness {
     user: String,
     csrf: String,
     origin: String,
+    read_token: String,
+    write_token: String,
     _jwks: sso::Server,
 }
 impl Harness {
@@ -235,6 +253,8 @@ impl Harness {
             user,
             csrf: String::new(),
             origin,
+            read_token: m_gated::auth::management_token::generate().unwrap(),
+            write_token: m_gated::auth::management_token::generate().unwrap(),
             _jwks: jwks,
         };
         let request = Request::get("/api/csrf")
@@ -246,11 +266,29 @@ impl Harness {
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
         h.csrf = body["token"].as_str().unwrap().to_owned();
+        // 관리자 alice의 관리 토큰. 위 요청으로 alice의 계정이 생겼다.
+        for (token, scope) in [(&h.read_token, "read"), (&h.write_token, "write")] {
+            sqlx::query("INSERT INTO gw_management_tokens(id,token_hash,owner_id,name,scope,validity,expires_at) SELECT $1,$2,id,'golden',$3,'30_days',clock_timestamp()+interval '30 days' FROM gw_principals WHERE email='alice@example.test'")
+                .bind(uuid::Uuid::new_v4())
+                .bind(m_gated::auth::management_token::hash(token).as_slice())
+                .bind(scope)
+                .execute(h.db.store.pool())
+                .await
+                .unwrap();
+        }
         h
     }
 
-    /// 요청 하나를 보내고 기록할 한 줄을 돌려준다.
-    async fn line(&self, method: &str, path: &str, credential: Credential, input: Input) -> String {
+    /// 요청 하나를 보내고 기록할 한 줄을 돌려준다. `/api/` 아래 응답은 OpenAPI 문서와 맞춰 보고,
+    /// 맞지 않으면 그 까닭을 함께 돌려준다. `template`은 `PATHS`의 경로 템플릿이다.
+    async fn line(
+        &self,
+        method: &str,
+        path: &str,
+        template: &str,
+        credential: Credential,
+        input: Input,
+    ) -> (String, Option<String>) {
         let uri = match input {
             Input::UnknownQuery => format!("{path}?zz=1"),
             _ => path.to_owned(),
@@ -265,6 +303,12 @@ impl Harness {
                 .header("cookie", format!("mgated_access={}", self.admin))
                 .header("origin", self.origin.as_str())
                 .header("x-csrf-token", self.csrf.as_str()),
+            Credential::ReadToken => {
+                r.header("authorization", format!("Bearer {}", self.read_token))
+            }
+            Credential::WriteToken => {
+                r.header("authorization", format!("Bearer {}", self.write_token))
+            }
         };
         let command = "00000000-0000-4000-8000-0000000000c1";
         let json = "application/json";
@@ -327,15 +371,30 @@ impl Harness {
             header("retry-after")
         );
         let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-        let code = serde_json::from_slice::<Value>(&bytes)
-            .ok()
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+        let code = body
+            .as_ref()
             .and_then(|v| v["error"]["code"].as_str().map(str::to_owned))
             .unwrap_or_else(|| "-".into());
-        format!(
+        let line = format!(
             "{method} {path} {} {} => {status} {code} {headers}",
             credential.name(),
             input.name()
-        )
+        );
+        // 본문이 JSON이 아니면 검사에서 빈 본문과 구별되도록 문자열로 둔다.
+        let body = body.or_else(|| {
+            (!bytes.is_empty()).then(|| Value::String(String::from_utf8_lossy(&bytes).into()))
+        });
+        let mismatch = template
+            .starts_with("/api/")
+            .then(|| {
+                openapi::Document::shared()
+                    .check_response(method, template, status, body.as_ref())
+                    .err()
+            })
+            .flatten()
+            .map(|e| format!("{line}\n  {e}"));
+        (line, mismatch)
     }
 }
 
@@ -344,6 +403,7 @@ impl Harness {
 async fn every_route_answers_as_recorded() {
     let h = Harness::new().await;
     let mut table = String::new();
+    let mut mismatches = Vec::new();
     for template in PATHS {
         let variants: &[bool] = if template.contains('{') {
             &[false, true]
@@ -360,8 +420,10 @@ async fn every_route_answers_as_recorded() {
                 };
                 for credential in Credential::ALL {
                     for &input in inputs {
-                        let line = h.line(method, &path, credential, input).await;
+                        let (line, mismatch) =
+                            h.line(method, &path, template, credential, input).await;
                         writeln!(table, "{line}").unwrap();
+                        mismatches.extend(mismatch);
                     }
                 }
             }
@@ -369,6 +431,17 @@ async fn every_route_answers_as_recorded() {
     }
     h.runtime.stop();
     h.db.close().await;
+    assert!(
+        mismatches.is_empty(),
+        "OpenAPI 문서와 다른 응답 {}개:\n{}",
+        mismatches.len(),
+        mismatches
+            .iter()
+            .take(40)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::create_dir_all(std::path::Path::new(GOLDEN).parent().unwrap()).unwrap();
         std::fs::write(GOLDEN, &table).unwrap();
