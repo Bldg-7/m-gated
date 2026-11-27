@@ -1,13 +1,14 @@
 # 0010. Route the management API with axum's method routing and extractors
 
 - Date: 2026-11-26
-- Status: Accepted, not implemented
+- Status: Implemented
 
 ## Context
 
 This decision changes how the gateway chooses the code that handles a management API request. Each
 path is registered once, with axum's method routing. The checks that all management requests share
-become one middleware. Handlers get their input through extractors. The responses do not change.
+become one middleware. Handlers get their input through extractors. The responses do not change, except in one rare
+case that rule 6 names.
 
 ### The management API today
 
@@ -131,13 +132,20 @@ there.
    `MethodRouter::route_layer` is called. It does not wrap the fallback either. So a wrong method,
    including `HEAD`, still gets 405 before the request slot and authentication, as now. The 405
    answer already has an `Allow` header, so axum does not add its own.
-4. Handlers read their input with extractors that answer with the management API's errors:
-   - a path ID through a wrapper around `Path`, which answers `400 invalid_request` when the ID is
-     not a UUID;
-   - the command ID through an extractor for the `x-gateway-command-id` header;
-   - the JSON body through one extractor that does the body checks of check 7 in the same order,
-     and then makes the command's type;
-   - query strings through the existing parsers (`UsageQuery::parse`, `management_query::fields`).
+4. Handlers read their input with extractors:
+   - the principal, through an extractor that reads what the middleware put into the request;
+   - the path IDs, through an extractor that keeps the parsed values and does not reject a request.
+     The handler rejects a bad ID at the same point as before. There are two reasons. First, the
+     answer depends on the path: most paths answer `400 invalid_request`, and the Provider-key paths
+     answer `404`. Second, some paths check the body before the ID;
+   - the command ID, through an extractor for the `x-gateway-command-id` header;
+   - query strings, through the existing parsers (`UsageQuery::parse`, `management_query::fields`).
+
+   The body is not read through one shared extractor. Each group of paths keeps its own body checks
+   in the current order: the general commands, the Provider keys, the settings and the model
+   catalog. The orders differ. For example, the Provider-key paths do not check `Content-Length`
+   before they read the body, and the settings paths check `Content-Type` first. One shared
+   extractor would change some answers.
 5. The command log records the path of each command. The gateway makes that path from the route's
    template (the path as it is registered, for example `/api/admin/principals/{id}/policy`) and the
    parsed IDs, written in the standard UUID form. So the same command gives the same path even when
@@ -153,6 +161,10 @@ there.
    - a bad body.
 
    These tests and all existing tests must pass, unchanged, after the change.
+
+   The tests do not send a path ID with percent-encoded characters, and the answer to such an ID
+   changes. axum decodes percent-encoded path segments before the handler reads them. So an ID with
+   `%2D` in place of `-` is now accepted as a UUID. Before the change, it was rejected.
 7. This decision does not change the inference API, the probes, the redirects from `/` and
    `/dashboard` to the dashboard, the database functions that the handlers call, or the response
    format.
@@ -185,4 +197,5 @@ and the current code for these two limits is short.
   methods and options. The handler's arguments show its inputs.
 - The main risk is a change in the order of the checks. Rule 6 controls this risk: the tests record
   the current answers before the change.
-- `README.md` does not change, because the API does not change.
+- `README.md` gets one paragraph about the record test of rule 6. It does not describe the
+  routing, because the API does not change.

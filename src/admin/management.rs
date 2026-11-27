@@ -1,33 +1,32 @@
-use super::{ApiState, query_error, success};
+//! 관리 API의 처리 함수. 경로와 메서드마다 함수가 하나다(결정 0010).
+//! 공통 검사(자리, 인증, 관리자, 키 주인, CSRF)는 `guard`가 먼저 한다.
+//! 각 함수는 입력을 지금과 같은 순서로 검사한다. 순서를 바꾸면 응답이 바뀐다.
+use super::{
+    ApiState,
+    guard::{Actor, CommandId, Params},
+    query_error, success,
+};
 use crate::{
-    auth::{AuthRoute, csrf},
+    auth::csrf,
+    config::ProviderId,
     ledger::{
         commands::CommandContext,
-        management::{Command, ManagementError},
+        credentials::{BoundAction, CredentialCommand},
+        management::{Command, CommandResult, ManagementError},
         management_query::{self, QueryContext},
     },
-    runtime::{HttpAdmission, RouteClass},
 };
 use axum::{
-    body::to_bytes,
+    body::{Body, Bytes, to_bytes},
     extract::{Request, State},
-    http::{HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CREDENTIALS: &str = "/api/admin/provider-credentials";
-const KEYS_ADMIN: &str = "/api/admin/keys/";
-const KEY_BINDING: &str = "/provider-credential";
-const CATALOG: &str = "/api/admin/model-catalog";
-const PRINCIPALS_ADMIN: &str = "/api/admin/principals/";
-const PRINCIPAL_CREDENTIALS: &str = "/provider-credentials";
-const SETTINGS: &str = "/api/admin/settings";
-const BUDGET_TIMEZONE: &str = "/api/admin/settings/budget-timezone";
-const CUTOFF_RULE: &str = "/api/admin/settings/cutoff-rule";
-const TOKEN_CHECK: &str = "/api/admin/token-check";
-fn failure(status: StatusCode, code: &'static str) -> Response {
+pub(super) fn failure(status: StatusCode, code: &'static str) -> Response {
     crate::http::route_error(status, code, "관리 요청을 처리할 수 없습니다.")
 }
 fn details(status: StatusCode, code: &'static str, details: Value) -> Response {
@@ -121,291 +120,263 @@ pub(super) fn error(e: ManagementError) -> Response {
     }
     r
 }
-pub(super) async fn handle(State(state): State<ApiState>, request: Request) -> Response {
-    let path = request.uri().path();
-    let allowed =
-        if path == "/api/csrf" || path == CREDENTIALS || path == CATALOG || path == SETTINGS {
-            vec![Method::GET]
-        } else if path == "/api/admin/model-catalog/sync"
-            || path == "/api/admin/model-catalog/approve"
-        {
-            vec![Method::POST]
-        } else if let Some(rest) = path.strip_prefix(CREDENTIALS) {
-            if rest.matches('/').count() == 1 {
-                vec![Method::POST]
-            } else {
-                vec![Method::POST, Method::PUT, Method::PATCH, Method::DELETE]
-            }
-        } else if (path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING))
-            || (path.starts_with(PRINCIPALS_ADMIN) && path.ends_with(PRINCIPAL_CREDENTIALS))
-            || path == BUDGET_TIMEZONE
-            || path == CUTOFF_RULE
-        {
-            vec![Method::PUT]
-        } else if path == "/api/keys" || path == "/api/admin/principals" {
-            vec![Method::GET, Method::POST]
-        } else if path.starts_with("/api/keys/") {
-            vec![Method::DELETE, Method::PATCH]
-        } else if path.ends_with("/policy") || path.ends_with("/settlement") {
-            vec![Method::PUT]
-        } else if path.ends_with("/inference-pause/release") {
-            vec![Method::POST]
-        } else if path.starts_with("/api/admin/principals/") {
-            vec![Method::GET, Method::PATCH]
-        } else {
-            vec![Method::GET]
-        };
-    if !allowed.contains(request.method()) {
-        let mut r = crate::http::method_not_allowed();
-        r.headers_mut().insert(
-            header::ALLOW,
-            HeaderValue::from_str(
-                &allowed
-                    .iter()
-                    .map(Method::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-            .expect("method"),
-        );
-        return r;
-    }
-    let write = request.method() != Method::GET;
-    let Some(http) = request.extensions().get::<HttpAdmission>().cloned() else {
-        return error(ManagementError::Invariant);
-    };
-    let mut lease = match state.runtime.try_admit_with_http(
-        if write {
-            RouteClass::ManagementWrite
-        } else {
-            RouteClass::ManagementRead
-        },
-        http,
-    ) {
-        Ok(l) => l,
-        Err(e) => return crate::http::admission_error(e),
-    };
-    if let Err(e) = lease.begin_authentication() {
-        return crate::http::admission_error(e);
-    }
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(state.runtime.limits().management_timeout_ms),
-        execute(&state, request, &mut lease),
-    )
-    .await;
-    lease.bind_response(result.unwrap_or_else(|_| error(ManagementError::Database)))
-}
-async fn execute(
-    state: &ApiState,
-    request: Request,
-    lease: &mut crate::runtime::RequestLease,
-) -> Response {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64;
-    let (head, body) = request.into_parts();
-    let path = head.uri.path();
-    let write = head.method != Method::GET;
-    let human = match state
-        .api
-        .auth
-        .authenticate(
-            &head.headers,
-            if path == "/api/csrf" {
-                AuthRoute::CookieOnly
-            } else {
-                AuthRoute::Management
-            },
-            now,
-        )
-        .await
-    {
-        Ok(h) => h,
-        Err(e) => return crate::http::authentication_error(e),
-    };
-    if let Err(e) = lease.identify(human.current.id) {
-        return crate::http::admission_error(e);
-    }
-    let admin = path.starts_with("/api/admin/");
-    if admin && !human.current.admin {
-        return error(ManagementError::Forbidden);
-    }
-    if head.method == Method::DELETE && path.starts_with("/api/keys/") {
-        let Some(id) = path
-            .rsplit('/')
-            .next()
-            .and_then(|s| Uuid::parse_str(s).ok())
-        else {
-            return error(ManagementError::Invalid);
-        };
-        if let Err(e) = state
-            .api
-            .store
-            .management_key_access(human.current.id, id, state.api.auth.settings())
-            .await
-        {
-            return error(e);
-        }
-    }
-    let credential = match state
-        .api
-        .auth
-        .credential(&head.headers, AuthRoute::Management)
-    {
-        Ok(c) => c,
-        Err(e) => return crate::http::authentication_error(e),
-    };
-    if write && csrf::required(human.source) {
-        let origins: Vec<_> = head.headers.get_all("origin").iter().collect();
-        if origins.len() != 1 || origins[0].as_bytes() != state.api.origin.as_bytes() {
-            return failure(StatusCode::FORBIDDEN, "origin_denied");
-        }
-        let tokens: Vec<_> = head.headers.get_all("x-csrf-token").iter().collect();
-        if tokens.len() != 1
-            || !tokens[0].to_str().is_ok_and(|s| {
-                csrf::verify(
-                    &state.api.signing_key,
-                    s,
-                    &credential.token,
-                    now,
-                    human.identity.expires_at(),
-                )
-            })
-        {
-            return failure(StatusCode::FORBIDDEN, "csrf_invalid");
-        }
-    }
-    if path == "/api/csrf" {
-        if head.uri.query().is_some() {
-            return error(ManagementError::Invalid);
-        }
-        return match csrf::issue(
-            &state.api.signing_key,
-            &credential.token,
-            now,
-            human.identity.expires_at(),
-        ) {
-            Ok((token, exp)) => {
-                let expires = time::OffsetDateTime::from_unix_timestamp(exp)
-                    .ok()
-                    .and_then(|t| {
-                        t.format(&time::format_description::well_known::Rfc3339)
-                            .ok()
-                    });
-                success(json!({"token":token,"expires_at":expires}))
-            }
-            Err(e) => crate::http::authentication_error(e),
-        };
-    }
-    if path == CREDENTIALS
-        || path.starts_with(CREDENTIALS)
-        || (path.starts_with(KEYS_ADMIN) && path.ends_with(KEY_BINDING))
-        || (path.starts_with(PRINCIPALS_ADMIN) && path.ends_with(PRINCIPAL_CREDENTIALS))
-    {
-        return provider_credentials(state, &head, body, human.current.id).await;
-    }
-    if path == SETTINGS || path == BUDGET_TIMEZONE || path == CUTOFF_RULE {
-        return settings(state, &head, body, human.current.id).await;
-    }
-    if path == TOKEN_CHECK {
-        return token_check(state, &head, human.current.id).await;
-    }
-    if path == CATALOG || path.starts_with(CATALOG) {
-        return model_catalog(state, &head, body, human.current.id).await;
-    }
-    let grants = state.api.grants();
-    let ctx = QueryContext {
-        actor: human.current.id,
-        admin,
-        settings: state.api.auth.settings(),
-        grants: &grants,
-        digest: &state.api.digest,
-        signing_key: &state.api.signing_key,
-    };
-    if !write {
-        let result = if path == "/api/keys" || path == "/api/admin/keys" {
-            state
-                .api
-                .store
-                .management_list(&ctx, "keys", head.uri.query())
-                .await
-        } else if path == "/api/admin/principals" {
-            state
-                .api
-                .store
-                .management_list(&ctx, "principals", head.uri.query())
-                .await
-        } else if path == "/api/admin/requests" {
-            state
-                .api
-                .store
-                .management_list(&ctx, "requests", head.uri.query())
-                .await
-        } else if path == "/api/admin/requests/models" {
-            if head.uri.query().is_some() {
-                return error(ManagementError::Invalid);
-            }
-            state.api.store.management_request_models(&ctx).await
-        } else if path == "/api/admin/usage" {
-            state
-                .api
-                .store
-                .management_usage(&ctx, head.uri.query(), &state.api.ceiling)
-                .await
-        } else {
-            if head.uri.query().is_some() {
-                return error(ManagementError::Invalid);
-            }
-            let Some(raw) = path.rsplit('/').next() else {
-                return error(ManagementError::Invalid);
-            };
-            let Ok(id) = Uuid::parse_str(raw) else {
-                return error(ManagementError::Invalid);
-            };
-            state
-                .api
-                .store
-                .management_detail(
-                    &ctx,
-                    if path.starts_with("/api/admin/principals/") {
-                        "principals"
-                    } else {
-                        "requests"
-                    },
-                    id,
-                    &state.api.ceiling,
-                )
-                .await
-        };
-        return match result {
-            Ok(v) => success(v),
-            Err(e) => error(e),
-        };
-    }
-    let commands: Vec<_> = head
-        .headers
-        .get_all("x-gateway-command-id")
-        .iter()
-        .collect();
-    let command_id = if commands.len() == 1 {
-        commands[0]
-            .to_str()
-            .ok()
-            .and_then(|s| Uuid::parse_str(s).ok())
-    } else {
-        None
-    };
-    let Some(command_id) = command_id else {
-        return error(ManagementError::Invalid);
-    };
-    if head
-        .headers
+        .as_secs() as i64
+}
+fn identity_encoding(headers: &HeaderMap) -> bool {
+    !headers
         .get_all(header::CONTENT_ENCODING)
         .iter()
         .any(|v| v.as_bytes() != b"identity")
+}
+fn typed<T: serde::de::DeserializeOwned>(input: &Value) -> Result<T, ManagementError> {
+    serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)
+}
+fn unsupported_media_type() -> Response {
+    failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
+}
+/// 본문을 크기 상한과 5초 안에 읽는다.
+async fn read_body(state: &ApiState, body: Body) -> Result<Bytes, Response> {
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        to_bytes(body, state.runtime.limits().management_body_bytes),
+    )
+    .await
     {
-        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+        Ok(Ok(b)) => Ok(b),
+        Ok(Err(_)) => Err(failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large")),
+        Err(_) => Err(failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout")),
+    }
+}
+/// 명령을 처리한 응답. 명령 ID와 재전송 여부를 헤더에 담는다.
+fn acknowledged(result: CommandResult, command_id: Uuid) -> Response {
+    let mut r = match result.body {
+        Some(v) => success(v),
+        None => StatusCode::NO_CONTENT.into_response(),
+    };
+    *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r.headers_mut().insert(
+        "x-gateway-command-id",
+        HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
+    );
+    r.headers_mut().insert(
+        "x-gateway-command-replayed",
+        HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
+    );
+    r
+}
+fn command_context<'a>(
+    state: &'a ApiState,
+    actor: Uuid,
+    command_id: Uuid,
+    method: &'a Method,
+    path: &'a str,
+    grants: &'a Value,
+    execution_running: bool,
+) -> CommandContext<'a> {
+    CommandContext {
+        actor,
+        command_id,
+        method: method.as_str(),
+        path,
+        settings: state.api.auth.settings(),
+        grants,
+        digest: state.api.digest_bytes,
+        ceiling: &state.api.ceiling,
+        execution_running,
+    }
+}
+
+// ---- 조회 ----
+
+/// `GET /api/csrf`. 쿠키로 쓰기 요청을 보낼 때 쓸 CSRF 토큰을 준다.
+pub(super) async fn csrf_token(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    if request.uri().query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    let Some(credential) = &actor.credential else {
+        return error(ManagementError::Invariant);
+    };
+    match csrf::issue(
+        &state.api.signing_key,
+        &credential.token,
+        now(),
+        actor.human.identity.expires_at(),
+    ) {
+        Ok((token, exp)) => {
+            let expires = time::OffsetDateTime::from_unix_timestamp(exp)
+                .ok()
+                .and_then(|t| {
+                    t.format(&time::format_description::well_known::Rfc3339)
+                        .ok()
+                });
+            success(json!({"token":token,"expires_at":expires}))
+        }
+        Err(e) => crate::http::authentication_error(e),
+    }
+}
+
+fn query_context<'a>(state: &'a ApiState, actor: &Actor, grants: &'a Value) -> QueryContext<'a> {
+    QueryContext {
+        actor: actor.human.current.id,
+        admin: actor.admin_route,
+        settings: state.api.auth.settings(),
+        grants,
+        digest: &state.api.digest,
+        signing_key: &state.api.signing_key,
+    }
+}
+fn respond(result: Result<Value, ManagementError>) -> Response {
+    match result {
+        Ok(v) => success(v),
+        Err(e) => error(e),
+    }
+}
+async fn list(state: &ApiState, actor: &Actor, uri: &Uri, kind: &str) -> Response {
+    let grants = state.api.grants();
+    let ctx = query_context(state, actor, &grants);
+    respond(
+        state
+            .api
+            .store
+            .management_list(&ctx, kind, uri.query())
+            .await,
+    )
+}
+/// `GET /api/keys`, `GET /api/admin/keys`.
+pub(super) async fn list_keys(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    list(&state, &actor, request.uri(), "keys").await
+}
+/// `GET /api/admin/principals`.
+pub(super) async fn list_principals(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    list(&state, &actor, request.uri(), "principals").await
+}
+/// `GET /api/admin/requests`.
+pub(super) async fn list_requests(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    list(&state, &actor, request.uri(), "requests").await
+}
+/// `GET /api/admin/requests/models`.
+pub(super) async fn request_models(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    if request.uri().query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    let grants = state.api.grants();
+    let ctx = query_context(&state, &actor, &grants);
+    respond(state.api.store.management_request_models(&ctx).await)
+}
+/// `GET /api/admin/usage`.
+pub(super) async fn admin_usage(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    let grants = state.api.grants();
+    let ctx = query_context(&state, &actor, &grants);
+    respond(
+        state
+            .api
+            .store
+            .management_usage(&ctx, request.uri().query(), &state.api.ceiling)
+            .await,
+    )
+}
+async fn detail(
+    state: &ApiState,
+    actor: &Actor,
+    params: &Params,
+    uri: &Uri,
+    kind: &str,
+) -> Response {
+    if uri.query().is_some() {
+        return error(ManagementError::Invalid);
+    }
+    let Some(id) = params.uuid("id") else {
+        return error(ManagementError::Invalid);
+    };
+    let grants = state.api.grants();
+    let ctx = query_context(state, actor, &grants);
+    respond(
+        state
+            .api
+            .store
+            .management_detail(&ctx, kind, id, &state.api.ceiling)
+            .await,
+    )
+}
+/// `GET /api/admin/principals/{id}`.
+pub(super) async fn principal_detail(
+    State(state): State<ApiState>,
+    actor: Actor,
+    params: Params,
+    request: Request,
+) -> Response {
+    detail(&state, &actor, &params, request.uri(), "principals").await
+}
+/// `GET /api/admin/requests/{id}`.
+pub(super) async fn request_detail(
+    State(state): State<ApiState>,
+    actor: Actor,
+    params: Params,
+    request: Request,
+) -> Response {
+    detail(&state, &actor, &params, request.uri(), "requests").await
+}
+
+// ---- 가상 키, principal, 정책, 정산 명령 ----
+
+/// 장부 명령의 종류. 경로와 메서드가 정한다.
+#[derive(Clone, Copy)]
+enum Write {
+    Issue,
+    EditKey,
+    Revoke,
+    Create,
+    Update,
+    Policy,
+    Release,
+    Settle,
+}
+
+async fn command(
+    state: &ApiState,
+    actor: &Actor,
+    params: &Params,
+    CommandId(command_id): CommandId,
+    request: Request,
+    write: Write,
+) -> Response {
+    let Some(command_id) = command_id else {
+        return error(ManagementError::Invalid);
+    };
+    let (head, body) = request.into_parts();
+    if !identity_encoding(&head.headers) {
+        return unsupported_media_type();
     }
     let body_limit = state.runtime.limits().management_body_bytes;
     if head
@@ -417,15 +388,9 @@ async fn execute(
     {
         return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large");
     }
-    let bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        to_bytes(body, body_limit),
-    )
-    .await
-    {
-        Ok(Ok(b)) => b,
-        Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
-        Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
+    let bytes = match read_body(state, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
     };
     let input = if head.method == Method::DELETE {
         if !bytes.is_empty() {
@@ -434,7 +399,7 @@ async fn execute(
         Value::Null
     } else {
         if !crate::http::json_content_type(&head.headers) {
-            return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+            return unsupported_media_type();
         }
         struct Check;
         impl crate::json::Visitor for Check {
@@ -471,83 +436,47 @@ async fn execute(
     {
         return error(ManagementError::Invalid);
     }
-    let segments: Vec<_> = path.split('/').collect();
-    let id = segments.get(4).and_then(|s| Uuid::parse_str(s).ok());
-    let parse = || -> Result<Command, ManagementError> {
-        if path == "/api/keys" {
-            Ok(Command::Issue(
-                serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
-            ))
-        } else if path.starts_with("/api/keys/") {
-            let id = segments
-                .get(3)
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or(ManagementError::Invalid)?;
-            if head.method == Method::PATCH {
-                if segments.len() != 4 || head.uri.query().is_some() {
-                    return Err(ManagementError::Invalid);
-                }
-                return Ok(Command::EditKey(
-                    id,
-                    serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
-                ));
-            }
-            let mut f = management_query::fields(head.uri.query())?;
-            let expected = f
-                .remove("expected_version")
-                .ok_or(ManagementError::Invalid)?;
-            if !f.is_empty() {
-                return Err(ManagementError::Invalid);
-            }
-            Ok(Command::Revoke { id, expected })
-        } else if path == "/api/admin/principals" {
-            Ok(Command::Create(
-                serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
-            ))
-        } else {
-            let id = id.ok_or(ManagementError::Invalid)?;
-            if path.ends_with("/policy") {
-                Ok(Command::Policy(
-                    id,
-                    serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
-                ))
-            } else if path.ends_with("/settlement") {
-                Ok(Command::Settle(
-                    id,
-                    serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
-                ))
-            } else if path.ends_with("/inference-pause/release") {
-                Ok(Command::Release(
-                    id,
-                    serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
-                ))
-            } else {
-                Ok(Command::Update(
-                    id,
-                    serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)?,
-                ))
-            }
-        }
-    };
     if head.method != Method::DELETE && head.uri.query().is_some() {
         return error(ManagementError::Invalid);
     }
-    let command = match parse() {
+    let id = params.uuid("id");
+    let parsed = (|| -> Result<Command, ManagementError> {
+        let id = || id.ok_or(ManagementError::Invalid);
+        Ok(match write {
+            Write::Issue => Command::Issue(typed(&input)?),
+            Write::EditKey => Command::EditKey(id()?, typed(&input)?),
+            Write::Revoke => {
+                let id = id()?;
+                let mut f = management_query::fields(head.uri.query())?;
+                let expected = f
+                    .remove("expected_version")
+                    .ok_or(ManagementError::Invalid)?;
+                if !f.is_empty() {
+                    return Err(ManagementError::Invalid);
+                }
+                Command::Revoke { id, expected }
+            }
+            Write::Create => Command::Create(typed(&input)?),
+            Write::Update => Command::Update(id()?, typed(&input)?),
+            Write::Policy => Command::Policy(id()?, typed(&input)?),
+            Write::Release => Command::Release(id()?, typed(&input)?),
+            Write::Settle => Command::Settle(id()?, typed(&input)?),
+        })
+    })();
+    let command = match parsed {
         Ok(c) => c,
         Err(e) => return error(e),
     };
-    let normalized_path = if head.method == Method::DELETE {
-        format!(
-            "/api/keys/{}",
-            segments
-                .get(3)
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .unwrap_or_default()
-        )
-    } else if let Some(id) = id {
-        path.replace(segments[4], &id.to_string())
-    } else {
-        path.to_owned()
+    // 명령 기록에 남는 경로. 같은 명령이면 클라이언트가 ID를 어떻게 썼든 같은 경로가 된다.
+    // 가상 키 수정만 요청의 경로를 그대로 남긴다.
+    let id = id.unwrap_or_default();
+    let path = match write {
+        Write::Issue | Write::Create | Write::EditKey => head.uri.path().to_owned(),
+        Write::Revoke => format!("/api/keys/{id}"),
+        Write::Update => format!("/api/admin/principals/{id}"),
+        Write::Policy => format!("/api/admin/principals/{id}/policy"),
+        Write::Release => format!("/api/admin/principals/{id}/inference-pause/release"),
+        Write::Settle => format!("/api/admin/requests/{id}/settlement"),
     };
     let mut running = false;
     if let Command::Settle(id, _) = &command {
@@ -568,37 +497,18 @@ async fn execute(
                     )
             });
     }
-    let ctx = CommandContext {
-        actor: human.current.id,
+    let grants = state.api.grants();
+    let ctx = command_context(
+        state,
+        actor.human.current.id,
         command_id,
-        method: head.method.as_str(),
-        path: &normalized_path,
-        settings: state.api.auth.settings(),
-        grants: &grants,
-        digest: state.api.digest_bytes,
-        ceiling: &state.api.ceiling,
-        execution_running: running,
-    };
+        &head.method,
+        &path,
+        &grants,
+        running,
+    );
     match state.api.ledger.management_command(&ctx, command).await {
-        Ok(result) => {
-            let mut r = if let Some(v) = result.body {
-                success(v)
-            } else {
-                StatusCode::NO_CONTENT.into_response()
-            };
-            *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
-            r.headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            r.headers_mut().insert(
-                "x-gateway-command-id",
-                HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
-            );
-            r.headers_mut().insert(
-                "x-gateway-command-replayed",
-                HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
-            );
-            r
-        }
+        Ok(result) => acknowledged(result, command_id),
         Err(e) => {
             let replayed = matches!(e, ManagementError::SecretUnavailable(_));
             let mut response = error(e);
@@ -617,105 +527,135 @@ async fn execute(
     }
 }
 
-/// Provider 회사 키 조회·등록·해제. 원문은 요청 본문에서만 받고 어떤 응답에도 담지 않는다.
-async fn provider_credentials(
-    state: &ApiState,
-    head: &axum::http::request::Parts,
-    body: axum::body::Body,
-    actor: Uuid,
-) -> Response {
-    use crate::{
-        config::ProviderId,
-        ledger::credentials::{BoundAction, CredentialCommand},
+macro_rules! write_handler {
+    ($(#[$doc:meta])* $name:ident, $write:expr) => {
+        $(#[$doc])*
+        pub(super) async fn $name(
+            State(state): State<ApiState>,
+            actor: Actor,
+            params: Params,
+            command_id: CommandId,
+            request: Request,
+        ) -> Response {
+            command(&state, &actor, &params, command_id, request, $write).await
+        }
     };
+}
+write_handler!(
+    /// `POST /api/keys`. 가상 키를 발급한다.
+    issue_key,
+    Write::Issue
+);
+write_handler!(
+    /// `PATCH /api/keys/{id}`. 가상 키의 이름과 한도를 바꾼다.
+    edit_key,
+    Write::EditKey
+);
+write_handler!(
+    /// `DELETE /api/keys/{id}?expected_version=`. 가상 키를 폐기한다.
+    revoke_key,
+    Write::Revoke
+);
+write_handler!(
+    /// `POST /api/admin/principals`. 서비스 계정을 만든다.
+    create_principal,
+    Write::Create
+);
+write_handler!(
+    /// `PATCH /api/admin/principals/{id}`.
+    update_principal,
+    Write::Update
+);
+write_handler!(
+    /// `PUT /api/admin/principals/{id}/policy`.
+    set_policy,
+    Write::Policy
+);
+write_handler!(
+    /// `POST /api/admin/principals/{id}/inference-pause/release`.
+    release_pause,
+    Write::Release
+);
+write_handler!(
+    /// `PUT /api/admin/requests/{id}/settlement`. 미정산 요청을 정산한다.
+    settle,
+    Write::Settle
+);
+
+// ---- Provider 회사 키 ----
+
+/// `GET /api/admin/provider-credentials`.
+pub(super) async fn list_credentials(State(state): State<ApiState>, request: Request) -> Response {
     let Some(service) = state.api.credentials.clone() else {
         return error(ManagementError::NotFound);
     };
-    let path = head.uri.path();
-    if head.method == Method::GET {
-        if path != CREDENTIALS || head.uri.query().is_some() {
-            return error(ManagementError::Invalid);
-        }
-        return match service.list().await {
-            Ok(v) => success(v),
-            Err(e) => error(e),
-        };
+    if request.uri().query().is_some() {
+        return error(ManagementError::Invalid);
     }
-    // 경로: {CREDENTIALS}/{provider}[/{id}], /api/admin/keys/{key}/provider-credential,
-    // /api/admin/principals/{id}/provider-credentials
-    let principal = match path
-        .strip_prefix(PRINCIPALS_ADMIN)
-        .and_then(|p| p.strip_suffix(PRINCIPAL_CREDENTIALS))
-        .map(Uuid::parse_str)
-    {
-        None => None,
-        Some(Ok(id)) => Some(id),
-        Some(Err(_)) => return error(ManagementError::NotFound),
+    respond(service.list().await)
+}
+
+/// Provider 회사 키 명령이 오는 경로.
+#[derive(Clone, Copy)]
+enum CredentialRoute {
+    /// `/api/admin/provider-credentials/{provider}`
+    Provider,
+    /// `/api/admin/provider-credentials/{provider}/{id}`
+    Item,
+    /// `/api/admin/keys/{id}/provider-credential`
+    KeyBinding,
+    /// `/api/admin/principals/{id}/provider-credentials`
+    Principal,
+}
+
+/// Provider 회사 키 등록·교체·해제와 인가. 원문은 요청 본문에서만 받고 어떤 응답에도 담지 않는다.
+/// 경로 변수가 틀리면 404다.
+async fn credential_command(
+    state: &ApiState,
+    actor: &Actor,
+    params: &Params,
+    CommandId(command_id): CommandId,
+    request: Request,
+    route: CredentialRoute,
+) -> Response {
+    let Some(service) = state.api.credentials.clone() else {
+        return error(ManagementError::NotFound);
     };
-    let (provider, id, key) = if principal.is_some() {
-        (None, None, None)
-    } else if let Some(rest) = path
-        .strip_prefix(KEYS_ADMIN)
-        .and_then(|p| p.strip_suffix(KEY_BINDING))
-    {
-        match Uuid::parse_str(rest) {
-            Ok(key) => (None, None, Some(key)),
-            Err(_) => return error(ManagementError::NotFound),
-        }
-    } else {
-        let mut parts = path
-            .strip_prefix(CREDENTIALS)
-            .and_then(|p| p.strip_prefix('/'))
-            .unwrap_or("")
-            .split('/');
-        let Some(provider) = parts.next().and_then(ProviderId::from_name) else {
-            return error(ManagementError::NotFound);
-        };
-        let id = match parts.next().map(Uuid::parse_str) {
-            None => None,
-            Some(Ok(id)) => Some(id),
-            Some(Err(_)) => return error(ManagementError::NotFound),
-        };
-        if parts.next().is_some() {
-            return error(ManagementError::NotFound);
-        }
-        (Some(provider), id, None)
+    let not_found = || error(ManagementError::NotFound);
+    let principal = match route {
+        CredentialRoute::Principal => match params.uuid("id") {
+            Some(id) => Some(id),
+            None => return not_found(),
+        },
+        _ => None,
     };
-    let commands: Vec<_> = head
-        .headers
-        .get_all("x-gateway-command-id")
-        .iter()
-        .collect();
-    let Some(command_id) = (commands.len() == 1)
-        .then(|| {
-            commands[0]
-                .to_str()
-                .ok()
-                .and_then(|s| Uuid::parse_str(s).ok())
-        })
-        .flatten()
-    else {
+    let (provider, id, key) = match route {
+        CredentialRoute::Principal => (None, None, None),
+        CredentialRoute::KeyBinding => match params.uuid("id") {
+            Some(key) => (None, None, Some(key)),
+            None => return not_found(),
+        },
+        CredentialRoute::Provider => match params.provider() {
+            Some(provider) => (Some(provider), None, None),
+            None => return not_found(),
+        },
+        CredentialRoute::Item => match (params.provider(), params.uuid("id")) {
+            (Some(provider), Some(id)) => (Some(provider), Some(id), None),
+            _ => return not_found(),
+        },
+    };
+    let Some(command_id) = command_id else {
         return error(ManagementError::Invalid);
     };
-    if head
-        .headers
-        .get_all(header::CONTENT_ENCODING)
-        .iter()
-        .any(|v| v.as_bytes() != b"identity")
-    {
-        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+    let (head, body) = request.into_parts();
+    if !identity_encoding(&head.headers) {
+        return unsupported_media_type();
     }
-    let body_limit = state.runtime.limits().management_body_bytes;
-    let bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        to_bytes(body, body_limit),
-    )
-    .await
-    {
-        Ok(Ok(b)) => b,
-        Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
-        Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
+    let bytes = match read_body(state, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
     };
+    let path = head.uri.path();
     let command = if head.method == Method::DELETE {
         let (Some(provider), Some(id)) = (provider, id) else {
             return error(ManagementError::Invalid);
@@ -752,7 +692,7 @@ async fn provider_credentials(
             return error(ManagementError::Invalid);
         }
         if !crate::http::json_content_type(&head.headers) {
-            return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+            return unsupported_media_type();
         }
         let Ok(mut input) = serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes) else {
             return error(ManagementError::Invalid);
@@ -803,7 +743,7 @@ async fn provider_credentials(
                 }
                 _ => return error(ManagementError::Invalid),
             };
-            return run_credential_command(state, head, path, actor, command_id, service, command)
+            return run_credential_command(state, &head, path, actor, command_id, service, command)
                 .await;
         }
         let parsed = match (head.method.as_str(), provider, id, key) {
@@ -881,76 +821,99 @@ async fn provider_credentials(
             _ => return error(ManagementError::Invalid),
         }
     };
-    run_credential_command(state, head, path, actor, command_id, service, command).await
+    run_credential_command(state, &head, path, actor, command_id, service, command).await
 }
 
-/// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인.
 async fn run_credential_command(
     state: &ApiState,
-    head: &axum::http::request::Parts,
+    head: &Parts,
     path: &str,
-    actor: Uuid,
+    actor: &Actor,
     command_id: Uuid,
     service: std::sync::Arc<crate::credentials::CredentialService>,
-    command: crate::ledger::credentials::CredentialCommand,
+    command: CredentialCommand,
 ) -> Response {
     let grants = state.api.grants();
-    let ctx = CommandContext {
-        actor,
+    let ctx = command_context(
+        state,
+        actor.human.current.id,
         command_id,
-        method: head.method.as_str(),
+        &head.method,
         path,
-        settings: state.api.auth.settings(),
-        grants: &grants,
-        digest: state.api.digest_bytes,
-        ceiling: &state.api.ceiling,
-        execution_running: false,
-    };
+        &grants,
+        false,
+    );
     match service.execute(&ctx, command).await {
         Ok(result) => {
             // 이 프로세스는 즉시, 다른 프로세스는 상태 점검 주기에 맞춰 반영한다.
             let _ = service.refresh().await;
-            let mut r = match result.body {
-                Some(v) => success(v),
-                None => StatusCode::NO_CONTENT.into_response(),
-            };
-            *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
-            r.headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            r.headers_mut().insert(
-                "x-gateway-command-id",
-                HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
-            );
-            r.headers_mut().insert(
-                "x-gateway-command-replayed",
-                HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
-            );
-            r
+            acknowledged(result, command_id)
         }
         Err(e) => error(e),
     }
 }
 
-/// 토큰 대조 화면 값(결정 0005 23~27번). `range`는 24h, 7d, 30d 가운데 하나다(없으면 24h).
-async fn token_check(state: &ApiState, head: &axum::http::request::Parts, actor: Uuid) -> Response {
-    let hours = match head.uri.query() {
+macro_rules! credential_handler {
+    ($(#[$doc:meta])* $name:ident, $route:expr) => {
+        $(#[$doc])*
+        pub(super) async fn $name(
+            State(state): State<ApiState>,
+            actor: Actor,
+            params: Params,
+            command_id: CommandId,
+            request: Request,
+        ) -> Response {
+            credential_command(&state, &actor, &params, command_id, request, $route).await
+        }
+    };
+}
+credential_handler!(
+    /// `POST /api/admin/provider-credentials/{provider}`. 회사 키를 등록한다.
+    add_credential,
+    CredentialRoute::Provider
+);
+credential_handler!(
+    /// `POST|PUT|PATCH|DELETE /api/admin/provider-credentials/{provider}/{id}`.
+    /// 인가, 원문 교체, 이름 변경, 해제.
+    credential_item,
+    CredentialRoute::Item
+);
+credential_handler!(
+    /// `PUT /api/admin/keys/{id}/provider-credential`. 가상 키에 회사 키를 연결한다.
+    bind_key_credential,
+    CredentialRoute::KeyBinding
+);
+credential_handler!(
+    /// `PUT /api/admin/principals/{id}/provider-credentials`. 사용자에게 회사 키를 인가한다.
+    authorize_credentials,
+    CredentialRoute::Principal
+);
+
+// ---- 토큰 대조 ----
+
+/// `GET /api/admin/token-check`. 토큰 대조 화면 값(결정 0005 23~27번).
+/// `range`는 24h, 7d, 30d 가운데 하나다(없으면 24h).
+pub(super) async fn token_check(
+    State(state): State<ApiState>,
+    actor: Actor,
+    request: Request,
+) -> Response {
+    let hours = match request.uri().query() {
         None | Some("range=24h") => 24,
         Some("range=7d") => 24 * 7,
         Some("range=30d") => 24 * 30,
         _ => return error(ManagementError::Invalid),
     };
     let grants = state.api.grants();
-    let ctx = CommandContext {
-        actor,
-        command_id: Uuid::nil(),
-        method: head.method.as_str(),
-        path: head.uri.path(),
-        settings: state.api.auth.settings(),
-        grants: &grants,
-        digest: state.api.digest_bytes,
-        ceiling: &state.api.ceiling,
-        execution_running: false,
-    };
+    let ctx = command_context(
+        &state,
+        actor.human.current.id,
+        Uuid::nil(),
+        request.method(),
+        request.uri().path(),
+        &grants,
+        false,
+    );
     match state
         .api
         .store
@@ -964,43 +927,39 @@ async fn token_check(state: &ApiState, head: &axum::http::request::Parts, actor:
         Err(e) => error(e),
     }
 }
+
+// ---- 게이트웨이 설정 ----
+
 /// 게이트웨이 전체 설정(예산 기간의 시간대와 끊긴 요청의 정산 규칙). 조회와 변경 모두 관리자만 한다.
-async fn settings(
+#[derive(Clone, Copy, PartialEq)]
+enum Setting {
+    View,
+    BudgetTimezone,
+    CutoffRule,
+}
+
+async fn setting(
     state: &ApiState,
-    head: &axum::http::request::Parts,
-    body: axum::body::Body,
-    actor: Uuid,
+    actor: &Actor,
+    CommandId(command_id): CommandId,
+    request: Request,
+    setting: Setting,
 ) -> Response {
-    let path = head.uri.path();
+    let (head, body) = request.into_parts();
     if head.uri.query().is_some() {
         return error(ManagementError::Invalid);
     }
     let grants = state.api.grants();
-    let commands: Vec<_> = head
-        .headers
-        .get_all("x-gateway-command-id")
-        .iter()
-        .collect();
-    let command_id = (commands.len() == 1)
-        .then(|| {
-            commands[0]
-                .to_str()
-                .ok()
-                .and_then(|s| Uuid::parse_str(s).ok())
-        })
-        .flatten();
-    let ctx = CommandContext {
-        actor,
-        command_id: command_id.unwrap_or_else(Uuid::nil),
-        method: head.method.as_str(),
-        path,
-        settings: state.api.auth.settings(),
-        grants: &grants,
-        digest: state.api.digest_bytes,
-        ceiling: &state.api.ceiling,
-        execution_running: false,
-    };
-    if head.method == Method::GET {
+    let ctx = command_context(
+        state,
+        actor.human.current.id,
+        command_id.unwrap_or_else(Uuid::nil),
+        &head.method,
+        head.uri.path(),
+        &grants,
+        false,
+    );
+    if setting == Setting::View {
         return match state.api.store.settings_view(&ctx).await {
             Ok(mut v) => {
                 // 사후 보정은 이 서버에 Admin API 키가 있을 때만 켤 수 있다.
@@ -1013,25 +972,12 @@ async fn settings(
     let Some(command_id) = command_id else {
         return error(ManagementError::Invalid);
     };
-    if head
-        .headers
-        .get_all(header::CONTENT_ENCODING)
-        .iter()
-        .any(|v| v.as_bytes() != b"identity")
-        || !crate::http::json_content_type(&head.headers)
-    {
-        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+    if !identity_encoding(&head.headers) || !crate::http::json_content_type(&head.headers) {
+        return unsupported_media_type();
     }
-    let body_limit = state.runtime.limits().management_body_bytes;
-    let bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        to_bytes(body, body_limit),
-    )
-    .await
-    {
-        Ok(Ok(b)) => b,
-        Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
-        Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
+    let bytes = match read_body(state, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
     };
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -1050,7 +996,7 @@ async fn settings(
         correction: Option<bool>,
         expected_version: String,
     }
-    let result = if path == CUTOFF_RULE {
+    let result = if setting == Setting::CutoffRule {
         let Ok(input) = serde_json::from_slice::<SetCutoffRule>(&bytes) else {
             return error(ManagementError::Invalid);
         };
@@ -1086,86 +1032,81 @@ async fn settings(
             .await
     };
     match result {
-        Ok(result) => {
-            let mut r = match result.body {
-                Some(v) => success(v),
-                None => StatusCode::NO_CONTENT.into_response(),
-            };
-            *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
-            r.headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            r.headers_mut().insert(
-                "x-gateway-command-id",
-                HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
-            );
-            r.headers_mut().insert(
-                "x-gateway-command-replayed",
-                HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
-            );
-            r
-        }
+        Ok(result) => acknowledged(result, command_id),
         Err(e) => error(e),
     }
 }
 
-async fn model_catalog(
+macro_rules! setting_handler {
+    ($(#[$doc:meta])* $name:ident, $setting:expr) => {
+        $(#[$doc])*
+        pub(super) async fn $name(
+            State(state): State<ApiState>,
+            actor: Actor,
+            command_id: CommandId,
+            request: Request,
+        ) -> Response {
+            setting(&state, &actor, command_id, request, $setting).await
+        }
+    };
+}
+setting_handler!(
+    /// `GET /api/admin/settings`.
+    settings_view,
+    Setting::View
+);
+setting_handler!(
+    /// `PUT /api/admin/settings/budget-timezone`.
+    set_budget_timezone,
+    Setting::BudgetTimezone
+);
+setting_handler!(
+    /// `PUT /api/admin/settings/cutoff-rule`.
+    set_cutoff_rule,
+    Setting::CutoffRule
+);
+
+// ---- 모델·가격 카탈로그 ----
+
+/// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인.
+#[derive(Clone, Copy, PartialEq)]
+enum Catalog {
+    View,
+    Sync,
+    Approve,
+}
+
+async fn catalog(
     state: &ApiState,
-    head: &axum::http::request::Parts,
-    body: axum::body::Body,
-    actor: Uuid,
+    actor: &Actor,
+    CommandId(command_id): CommandId,
+    request: Request,
+    action: Catalog,
 ) -> Response {
     let Some(service) = state.api.catalog.clone().filter(|c| c.enabled()) else {
         return error(ManagementError::NotFound);
     };
-    let path = head.uri.path();
+    let (head, body) = request.into_parts();
     if head.uri.query().is_some() {
         return error(ManagementError::Invalid);
     }
-    if head.method == Method::GET {
-        return match service.view().await {
-            Ok(v) => success(v),
-            Err(e) => error(e),
-        };
+    if action == Catalog::View {
+        return respond(service.view().await);
     }
-    let commands: Vec<_> = head
-        .headers
-        .get_all("x-gateway-command-id")
-        .iter()
-        .collect();
-    let Some(command_id) = (commands.len() == 1)
-        .then(|| {
-            commands[0]
-                .to_str()
-                .ok()
-                .and_then(|s| Uuid::parse_str(s).ok())
-        })
-        .flatten()
-    else {
+    let Some(command_id) = command_id else {
         return error(ManagementError::Invalid);
     };
-    if head
-        .headers
-        .get_all(header::CONTENT_ENCODING)
-        .iter()
-        .any(|v| v.as_bytes() != b"identity")
-    {
-        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+    if !identity_encoding(&head.headers) {
+        return unsupported_media_type();
     }
-    let body_limit = state.runtime.limits().management_body_bytes;
-    let bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        to_bytes(body, body_limit),
-    )
-    .await
-    {
-        Ok(Ok(b)) => b,
-        Ok(Err(_)) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
-        Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
+    let bytes = match read_body(state, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
     };
     let input: Value = if bytes.is_empty() {
         json!({})
     } else if !crate::http::json_content_type(&head.headers) {
-        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+        return unsupported_media_type();
     } else {
         match serde_json::from_slice(&bytes) {
             Ok(v @ Value::Object(_)) => v,
@@ -1173,18 +1114,16 @@ async fn model_catalog(
         }
     };
     let grants = state.api.grants();
-    let ctx = CommandContext {
-        actor,
+    let ctx = command_context(
+        state,
+        actor.human.current.id,
         command_id,
-        method: head.method.as_str(),
-        path,
-        settings: state.api.auth.settings(),
-        grants: &grants,
-        digest: state.api.digest_bytes,
-        ceiling: &state.api.ceiling,
-        execution_running: false,
-    };
-    let result = if path == "/api/admin/model-catalog/sync" {
+        &head.method,
+        head.uri.path(),
+        &grants,
+        false,
+    );
+    let result = if action == Catalog::Sync {
         if input.as_object().is_some_and(|o| !o.is_empty()) {
             return error(ManagementError::Invalid);
         }
@@ -1222,26 +1161,40 @@ async fn model_catalog(
         Ok(result) => {
             // 이 프로세스는 즉시, 다른 프로세스는 상태 점검 주기에 맞춰 새 버전을 쓴다.
             let _ = service.refresh().await;
-            let mut r = match result.body {
-                Some(v) => success(v),
-                None => StatusCode::NO_CONTENT.into_response(),
-            };
-            *r.status_mut() = StatusCode::from_u16(result.status).expect("command status");
-            r.headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            r.headers_mut().insert(
-                "x-gateway-command-id",
-                HeaderValue::from_str(&command_id.to_string()).expect("UUID"),
-            );
-            r.headers_mut().insert(
-                "x-gateway-command-replayed",
-                HeaderValue::from_static(if result.replayed { "true" } else { "false" }),
-            );
-            r
+            acknowledged(result, command_id)
         }
         Err(e) => error(e),
     }
 }
+
+macro_rules! catalog_handler {
+    ($(#[$doc:meta])* $name:ident, $action:expr) => {
+        $(#[$doc])*
+        pub(super) async fn $name(
+            State(state): State<ApiState>,
+            actor: Actor,
+            command_id: CommandId,
+            request: Request,
+        ) -> Response {
+            catalog(&state, &actor, command_id, request, $action).await
+        }
+    };
+}
+catalog_handler!(
+    /// `GET /api/admin/model-catalog`.
+    catalog_view,
+    Catalog::View
+);
+catalog_handler!(
+    /// `POST /api/admin/model-catalog/sync`.
+    catalog_sync,
+    Catalog::Sync
+);
+catalog_handler!(
+    /// `POST /api/admin/model-catalog/approve`.
+    catalog_approve,
+    Catalog::Approve
+);
 
 #[cfg(test)]
 mod error_matrix_tests {

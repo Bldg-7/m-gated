@@ -1,3 +1,4 @@
+mod guard;
 mod management;
 use crate::{
     auth::{AuthRoute, SsoAuthenticator},
@@ -6,20 +7,16 @@ use crate::{
         PgIdentityStore,
         dashboard::{QueryError, UsageQuery},
     },
-    runtime::{HttpAdmission, RouteClass, Runtime},
+    runtime::Runtime,
 };
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::{HeaderValue, Method, StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::any,
 };
 use serde_json::{Value, json};
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 pub struct DashboardApi {
     auth: Arc<SsoAuthenticator>,
@@ -134,58 +131,156 @@ impl DashboardApi {
                 .to_owned(),
         }
     }
+    /// 관리 API의 경로 표(결정 0010). 경로마다 한 번만 등록한다.
+    /// 세 번째 값은 허용하지 않는 메서드에 답하는 405 응답의 `Allow` 헤더다.
     pub fn routes(self: Arc<Self>, runtime: Arc<Runtime>) -> Router {
+        use axum::routing::{delete, get, post, put};
+        use guard::{Checks, route};
+        use management as m;
+        let s = ApiState { api: self, runtime };
+        let (user, admin) = (Checks::USER, Checks::ADMIN);
+        let csrf = Checks::Management {
+            auth: AuthRoute::CookieOnly,
+            admin: false,
+            key_owner: false,
+        };
+        let key = Checks::Management {
+            auth: AuthRoute::Management,
+            admin: false,
+            key_owner: true,
+        };
         Router::new()
-            .route("/api/me", any(read))
-            .route("/api/usage", any(read))
-            .route("/api/usage/models", any(read))
-            .route("/auth/login", any(read))
-            .route("/api/csrf", any(management::handle))
-            .route("/api/keys", any(management::handle))
-            .route("/api/keys/{id}", any(management::handle))
-            .route("/api/admin/principals", any(management::handle))
-            .route("/api/admin/principals/{id}", any(management::handle))
-            .route("/api/admin/principals/{id}/policy", any(management::handle))
+            .route("/auth/login", route(&s, Checks::Login, "GET", get(login)))
+            .route("/api/me", route(&s, Checks::Dashboard, "GET", get(me)))
+            .route(
+                "/api/usage",
+                route(&s, Checks::Dashboard, "GET", get(usage)),
+            )
+            .route(
+                "/api/usage/models",
+                route(&s, Checks::Dashboard, "GET", get(usage_models)),
+            )
+            .route("/api/csrf", route(&s, csrf, "GET", get(m::csrf_token)))
+            .route(
+                "/api/keys",
+                route(&s, user, "GET, POST", get(m::list_keys).post(m::issue_key)),
+            )
+            .route(
+                "/api/keys/{id}",
+                route(
+                    &s,
+                    key,
+                    "DELETE, PATCH",
+                    delete(m::revoke_key).patch(m::edit_key),
+                ),
+            )
+            .route(
+                "/api/admin/principals",
+                route(
+                    &s,
+                    admin,
+                    "GET, POST",
+                    get(m::list_principals).post(m::create_principal),
+                ),
+            )
+            .route(
+                "/api/admin/principals/{id}",
+                route(
+                    &s,
+                    admin,
+                    "GET, PATCH",
+                    get(m::principal_detail).patch(m::update_principal),
+                ),
+            )
+            .route(
+                "/api/admin/principals/{id}/policy",
+                route(&s, admin, "PUT", put(m::set_policy)),
+            )
             .route(
                 "/api/admin/principals/{id}/inference-pause/release",
-                any(management::handle),
+                route(&s, admin, "POST", post(m::release_pause)),
             )
-            .route("/api/admin/keys", any(management::handle))
-            .route("/api/admin/provider-credentials", any(management::handle))
             .route(
                 "/api/admin/principals/{id}/provider-credentials",
-                any(management::handle),
-            )
-            .route("/api/admin/settings", any(management::handle))
-            .route(
-                "/api/admin/settings/budget-timezone",
-                any(management::handle),
-            )
-            .route("/api/admin/settings/cutoff-rule", any(management::handle))
-            .route("/api/admin/token-check", any(management::handle))
-            .route("/api/admin/model-catalog", any(management::handle))
-            .route("/api/admin/model-catalog/sync", any(management::handle))
-            .route("/api/admin/model-catalog/approve", any(management::handle))
-            .route(
-                "/api/admin/provider-credentials/{provider}",
-                any(management::handle),
+                route(&s, admin, "PUT", put(m::authorize_credentials)),
             )
             .route(
-                "/api/admin/provider-credentials/{provider}/{id}",
-                any(management::handle),
+                "/api/admin/keys",
+                route(&s, admin, "GET", get(m::list_keys)),
             )
             .route(
                 "/api/admin/keys/{id}/provider-credential",
-                any(management::handle),
+                route(&s, admin, "PUT", put(m::bind_key_credential)),
             )
-            .route("/api/admin/usage", any(management::handle))
-            .route("/api/admin/requests", any(management::handle))
-            .route("/api/admin/requests/{id}", any(management::handle))
+            .route(
+                "/api/admin/provider-credentials",
+                route(&s, admin, "GET", get(m::list_credentials)),
+            )
+            .route(
+                "/api/admin/provider-credentials/{provider}",
+                route(&s, admin, "POST", post(m::add_credential)),
+            )
+            .route(
+                "/api/admin/provider-credentials/{provider}/{id}",
+                route(
+                    &s,
+                    admin,
+                    "POST, PUT, PATCH, DELETE",
+                    post(m::credential_item)
+                        .put(m::credential_item)
+                        .patch(m::credential_item)
+                        .delete(m::credential_item),
+                ),
+            )
+            .route(
+                "/api/admin/settings",
+                route(&s, admin, "GET", get(m::settings_view)),
+            )
+            .route(
+                "/api/admin/settings/budget-timezone",
+                route(&s, admin, "PUT", put(m::set_budget_timezone)),
+            )
+            .route(
+                "/api/admin/settings/cutoff-rule",
+                route(&s, admin, "PUT", put(m::set_cutoff_rule)),
+            )
+            .route(
+                "/api/admin/token-check",
+                route(&s, admin, "GET", get(m::token_check)),
+            )
+            .route(
+                "/api/admin/model-catalog",
+                route(&s, admin, "GET", get(m::catalog_view)),
+            )
+            .route(
+                "/api/admin/model-catalog/sync",
+                route(&s, admin, "POST", post(m::catalog_sync)),
+            )
+            .route(
+                "/api/admin/model-catalog/approve",
+                route(&s, admin, "POST", post(m::catalog_approve)),
+            )
+            .route(
+                "/api/admin/usage",
+                route(&s, admin, "GET", get(m::admin_usage)),
+            )
+            .route(
+                "/api/admin/requests",
+                route(&s, admin, "GET", get(m::list_requests)),
+            )
+            .route(
+                "/api/admin/requests/models",
+                route(&s, admin, "GET", get(m::request_models)),
+            )
+            .route(
+                "/api/admin/requests/{id}",
+                route(&s, admin, "GET", get(m::request_detail)),
+            )
             .route(
                 "/api/admin/requests/{id}/settlement",
-                any(management::handle),
+                route(&s, admin, "PUT", put(m::settle)),
             )
-            .with_state(ApiState { api: self, runtime })
+            .with_state(s)
     }
 }
 #[derive(Clone)]
@@ -193,57 +288,91 @@ struct ApiState {
     api: Arc<DashboardApi>,
     runtime: Arc<Runtime>,
 }
-async fn read(State(state): State<ApiState>, request: Request) -> Response {
-    if request.method() != Method::GET {
-        return crate::http::method_not_allowed();
+/// `GET /auth/login`. 로그인한 사용자를 대시보드로 보낸다. 로그인하지 않았으면 `guard`가 SSO로 보낸다.
+async fn login() -> Response {
+    redirect(StatusCode::SEE_OTHER, "/dashboard/")
+}
+/// `GET /api/me`. 대시보드가 처음 읽는 내 정보.
+async fn me(State(state): State<ApiState>, actor: guard::Actor, request: Request) -> Response {
+    if request.uri().query().is_some() {
+        return query_error(QueryError::InvalidFilter);
     }
-    let (request, body) = request.into_parts();
-    drop(body);
-    let Some(http) = request.extensions.get::<HttpAdmission>() else {
-        return crate::http::admission_error(crate::runtime::AdmissionError::InvalidTransition);
-    };
-    let mut lease = match state
-        .runtime
-        .try_admit_with_http(RouteClass::ManagementRead, http.clone())
+    let human = &actor.human;
+    let grants = state.api.grants();
+    match state
+        .api
+        .store
+        .dashboard_me(human.current.id, &grants, &state.api.digest)
+        .await
     {
-        Ok(lease) => lease,
-        Err(error) => return crate::http::admission_error(error),
-    };
-    let result=tokio::time::timeout(Duration::from_millis(state.runtime.limits().management_timeout_ms),async {
-        if let Err(error)=lease.begin_authentication() { return crate::http::admission_error(error); }
-        let login=request.uri.path()=="/auth/login";
-        let explicit=request.headers.contains_key("authorization")||request.headers.contains_key("x-api-key");
-        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-        let human=match state.api.auth.authenticate(&request.headers,if login{AuthRoute::Login}else{AuthRoute::Management},now).await {
-            Ok(human)=>human,
-            Err(crate::auth::AuthError::InvalidCredentials) if login&&!explicit=>return redirect(StatusCode::FOUND,&state.api.login),
-            Err(error)=>return crate::http::authentication_error(error),
-        };
-        if let Err(error)=lease.identify(human.current.id) { return crate::http::admission_error(error); }
-        if login { return redirect(StatusCode::SEE_OTHER,"/dashboard/"); }
-        if request.uri.path()=="/api/me" {
-            if request.uri.query().is_some() { return query_error(QueryError::InvalidFilter); }
-            let grants=state.api.grants();
-            match state.api.store.dashboard_me(human.current.id,&grants,&state.api.digest).await {
-                Ok(mut principal)=>{
-                    let grants=principal.as_object_mut().expect("principal object").remove("effective_grants").unwrap_or(json!([]));
-                    let budget_timezone=principal.as_object_mut().expect("principal object").remove("budget_timezone").unwrap_or(Value::Null);
-                    let provider_credentials=principal.as_object_mut().expect("principal object").remove("provider_credentials").unwrap_or(json!([]));
-                    let Some(expires)=time::OffsetDateTime::from_unix_timestamp(human.identity.expires_at()).ok().and_then(|t|t.format(&time::format_description::well_known::Rfc3339).ok()) else { return query_error(QueryError::Invariant); };
-                    let key_limit_maximum=crate::ledger::policy::PolicyLimits::key_maximum_view(&principal["policy"]["limits"],&state.api.ceiling);
-                    success(json!({"key_limit_maximum":key_limit_maximum,"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}))
-                },Err(error)=>query_error(error),
-            }
-        } else if request.uri.path()=="/api/usage/models" {
-            if request.uri.query().is_some() { return query_error(QueryError::InvalidFilter); }
-            match state.api.store.dashboard_usage_models(human.current.id).await { Ok(value)=>success(value),Err(error)=>query_error(error) }
-        } else {
-            let query=match UsageQuery::parse(request.uri.query()) { Ok(q)=>q,Err(e)=>return query_error(e) };
-            let grants=state.api.grants();
-            match state.api.store.dashboard_usage_with_ceiling(human.current.id,query,&grants,&state.api.digest,&state.api.signing_key,&state.api.ceiling).await { Ok(value)=>success(value),Err(error)=>query_error(error) }
+        Ok(mut principal) => {
+            let object = principal.as_object_mut().expect("principal object");
+            let grants = object.remove("effective_grants").unwrap_or(json!([]));
+            let budget_timezone = object.remove("budget_timezone").unwrap_or(Value::Null);
+            let provider_credentials = object.remove("provider_credentials").unwrap_or(json!([]));
+            let Some(expires) =
+                time::OffsetDateTime::from_unix_timestamp(human.identity.expires_at())
+                    .ok()
+                    .and_then(|t| {
+                        t.format(&time::format_description::well_known::Rfc3339)
+                            .ok()
+                    })
+            else {
+                return query_error(QueryError::Invariant);
+            };
+            let key_limit_maximum = crate::ledger::policy::PolicyLimits::key_maximum_view(
+                &principal["policy"]["limits"],
+                &state.api.ceiling,
+            );
+            success(
+                json!({"key_limit_maximum":key_limit_maximum,"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}),
+            )
         }
-    }).await;
-    lease.bind_response(result.unwrap_or_else(|_| query_error(QueryError::Database)))
+        Err(error) => query_error(error),
+    }
+}
+/// `GET /api/usage/models`. 내 사용량 화면의 모델 목록.
+async fn usage_models(
+    State(state): State<ApiState>,
+    actor: guard::Actor,
+    request: Request,
+) -> Response {
+    if request.uri().query().is_some() {
+        return query_error(QueryError::InvalidFilter);
+    }
+    match state
+        .api
+        .store
+        .dashboard_usage_models(actor.human.current.id)
+        .await
+    {
+        Ok(value) => success(value),
+        Err(error) => query_error(error),
+    }
+}
+/// `GET /api/usage`. 내 사용량.
+async fn usage(State(state): State<ApiState>, actor: guard::Actor, request: Request) -> Response {
+    let query = match UsageQuery::parse(request.uri().query()) {
+        Ok(q) => q,
+        Err(e) => return query_error(e),
+    };
+    let grants = state.api.grants();
+    match state
+        .api
+        .store
+        .dashboard_usage_with_ceiling(
+            actor.human.current.id,
+            query,
+            &grants,
+            &state.api.digest,
+            &state.api.signing_key,
+            &state.api.ceiling,
+        )
+        .await
+    {
+        Ok(value) => success(value),
+        Err(error) => query_error(error),
+    }
 }
 fn redirect(status: StatusCode, to: &str) -> Response {
     let mut r = status.into_response();

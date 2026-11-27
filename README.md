@@ -968,6 +968,25 @@ TEST_DEEPSEEK_ADAPTER=$PWD/target/adapters/deepseek.wasm \
 cargo test --release --locked --test wasm_adapter_cost -- --ignored --nocapture --test-threads=1
 ```
 
+The management API has a record test, `tests/management_routes_postgres.rs`. It fails when an
+answer of the management API changes. The test sends requests to each management path, and to a
+few paths that look like them but do not exist. It uses each method, requests without a credential
+and with several kinds of credential, and several bad inputs. For each answer, it writes one line
+with these values:
+
+- the status;
+- the error code in the JSON body;
+- the `Allow`, `Location`, `Content-Type`, `x-gateway-error-code` and `Retry-After` headers.
+
+Then the test compares the lines with `tests/golden/management_routes.txt`. When you intend to
+change an answer, write the file again with `UPDATE_GOLDEN=1`. Then read the changes in the file
+with `git diff` before you commit the file.
+
+```sh
+cargo test --locked --test management_routes_postgres -- --ignored
+UPDATE_GOLDEN=1 cargo test --locked --test management_routes_postgres -- --ignored
+```
+
 The runners in `scripts/` handle the full regression: SDK compatibility through `tests/compat`,
 the real binary through `tests/process`, and browser end-to-end tests with Playwright. They also
 need Docker, `TEST_FNM_DIR` (a directory of the fnm Node version manager with Node 22.22.2 installed) and, for browser tests,
