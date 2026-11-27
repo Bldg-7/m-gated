@@ -21,6 +21,7 @@ status. A later decision that changes an earlier one gets a new file, and the ea
 | [0010](0010-management-api-uses-axum-routing.md) | Route the management API with axum's method routing and extractors | Implemented |
 | [0011](0011-password-sign-in.md) | Let each gateway choose e-mail and password sign-in or SSO | Implemented |
 | [0012](0012-usage-categories.md) | Report usage in the gateway's usage categories, with each API declaring the ones it uses | Implemented |
+| [0013](0013-openai-adapter-as-wasm.md) | Offer the OpenAI adapter as a WASM component, next to the built-in adapter | Accepted, not implemented |
 
 ## Format
 
