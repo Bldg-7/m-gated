@@ -9,7 +9,7 @@ status. A later decision that changes an earlier one gets a new file, and the ea
 
 | No. | Decision | Status |
 |---|---|---|
-| [0001](0001-access-list-in-the-database.md) | Keep the access list in the database, with one fixed admin in the config | Accepted, not implemented |
+| [0001](0001-access-list-in-the-database.md) | Keep the access list in the database, with one fixed admin in the config | Implemented |
 | [0002](0002-account-suspension.md) | Suspend an account with its own button; remove the security fence | Dashboard implemented, server part not implemented |
 | [0003](0003-dashboard-screen-rules.md) | Rules for dashboard screens | Implemented |
 | [0004](0004-filter-bars-stay-simple.md) | Filter bars get no summary line, reset button or "not applied" marker | Accepted |
@@ -19,7 +19,8 @@ status. A later decision that changes an earlier one gets a new file, and the ea
 | [0008](0008-add-typesafe-and-decompress-zstd-requests.md) | Add TypeSafe, and decompress zstd request bodies in the gateway | Implemented |
 | [0009](0009-deepseek-adapter-as-wasm-trial.md) | Run the DeepSeek adapter as a WASM component, as a trial | Implemented |
 | [0010](0010-management-api-uses-axum-routing.md) | Route the management API with axum's method routing and extractors | Implemented |
-| [0011](0011-password-sign-in.md) | Let each gateway choose e-mail and password sign-in or SSO | Accepted, not implemented |
+| [0011](0011-password-sign-in.md) | Let each gateway choose e-mail and password sign-in or SSO | Implemented |
+| [0012](0012-usage-categories.md) | Report usage in the gateway's usage categories, with each API declaring the ones it uses | Accepted, not implemented |
 
 ## Format
 

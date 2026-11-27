@@ -1,7 +1,7 @@
 # 0011. Let each gateway choose e-mail and password sign-in or SSO
 
 - Date: 2026-11-27
-- Status: Accepted, not implemented
+- Status: Implemented
 
 ## Context
 

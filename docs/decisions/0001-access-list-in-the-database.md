@@ -1,7 +1,7 @@
 # 0001. Keep the access list in the database, with one fixed admin in the config
 
 - Date: 2026-11-23
-- Status: Accepted, not implemented
+- Status: Implemented
 
 ## Context
 
