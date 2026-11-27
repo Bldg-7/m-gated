@@ -26,7 +26,6 @@ CREATE TABLE gw_principals (
 CREATE UNIQUE INDEX gw_human_identity ON gw_principals(issuer,subject) WHERE kind='human';
 CREATE INDEX gw_principals_created ON gw_principals(created_at,id);
 CREATE INDEX gw_service_owner ON gw_principals(owner_principal_id,id) WHERE kind='service';
-CREATE INDEX gw_inference_paused ON gw_principals(inference_paused_at,id) WHERE inference_paused_at IS NOT NULL;
 CREATE FUNCTION gw_check_principal() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF TG_OP='UPDATE' AND (NEW.kind IS DISTINCT FROM OLD.kind OR NEW.issuer IS DISTINCT FROM OLD.issuer OR NEW.subject IS DISTINCT FROM OLD.subject) THEN

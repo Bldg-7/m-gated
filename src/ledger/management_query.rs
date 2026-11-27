@@ -463,12 +463,20 @@ impl PgIdentityStore {
             for (column, v) in [
                 ("provider", provider),
                 ("requested_model", filter.get("model").cloned()),
+            ] {
+                if let Some(v) = v {
+                    q.push(format!(" AND {column}=")).push_bind(v);
+                }
+            }
+            // 상태 값은 enum_filter가 허용 목록으로 검사했다. SQL에 글자로 넣어야 조건부 인덱스
+            // (미정산만 담는 gw_requests_unknown_recent)를 어떤 실행 계획에서도 쓴다.
+            for (column, v) in [
                 ("phase", phase),
                 ("outcome", outcome),
                 ("accounting_state", state),
             ] {
                 if let Some(v) = v {
-                    q.push(format!(" AND {column}=")).push_bind(v);
+                    q.push(format!(" AND {column}='{v}'"));
                 }
             }
             if let Some(v) = filter.get("from") {
@@ -605,7 +613,8 @@ impl PgIdentityStore {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             let mut tx = self.begin_transaction().await?;
             management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
-            let rows = sqlx::query("SELECT DISTINCT provider,requested_model FROM gw_requests ORDER BY requested_model,provider LIMIT 1000")
+            // 서로 다른 (모델, Provider)만 인덱스에서 건너뛰며 읽는다. 요청 기록 전체를 읽지 않는다.
+            let rows = sqlx::query("WITH RECURSIVE m AS ((SELECT requested_model,provider FROM gw_requests ORDER BY requested_model,provider LIMIT 1) UNION ALL SELECT n.requested_model,n.provider FROM m CROSS JOIN LATERAL (SELECT requested_model,provider FROM gw_requests WHERE (requested_model,provider)>(m.requested_model,m.provider) ORDER BY requested_model,provider LIMIT 1) n) SELECT provider,requested_model FROM m LIMIT 1000")
                 .fetch_all(&mut *tx)
                 .await?;
             tx.commit().await?;

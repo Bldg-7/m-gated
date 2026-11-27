@@ -23,7 +23,6 @@ CREATE INDEX gw_provider_credentials_history ON gw_provider_credentials(provider
 
 -- 어떤 회사 키로 나간 요청인지 남긴다(키 유출 시 범위 확인). 이관·테스트 고정 키 요청은 NULL이다.
 ALTER TABLE gw_requests ADD COLUMN provider_credential_id uuid REFERENCES gw_provider_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-CREATE INDEX gw_requests_provider_credential ON gw_requests(provider_credential_id,admitted_at) WHERE provider_credential_id IS NOT NULL;
 
 ALTER TABLE gw_commands DROP CONSTRAINT gw_commands_operation_check;
 ALTER TABLE gw_commands ADD CONSTRAINT gw_commands_operation_check CHECK(operation IN ('issue_key','revoke_key','create_service','update_service','replace_policy','settle_unknown','release_inference_pause','retention_delete','handoff','set_provider_credential','retire_provider_credential'));

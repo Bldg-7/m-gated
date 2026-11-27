@@ -7,7 +7,6 @@ CREATE TABLE gw_model_catalog_proposals (
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  payload jsonb NOT NULL CHECK(jsonb_typeof(payload)='object' AND octet_length(payload::text)<=2097152)
 );
-CREATE INDEX gw_model_catalog_proposals_created ON gw_model_catalog_proposals(created_at);
 CREATE TABLE gw_model_catalog_versions (
  version bigint PRIMARY KEY CHECK(version>0),
  proposal_id uuid NOT NULL REFERENCES gw_model_catalog_proposals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,

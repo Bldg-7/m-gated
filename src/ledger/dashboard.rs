@@ -344,7 +344,8 @@ impl PgIdentityStore {
             .map_err(|_| QueryError::Database)?;
         tokio::time::timeout(Duration::from_secs(3), async {
             let mut tx = self.begin_transaction().await?;
-            let rows = sqlx::query("SELECT DISTINCT provider,requested_model FROM gw_requests WHERE principal_id=$1 ORDER BY requested_model,provider LIMIT 1000")
+            // 서로 다른 (모델, Provider)만 인덱스에서 건너뛰며 읽는다. 요청 기록 전체를 읽지 않는다.
+            let rows = sqlx::query("WITH RECURSIVE m AS ((SELECT requested_model,provider FROM gw_requests WHERE principal_id=$1 ORDER BY requested_model,provider LIMIT 1) UNION ALL SELECT n.requested_model,n.provider FROM m CROSS JOIN LATERAL (SELECT requested_model,provider FROM gw_requests WHERE principal_id=$1 AND (requested_model,provider)>(m.requested_model,m.provider) ORDER BY requested_model,provider LIMIT 1) n) SELECT provider,requested_model FROM m LIMIT 1000")
                 .bind(id)
                 .fetch_all(&mut *tx)
                 .await?;
@@ -422,7 +423,7 @@ impl PgIdentityStore {
         let (mut p, mut balances, _) = if let Some(id) = id {
             principal(&mut tx, id, grants, digest).await?
         } else {
-            let counts=sqlx::query("SELECT count(*) FILTER(WHERE accounting_state='unknown')::text AS unknown,count(*) FILTER(WHERE phase='dispatching' AND lease_expires_at<=$1::timestamptz AND execution_snapshot->>'billing_class'='chargeable')::text AS expired FROM gw_requests").bind(&now).fetch_one(&mut *tx).await?;
+            let counts=sqlx::query("SELECT (SELECT count(*) FROM gw_requests WHERE accounting_state='unknown')::text AS unknown,(SELECT count(*) FROM gw_requests WHERE phase='dispatching' AND lease_expires_at<=$1::timestamptz AND execution_snapshot->>'billing_class'='chargeable')::text AS expired").bind(&now).fetch_one(&mut *tx).await?;
             (
                 json!({"block_state":{"global_unknown_count":counts.get::<String,_>("unknown"),"expired_dispatch_count":counts.get::<String,_>("expired")}}),
                 Vec::new(),
@@ -627,7 +628,7 @@ pub(crate) async fn principal(
     let now: String = sqlx::query_scalar(&format!("SELECT {}", stamp_sql("clock_timestamp()")))
         .fetch_one(&mut *c)
         .await?;
-    let counts=sqlx::query("SELECT count(*) FILTER(WHERE accounting_state='unknown')::text AS unknown,count(*) FILTER(WHERE phase='dispatching' AND lease_expires_at<=$2::timestamptz AND execution_snapshot->>'billing_class'='chargeable')::text AS expired FROM gw_requests WHERE principal_id=$1").bind(id).bind(&now).fetch_one(&mut *c).await?;
+    let counts=sqlx::query("SELECT (SELECT count(*) FROM gw_requests WHERE principal_id=$1 AND accounting_state='unknown')::text AS unknown,(SELECT count(*) FROM gw_requests WHERE principal_id=$1 AND phase='dispatching' AND lease_expires_at<=$2::timestamptz AND execution_snapshot->>'billing_class'='chargeable')::text AS expired").bind(id).bind(&now).fetch_one(&mut *c).await?;
     let unknown: String = counts.get("unknown");
     let expired: String = counts.get("expired");
     let paused = row.get::<Option<String>, _>("inference_pause_reason");

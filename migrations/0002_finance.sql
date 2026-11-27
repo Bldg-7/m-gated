@@ -19,8 +19,6 @@ CREATE TABLE gw_commands (
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY(actor_principal_id,command_id)
 );
-CREATE INDEX gw_commands_created ON gw_commands(created_at,actor_principal_id,command_id);
-CREATE INDEX gw_commands_target ON gw_commands(target_kind,target_id,created_at);
 CREATE TABLE gw_virtual_keys (
  id uuid PRIMARY KEY,
  principal_id uuid NOT NULL REFERENCES gw_principals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -105,12 +103,15 @@ CREATE TABLE gw_requests (
 CREATE UNIQUE INDEX gw_one_internal_count ON gw_requests(parent_request_id) WHERE parent_request_id IS NOT NULL;
 CREATE INDEX gw_requests_principal ON gw_requests(principal_id,admitted_at,id);
 CREATE INDEX gw_requests_admitted ON gw_requests(admitted_at,id);
-CREATE INDEX gw_requests_provider_id ON gw_requests(provider,provider_request_id) WHERE provider_request_id IS NOT NULL;
 CREATE INDEX gw_requests_unknown ON gw_requests(principal_id,admitted_at,id) WHERE accounting_state='unknown';
+-- 관리자의 미정산 목록. 미정산 행만 담는다.
+CREATE INDEX gw_requests_unknown_recent ON gw_requests(admitted_at,id) WHERE accounting_state='unknown';
+-- 모델 필터 목록. 서로 다른 (모델, Provider)만 건너뛰며 읽는다.
+CREATE INDEX gw_requests_models ON gw_requests(requested_model,provider);
+CREATE INDEX gw_requests_principal_models ON gw_requests(principal_id,requested_model,provider);
 CREATE INDEX gw_requests_principal_lease ON gw_requests(principal_id,lease_expires_at,id) WHERE phase='dispatching';
 CREATE INDEX gw_requests_recover_admitted ON gw_requests(admit_expires_at,id) WHERE phase='admitted';
 CREATE INDEX gw_requests_recover_dispatch ON gw_requests(lease_expires_at,id) WHERE phase='dispatching';
-CREATE INDEX gw_requests_settled ON gw_requests(finished_at,id) WHERE phase='finished' AND accounting_state='settled';
 ALTER TABLE gw_principals ADD CONSTRAINT gw_pause_request_owner FOREIGN KEY(inference_pause_request_id,id) REFERENCES gw_requests(id,principal_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
 CREATE FUNCTION gw_check_request() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -227,5 +228,3 @@ CREATE TABLE gw_audit_events (
 CREATE UNIQUE INDEX gw_audit_command ON gw_audit_events(actor_principal_id,command_id) WHERE command_id IS NOT NULL;
 CREATE UNIQUE INDEX gw_audit_system ON gw_audit_events(operation,request_id) WHERE actor_kind='system';
 CREATE INDEX gw_audit_occurred ON gw_audit_events(occurred_at,id);
-CREATE INDEX gw_audit_target ON gw_audit_events(target_kind,target_id,occurred_at,id);
-CREATE INDEX gw_audit_actor ON gw_audit_events(actor_principal_id,occurred_at,id);
