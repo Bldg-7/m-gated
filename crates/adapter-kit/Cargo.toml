@@ -6,6 +6,7 @@ publish = false
 description = "Provider adapter code shared by the m-gated host and its WASM adapters. No tokio."
 
 [dependencies]
+base64 = "=0.22.1"
 serde_json = "=1.0.149"
 
 [dev-dependencies]

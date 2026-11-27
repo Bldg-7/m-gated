@@ -16,8 +16,11 @@ docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-
   test "$(id -u)" = 65532
   test -x /app/m-gated
   test -f /app/web/dist/.vite/manifest.json
-  test "$(sha256sum /app/adapters/deepseek.wasm | cut -d" " -f1)" = "$(cat /app/adapters/deepseek.wasm.sha256)"
-  ! test -w /app/adapters/deepseek.wasm
+  for adapter in deepseek openai; do
+    test "$(sha256sum /app/adapters/$adapter.wasm | cut -d" " -f1)" = "$(cat /app/adapters/$adapter.wasm.sha256)"
+    test ! -w /app/adapters/$adapter.wasm
+    test ! -w /app/adapters/$adapter.wasm.sha256
+  done
   ! command -v node
   ! command -v npm
   ! command -v cargo

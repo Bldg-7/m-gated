@@ -46,6 +46,9 @@ impl port::Provider for Deepseek {
     fn check_profile(&self, profile: &ModelProfile) -> Result<(), StartupError> {
         Ok(adapter::check_profile(&port::adapter_profile(profile))?)
     }
+    fn models_dev_name(&self) -> Option<&'static str> {
+        adapter::MODELS_DEV_NAME
+    }
 }
 /// DeepSeek Chat Completions API.
 pub struct Chat;
@@ -102,6 +105,9 @@ impl Api for Chat {
     }
     fn usage_categories(&self) -> &'static [UsageCategory] {
         adapter::USAGE_CATEGORIES
+    }
+    fn catalog(&self) -> bool {
+        adapter::CATALOG
     }
 }
 struct Stream(adapter::Stream);

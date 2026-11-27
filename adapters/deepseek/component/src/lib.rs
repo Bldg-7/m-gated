@@ -1,4 +1,4 @@
-//! DeepSeek 어댑터를 WASM 컴포넌트(`m-gated:adapter@0.2.0`)로 내보낸다(결정 0009, 0012).
+//! DeepSeek 어댑터를 WASM 컴포넌트(`m-gated:adapter@0.3.0`)로 내보낸다(결정 0009, 0012, 0013).
 //! WIT 타입과 어댑터 crate의 타입을 바꿔 줄 뿐이다.
 //!
 //! `scripts/build-adapter.sh`가 `wasm32-unknown-unknown`으로 빌드하고 컴포넌트로 감싼다.
@@ -40,6 +40,12 @@ fn profile(p: wit::Profile) -> kit::Profile {
         approved_beta: p.approved_beta,
         max_output_tokens: p.max_output_tokens,
         rates: p.rates,
+        chat_output_limit_field: p.chat_output_limit_field,
+        embedding_dimensions: p.embedding_dimensions.map(|d| kit::EmbeddingDimensions {
+            default: d.default,
+            max: d.max,
+        }),
+        embedding_encodings: p.embedding_encodings,
     }
 }
 fn api_error(e: kit::ApiError) -> wit::ApiError {
@@ -133,7 +139,9 @@ impl Guest for Component {
                     .map(|c| c.name().to_string())
                     .collect(),
                 stream: true,
+                catalog: deepseek::CATALOG,
             }],
+            models_dev_name: deepseek::MODELS_DEV_NAME.map(String::from),
         }
     }
     fn check_profile(api: String, p: wit::Profile) -> Result<(), wit::ProfileError> {
@@ -183,6 +191,7 @@ impl Guest for Component {
         api: String,
         status: u16,
         body: Vec<u8>,
+        _request: Vec<u8>,
         _profile: wit::Profile,
     ) -> Result<wit::Reading, wit::ReadError> {
         if api != CHAT {

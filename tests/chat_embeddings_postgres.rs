@@ -37,15 +37,42 @@ fn configuration_options(output: &str, options: &str) -> config::ValidatedConfig
     let profile=base[base.find("      - model:").unwrap()..].replace("api: messages", "api: embeddings\n        embedding_dimensions: {default: 3, max: 4096}\n        embedding_encodings: [float, base64]").replace("        max_output_tokens: 1024\n", "").replace("          output: '2.000000000000'\n", "");
     yaml.push_str(&profile);
     yaml.push_str(options);
+    let (yaml, adapter) = with_openai_adapter(&yaml);
     let mut env = support::environment();
     // alice가 고정 관리자다. 시험은 store를 직접 만들므로 `postgres::grant_access`로 넣는다.
     env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
-    config::load(ConfigInputs {
+    let cfg = config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
         environment: &env,
     })
-    .unwrap()
+    .unwrap();
+    assert_eq!(
+        m_gated::providers::port::installed(config::ProviderId::Openai),
+        adapter
+    );
+    cfg
+}
+/// `TEST_OPENAI_ADAPTER`에 컴포넌트 경로가 있으면 모든 시험이 WASM 어댑터로 돈다(결정 0013).
+/// 설정의 OpenAI Provider에 그 파일과 SHA-256을 넣는다. 경로가 없으면 설정을 바꾸지 않는다.
+fn with_openai_adapter(yaml: &str) -> (String, bool) {
+    use sha2::{Digest, Sha256};
+    let Ok(path) = std::env::var("TEST_OPENAI_ADAPTER") else {
+        return (yaml.to_string(), false);
+    };
+    let bytes = std::fs::read(&path).expect("TEST_OPENAI_ADAPTER 파일을 읽는다");
+    let sha: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let yaml = yaml.replacen(
+        "    base_url: https://api.openai.com\n",
+        &format!(
+            "    base_url: https://api.openai.com\n    adapter: {path}\n    adapter_sha256: {sha}\n"
+        ),
+        1,
+    );
+    (yaml, true)
 }
 struct Harness {
     db: postgres::TestDb,

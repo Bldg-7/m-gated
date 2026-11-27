@@ -35,6 +35,10 @@ pub const UPSTREAM_PATH: &str = "chat/completions";
 pub const ERROR_FORMAT: ErrorFormat = ErrorFormat::Openai;
 /// 가격표 snapshot에 남기는 토큰 포함 규칙.
 pub const TOKEN_RULE: &str = "deepseek_prompt_includes_hit_completion_includes_reasoning_v1";
+/// 공개 가격 목록(models.dev)에서 찾을 이름. 없으므로 카탈로그 동기화를 하지 않는다.
+pub const MODELS_DEV_NAME: Option<&str> = None;
+/// 카탈로그 정책(모델과 가격을 DB에서 관리)을 쓸 수 있는지.
+pub const CATALOG: bool = false;
 /// 사용량 칸(결정 0012). `input`은 캐시에 없던 입력(miss)이고, `cache_read`는 캐시에서 읽은 입력(hit)이다.
 pub const USAGE_CATEGORIES: &[UsageCategory] = &[
     UsageCategory::Input,
@@ -737,6 +741,9 @@ mod tests {
             approved_beta: Vec::new(),
             max_output_tokens: Some(100),
             rates: ["input", "output", "cache_read"].map(String::from).to_vec(),
+            chat_output_limit_field: None,
+            embedding_dimensions: None,
+            embedding_encodings: Vec::new(),
         }
     }
     fn wire(v: Value) -> String {

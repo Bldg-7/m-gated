@@ -133,6 +133,19 @@ pub struct Profile {
     pub max_output_tokens: Option<u64>,
     /// 가격 항목 이름(`input`, `output`, `cache_read` 등).
     pub rates: Vec<String>,
+    /// OpenAI Chat Completions가 출력 상한을 받는 필드 이름(`max_tokens` 또는
+    /// `max_completion_tokens`). 다른 API는 None이다.
+    pub chat_output_limit_field: Option<String>,
+    /// OpenAI Embeddings의 벡터 차원. 다른 API는 None이다.
+    pub embedding_dimensions: Option<EmbeddingDimensions>,
+    /// OpenAI Embeddings가 받는 인코딩(`float`, `base64`). 다른 API는 비어 있다.
+    pub embedding_encodings: Vec<String>,
+}
+/// Embeddings 벡터 차원. 요청이 차원을 정하지 않으면 `default`이고, 요청은 `max`까지 정할 수 있다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmbeddingDimensions {
+    pub default: u32,
+    pub max: u32,
 }
 impl Profile {
     pub fn has(&self, feature: Feature) -> bool {

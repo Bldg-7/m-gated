@@ -23,7 +23,9 @@ async fn embeddings_bound_input_dimensions_and_response() {
 
 #[tokio::test]
 async fn chat_usage_only_done_and_reasoning_are_independent() {
-    use m_gated::{providers::openai_chat::ChatStream, stream::SseDecoder};
+    // Chat 스트림 규칙은 OpenAI 어댑터 crate에 있다(결정 0013).
+    use m_gated::stream::SseDecoder;
+    use m_gated_adapter_openai::chat::Stream as ChatStream;
     let wire = concat!(
         "data: {\"object\":\"chat.completion.chunk\",\"id\":\"c1\",\"model\":\"synthetic-text\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"synthetic\"},\"finish_reason\":\"stop\"}],\"usage\":null}\r\n\r\n",
         "data: {\"object\":\"chat.completion.chunk\",\"id\":\"c1\",\"model\":\"synthetic-text\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,\"prompt_tokens_details\":{\"cached_tokens\":40},\"completion_tokens_details\":{\"reasoning_tokens\":10}}}\n\n",
@@ -81,20 +83,24 @@ async fn chat_null_content_and_schema_scalars_never_dispatch() {
 
 #[tokio::test]
 async fn embeddings_float_structure_guard_matches_parser_counter_boundary() {
-    use m_gated::providers::embeddings::{response_usage, validate_shape};
-    let p = profile("embeddings");
+    // Embeddings 규칙은 OpenAI 어댑터 crate에 있다(결정 0013).
+    use m_gated_adapter_kit::json::NoYield;
+    use m_gated_adapter_openai::embeddings::{Shape, response_usage_with, validate_shape_with};
+    let p = m_gated::providers::port::adapter_profile(&profile("embeddings"));
     for dim in [3444, 3445] {
         let body=serde_json::json!({"model":"synthetic-text","input":vec!["x";29],"dimensions":dim,"encoding_format":"float"}).to_string();
-        let result = validate_shape(body.as_bytes(), &p).await;
+        let result = validate_shape_with(body.as_bytes(), &p, NoYield).await;
         assert_eq!(result.is_ok(), dim == 3444); // 99,999 vs100,028 실제 구조 tokens
-        let shape = m_gated::providers::embeddings::Shape {
+        let shape = Shape {
             count: 29,
             dimensions: dim,
             encoding: "float".into(),
         };
         let response=serde_json::json!({"object":"list","model":"synthetic-text","data":(0..29).map(|i|serde_json::json!({"object":"embedding","index":i,"embedding":vec![0.5;dim]})).collect::<Vec<_>>(),"usage":{"prompt_tokens":100,"total_tokens":100}}).to_string();
         assert_eq!(
-            response_usage(response.as_bytes(), &shape).await.is_ok(),
+            response_usage_with(response.as_bytes(), &shape, NoYield)
+                .await
+                .is_ok(),
             dim == 3444
         );
     }

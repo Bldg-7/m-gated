@@ -642,72 +642,9 @@ async fn validate_png_data(raw: &str) -> Result<usize, JsonError> {
     }
     validate_png_input(&raw.as_bytes()[1..raw.len() - 1]).await
 }
+/// base64 PNG 검사(adapter-kit, 결정 0013). 64 KiB마다 tokio에 실행을 넘긴다.
 pub(super) async fn validate_png_input(input: &[u8]) -> Result<usize, JsonError> {
-    use base64::Engine;
-    let mut i = 0;
-    let mut block = [0u8; 4];
-    let mut used = 0;
-    let mut header = Vec::with_capacity(33);
-    let mut count = 0;
-    let mut ended = false;
-    let mut yielded = 0;
-    while i < input.len() {
-        if i - yielded >= 64 * 1024 {
-            yielded = i;
-            tokio::task::yield_now().await;
-        }
-        if ended {
-            return Err(JsonError);
-        }
-        let mut b = input[i];
-        i += 1;
-        if b == b'\\' {
-            b = *input.get(i).ok_or(JsonError)?;
-            i += 1;
-            if b == b'u' {
-                let digits = input.get(i..i + 4).ok_or(JsonError)?;
-                let n =
-                    u16::from_str_radix(std::str::from_utf8(digits).map_err(|_| JsonError)?, 16)
-                        .map_err(|_| JsonError)?;
-                b = u8::try_from(n).map_err(|_| JsonError)?;
-                i += 4;
-            } else if b != b'/' {
-                return Err(JsonError);
-            }
-        }
-        block[used] = b;
-        used += 1;
-        if used == 4 {
-            let mut decoded = [0u8; 3];
-            let n = base64::engine::general_purpose::STANDARD
-                .decode_slice(block, &mut decoded)
-                .map_err(|_| JsonError)?;
-            count += n;
-            if count > 4 * 1024 * 1024 {
-                return Err(JsonError);
-            }
-            for b in decoded.into_iter().take(n) {
-                if header.len() < 33 {
-                    header.push(b);
-                }
-            }
-            ended = block.contains(&b'=');
-            used = 0;
-        }
-    }
-    if used != 0
-        || header.len() < 33
-        || &header[..8] != b"\x89PNG\r\n\x1a\n"
-        || &header[12..16] != b"IHDR"
-    {
-        return Err(JsonError);
-    }
-    let w = u32::from_be_bytes(header[16..20].try_into().map_err(|_| JsonError)?);
-    let h = u32::from_be_bytes(header[20..24].try_into().map_err(|_| JsonError)?);
-    if w == 0 || h == 0 || w > 8192 || h > 8192 {
-        return Err(JsonError);
-    }
-    Ok(count)
+    m_gated_adapter_kit::png::validate_png_input_with(input, &mut json::TokioYield).await
 }
 
 #[cfg(test)]

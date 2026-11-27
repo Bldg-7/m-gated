@@ -232,6 +232,14 @@ pub fn adapter_profile(profile: &ModelProfile) -> kit::Profile {
         approved_beta: profile.approved_beta.clone(),
         max_output_tokens: profile.max_output_tokens,
         rates: profile.rates.keys().cloned().collect(),
+        chat_output_limit_field: profile.chat_output_limit_field.clone(),
+        embedding_dimensions: profile.embedding_dimensions.as_ref().map(|d| {
+            kit::EmbeddingDimensions {
+                default: d.default,
+                max: d.max,
+            }
+        }),
+        embedding_encodings: profile.embedding_encodings.clone(),
     }
 }
 /// 어댑터 crate에 넘기는 클라이언트 헤더. `HeaderMap`의 이름은 이미 소문자다.

@@ -1378,6 +1378,7 @@ dependencies = [
  "lettre",
  "m-gated-adapter-deepseek",
  "m-gated-adapter-kit",
+ "m-gated-adapter-openai",
  "reqwest",
  "ring",
  "ruzstd",
@@ -1419,8 +1420,26 @@ dependencies = [
 name = "m-gated-adapter-kit"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "m-gated-adapter-openai"
+version = "0.0.0"
+dependencies = [
+ "m-gated-adapter-kit",
+ "serde_json",
+]
+
+[[package]]
+name = "m-gated-adapter-openai-component"
+version = "0.0.0"
+dependencies = [
+ "m-gated-adapter-kit",
+ "m-gated-adapter-openai",
+ "wit-bindgen 0.62.0",
 ]
 
 [[package]]

@@ -1,13 +1,13 @@
 # 0013. Offer the OpenAI adapter as a WASM component, next to the built-in adapter
 
 - Date: 2026-11-27
-- Status: Accepted, not implemented
+- Status: Implemented
 
 ## Context
 
 This decision builds the OpenAI adapter as a WebAssembly (WASM) component, as decision 0009 did for
-DeepSeek. The built-in OpenAI adapter stays. To let the component use the model catalog, the
-component interface changes to version 0.3.0.
+DeepSeek. The built-in OpenAI adapter stays. The component interface changes to version 0.3.0, so
+that the component can use the model catalog and gets the values that the OpenAI checks need.
 
 Decision 0009 built the DeepSeek adapter as a WASM component, as a trial. The gateway loads a
 component at start, and the component runs with no access to the network, files or the clock, with
@@ -30,6 +30,11 @@ OpenAI is the next provider to try, because it tests more of the interface than 
   provider decide this: each API says whether it can use the catalog (`catalog`), and the provider
   gives the name that the models.dev price list uses for it (`models_dev_name`). The interface does
   not carry these two facts, so a component cannot use the catalog today.
+- Its checks use values that the interface does not pass to a component. Three come from the model
+  profile: the field that a Chat Completions request uses for its output limit (`max_tokens` or
+  `max_completion_tokens`), and the vector dimensions and encodings (`float`, `base64`) that an
+  Embeddings profile allows. And reading an Embeddings response needs the request body, to check
+  that the response has one vector of the right size for each input.
 
 The OpenAI logic is in host files now (`src/providers/openai.rs`, `openai_chat.rs` and
 `embeddings.rs`, about 2,800 lines). Code that DeepSeek and OpenAI share is already in
@@ -53,6 +58,11 @@ the fuel limit of decision 0009 keeps a long call from holding a thread.
    - `api-info` gets `catalog`: whether the API can use the model catalog.
    - `description` gets `models-dev-name`: the provider's name in the models.dev price list, or
      none.
+   - `profile` gets `chat-output-limit-field`, `embedding-dimensions` (the default and the maximum)
+     and `embedding-encodings`. They are empty or none for the other APIs.
+   - `read`, the function that reads a non-streamed response, also gets the client's request body.
+     So for each non-streamed response, the host copies the request body into the component a
+     second time (the first time is the request check). This applies to DeepSeek too.
    - Like the usage categories (decision 0012), the values of `catalog` and `models-dev-name` must
      equal the built-in adapter's values, or the gateway does not start. Today the catalog sync and
      the dashboard handle only the built-in providers. The interface carries the two values anyway,
@@ -104,6 +114,7 @@ Anthropic also needs `SideRequest`, which the interface does not have (decision 
 - The WASM interface changes in a breaking way. A component built for version 0.2.0 is refused at
   start. The DeepSeek component's SHA-256 in release images changes.
 - Step 1 moves much host code but does not change behavior, so the existing tests check it. Step 2
-  changes only the interface version and adds the two fields.
+  changes the interface as rule 3 describes, and the host code that reads it. It does not change how
+  the built-in adapters check requests or read responses.
 - The release images grow by the size of the OpenAI component.
 - `README.md` describes the OpenAI component, the interface version and `TEST_OPENAI_ADAPTER`.

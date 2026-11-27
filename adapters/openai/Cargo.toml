@@ -1,0 +1,12 @@
+[package]
+name = "m-gated-adapter-openai"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "OpenAI Responses, Chat Completions and Embeddings adapter for m-gated. Built natively into the host and as a WASM component."
+
+[dependencies]
+m-gated-adapter-kit = { path = "../../crates/adapter-kit" }
+
+[dev-dependencies]
+serde_json = "=1.0.149"

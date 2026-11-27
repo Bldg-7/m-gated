@@ -1,10 +1,13 @@
-/// m-gated Provider 어댑터 인터페이스(결정 0009, 0012). 본체의 Provider port를 따른다.
+/// m-gated Provider 어댑터 인터페이스(결정 0009, 0012, 0013). 본체의 Provider port를 따른다.
 ///
-/// 0.2.0: 사용량을 본체의 사용량 칸 목록으로 알린다(결정 0012). 본체는 0.2.0만 받는다.
+/// 0.2.0: 사용량을 본체의 사용량 칸 목록으로 알린다(결정 0012).
+/// 0.3.0: API마다 카탈로그를 쓸 수 있는지(`catalog`), Provider의 models.dev 이름(`models-dev-name`)을
+/// 알린다. OpenAI 어댑터가 쓰는 profile 값(Chat 출력 상한 필드, Embeddings 차원과 인코딩)과 응답 읽기의
+/// 요청 본문을 더한다(결정 0013). 본체는 0.3.0만 받는다.
 ///
 /// 컴포넌트는 import를 하나도 가질 수 없다. 본체는 import가 있는 컴포넌트를 시작할 때 거절한다.
 /// 키(secret)는 컴포넌트에 넘기지 않는다. 키 접두사 규칙은 `describe`로 알리고 본체가 검사한다.
-package m-gated:adapter@0.2.0;
+package m-gated:adapter@0.3.0;
 
 interface provider {
     /// 요청 검사 실패.
@@ -54,6 +57,11 @@ interface provider {
         json-schema,
         inline-png,
     }
+    /// Embeddings 벡터 차원. 요청이 차원을 정하지 않으면 `default`이고, 요청은 `max`까지 정할 수 있다.
+    record embedding-dimensions {
+        %default: u32,
+        max: u32,
+    }
     /// 어댑터가 보는 model profile.
     record profile {
         model: string,
@@ -62,6 +70,13 @@ interface provider {
         max-output-tokens: option<u64>,
         /// 가격 항목 이름.
         rates: list<string>,
+        /// Chat Completions가 출력 상한을 받는 필드 이름(`max_tokens`, `max_completion_tokens`).
+        /// 다른 API는 none이다.
+        chat-output-limit-field: option<string>,
+        /// Embeddings 벡터 차원. 다른 API는 none이다.
+        embedding-dimensions: option<embedding-dimensions>,
+        /// Embeddings가 받는 인코딩(`float`, `base64`). 다른 API는 비어 있다.
+        embedding-encodings: list<string>,
     }
     /// profile 규칙 위반.
     enum profile-error {
@@ -106,6 +121,8 @@ interface provider {
         usage-categories: list<string>,
         /// 스트림 응답을 읽을 수 있는지.
         %stream: bool,
+        /// 카탈로그 정책(모델과 가격을 DB에서 관리)을 쓸 수 있는지. 본체 어댑터의 값과 같아야 한다.
+        catalog: bool,
     }
     /// 시작할 때 한 번 읽는 Provider의 고정 사실.
     record description {
@@ -124,6 +141,9 @@ interface provider {
         request-id-headers: list<string>,
         response-headers: list<response-header>,
         apis: list<api-info>,
+        /// 공개 가격 목록(models.dev)에서 이 Provider를 찾을 이름. 없으면 none이고 카탈로그 동기화를
+        /// 하지 않는다. 본체 어댑터의 값과 같아야 한다.
+        models-dev-name: option<string>,
     }
 
     /// 스트림 event에서 읽은 값 하나.
@@ -177,7 +197,8 @@ interface provider {
     /// 업스트림에 보낼 클라이언트 헤더의 이름을 고른다. `content-type`은 반드시 들어 있다.
     approved-headers: func(api: string, headers: list<header>) -> result<list<string>, api-error>;
     /// 비스트림 응답 본문을 읽는다. 본체가 상태 코드, 인코딩, content-type, 크기를 먼저 확인한다.
-    read: func(api: string, status: u16, body: list<u8>, profile: profile) -> result<reading, read-error>;
+    /// `request`는 클라이언트가 보낸 요청 본문이다(예: Embeddings가 응답 모양을 확인할 때 쓴다).
+    read: func(api: string, status: u16, body: list<u8>, request: list<u8>, profile: profile) -> result<reading, read-error>;
 
     /// 스트림 응답 하나를 읽는 상태 기계. 요청마다 하나 만든다.
     resource stream-reader {

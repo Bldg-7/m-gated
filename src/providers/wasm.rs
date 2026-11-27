@@ -1,5 +1,5 @@
-//! WASM 어댑터 컴포넌트를 port 뒤에 붙인다(결정 0009). 인터페이스는 `m-gated:adapter@0.2.0`이고
-//! 다른 판의 컴포넌트는 시작할 때 거절한다(결정 0012).
+//! WASM 어댑터 컴포넌트를 port 뒤에 붙인다(결정 0009). 인터페이스는 `m-gated:adapter@0.3.0`이고
+//! 다른 판의 컴포넌트는 시작할 때 거절한다(결정 0012, 0013).
 //!
 //! - 컴포넌트는 import를 가질 수 없다. 그래서 네트워크, 파일, 시계, 난수에 닿지 못한다.
 //! - 시작할 때 한 번 컴파일하고 인스턴스를 준비한다. 호출마다 store를 새로 만들어 요청 사이에
@@ -135,6 +135,12 @@ fn profile(p: &ModelProfile) -> wit::Profile {
         approved_beta: p.approved_beta,
         max_output_tokens: p.max_output_tokens,
         rates: p.rates,
+        chat_output_limit_field: p.chat_output_limit_field,
+        embedding_dimensions: p.embedding_dimensions.map(|d| wit::EmbeddingDimensions {
+            default: d.default,
+            max: d.max,
+        }),
+        embedding_encodings: p.embedding_encodings,
     }
 }
 fn api_error(e: wit::ApiError) -> ApiError {
@@ -200,6 +206,7 @@ pub struct WasmProvider {
     request_id_headers: &'static [&'static str],
     response_headers: &'static [(&'static str, HeaderRule)],
     apis: &'static [&'static dyn Api],
+    models_dev_name: Option<&'static str>,
 }
 impl port::Provider for WasmProvider {
     fn id(&self) -> ProviderId {
@@ -230,13 +237,22 @@ impl port::Provider for WasmProvider {
     fn response_headers(&self) -> &'static [(&'static str, HeaderRule)] {
         self.response_headers
     }
+    fn models_dev_name(&self) -> Option<&'static str> {
+        self.models_dev_name
+    }
     fn check_profile(&self, p: &ModelProfile) -> Result<(), StartupError> {
         let api = self
             .apis
             .iter()
             .find(|a| a.kind() == p.api)
             .ok_or(StartupError::InvalidProfile)?;
-        let native = port::api(self.id, p.api).ok_or(StartupError::InvalidProfile)?;
+        // 설치된 컴포넌트가 아니라 본체 어댑터와 비교한다. `port::api`는 설치된 컴포넌트를 먼저 찾는다.
+        let native = port::native(self.id)
+            .apis()
+            .iter()
+            .copied()
+            .find(|a| a.kind() == p.api)
+            .ok_or(StartupError::InvalidProfile)?;
         if native.token_rule(p) != api.token_rule(p) {
             return Err(StartupError::InvalidAdapter);
         }
@@ -271,6 +287,7 @@ struct WasmApi {
     token_rule: &'static str,
     usage_categories: &'static [UsageCategory],
     stream: bool,
+    catalog: bool,
 }
 impl Api for WasmApi {
     fn kind(&self) -> ApiKind {
@@ -350,7 +367,7 @@ impl Api for WasmApi {
         &'a self,
         status: axum::http::StatusCode,
         body: &'a [u8],
-        _request: &'a [u8],
+        request: &'a [u8],
         p: &'a ModelProfile,
     ) -> BoxFuture<'a, Result<Reading, UpstreamError>> {
         Box::pin(async move {
@@ -364,6 +381,7 @@ impl Api for WasmApi {
                         api_name(self.kind),
                         status.as_u16(),
                         body,
+                        request,
                         &profile(p),
                     )
                     .await
@@ -419,6 +437,9 @@ impl Api for WasmApi {
     }
     fn usage_categories(&self) -> &'static [UsageCategory] {
         self.usage_categories
+    }
+    fn catalog(&self) -> bool {
+        self.catalog
     }
 }
 
@@ -593,13 +614,13 @@ pub fn load_with(
     config.consume_fuel(true);
     let engine = Engine::new(&config).map_err(|_| StartupError::InvalidAdapter)?;
     let component = Component::new(&engine, &bytes).map_err(|_| StartupError::InvalidAdapter)?;
-    // 내보내는 인터페이스는 판 0.2.0이어야 한다(결정 0012). wasmtime은 export 이름을 semver 호환으로
-    // 찾아 0.2.1도 받을 수 있으므로 이름을 직접 비교한다.
+    // 내보내는 인터페이스는 판 0.3.0이어야 한다(결정 0013). wasmtime은 export 이름을 semver 호환으로
+    // 찾아 0.3.1도 받을 수 있으므로 이름을 직접 비교한다.
     let ty = component.component_type();
     if ty.imports(&engine).next().is_some()
         || !ty
             .exports(&engine)
-            .any(|(name, _)| name == "m-gated:adapter/provider@0.2.0")
+            .any(|(name, _)| name == "m-gated:adapter/provider@0.3.0")
     {
         return Err(StartupError::InvalidAdapter);
     }
@@ -629,10 +650,24 @@ pub fn load_with(
     describe(id, shared, d)
 }
 
+/// 카탈로그 사실이 본체 어댑터와 같은지(결정 0013). models.dev 이름과 API마다의 `catalog`다.
+/// 카탈로그 동기화와 대시보드는 아직 본체 Provider만 다룬다. 모르는 API가 있으면 false다.
+fn catalog_matches_native(id: ProviderId, d: &wit::Description) -> bool {
+    let native = port::native(id);
+    d.models_dev_name.as_deref() == native.models_dev_name()
+        && d.apis.iter().all(|a| {
+            native
+                .apis()
+                .iter()
+                .any(|n| api_name(n.kind()) == a.kind && n.catalog() == a.catalog)
+        })
+}
+
 /// 컴포넌트가 알린 사실을 검사하고 Provider로 만든다.
 ///
 /// 시험 단계에서는 Provider 이름과 API 이름이 본체 어댑터와 같아야 한다. 토큰 규칙은 profile 검사 때
-/// 대조한다. 이 값들은 DB 검사, 장부, 대시보드에 목록으로 들어 있기 때문이다.
+/// 대조한다. 이 값들은 DB 검사, 장부, 대시보드에 목록으로 들어 있기 때문이다. 사용량 칸(결정 0012)과
+/// 카탈로그 사실(결정 0013)도 본체 어댑터와 같아야 한다.
 fn describe(
     id: ProviderId,
     shared: &'static Shared,
@@ -641,6 +676,7 @@ fn describe(
     let native = port::native(id);
     let header = |s: &str| HeaderName::from_bytes(s.as_bytes()).is_ok() && s.len() <= 128;
     if d.name != id.name()
+        || !catalog_matches_native(id, &d)
         || d.apis.is_empty()
         || d.key_prefix.is_empty()
         || url::Url::parse(&d.origin)
@@ -710,6 +746,7 @@ fn describe(
                     .into_boxed_slice(),
             ),
             stream: a.stream,
+            catalog: a.catalog,
         })));
     }
     let request_id_headers: Vec<&'static str> =
@@ -738,12 +775,79 @@ fn describe(
         request_id_headers: Box::leak(request_id_headers.into_boxed_slice()),
         response_headers: Box::leak(response_headers.into_boxed_slice()),
         apis: Box::leak(apis.into_boxed_slice()),
+        models_dev_name: d.models_dev_name.map(leak),
     })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 본체 어댑터와 같은 카탈로그 사실을 알리는 설명. 다른 값은 이 검사에 쓰지 않는다.
+    fn description(id: ProviderId) -> wit::Description {
+        let native = port::native(id);
+        wit::Description {
+            name: id.name().into(),
+            origin: native.origin().into(),
+            auth: wit::AuthScheme::Bearer,
+            key_prefix: "sk-".into(),
+            refused_key_prefixes: Vec::new(),
+            verify_path: native.verify_path().into(),
+            request_id_headers: Vec::new(),
+            response_headers: Vec::new(),
+            apis: native
+                .apis()
+                .iter()
+                .map(|a| wit::ApiInfo {
+                    kind: api_name(a.kind()).into(),
+                    routes: a.routes().iter().map(|r| r.to_string()).collect(),
+                    upstream_path: a.upstream_path().into(),
+                    error_format: wit::ErrorFormat::Openai,
+                    token_rule: String::new(),
+                    usage_categories: Vec::new(),
+                    stream: true,
+                    catalog: a.catalog(),
+                })
+                .collect(),
+            models_dev_name: native.models_dev_name().map(String::from),
+        }
+    }
+    #[test]
+    fn catalog_facts_must_match_native_adapter() {
+        for id in [ProviderId::Openai, ProviderId::Deepseek] {
+            assert!(catalog_matches_native(id, &description(id)), "{id:?}");
+            for wrong in [None, Some("other".to_string())]
+                .into_iter()
+                .filter(|w| w.as_deref() != port::native(id).models_dev_name())
+            {
+                let mut d = description(id);
+                d.models_dev_name = wrong;
+                assert!(!catalog_matches_native(id, &d), "{id:?}");
+            }
+            for i in 0..description(id).apis.len() {
+                let mut d = description(id);
+                d.apis[i].catalog = !d.apis[i].catalog;
+                assert!(!catalog_matches_native(id, &d), "{id:?} {i}");
+            }
+        }
+        // OpenAI는 Responses와 Chat Completions만 카탈로그를 쓴다.
+        let d = description(ProviderId::Openai);
+        assert_eq!(d.models_dev_name.as_deref(), Some("openai"));
+        assert_eq!(
+            d.apis
+                .iter()
+                .map(|a| (a.kind.as_str(), a.catalog))
+                .collect::<Vec<_>>(),
+            [
+                ("responses", true),
+                ("openai_chat", true),
+                ("embeddings", false)
+            ]
+        );
+        // 모르는 API는 카탈로그 사실도 맞지 않는다.
+        let mut d = description(ProviderId::Openai);
+        d.apis[0].kind = "unknown".into();
+        assert!(!catalog_matches_native(ProviderId::Openai, &d));
+    }
     fn wit_usage(tokens: &[(&str, u64)]) -> wit::Usage {
         wit::Usage {
             actual_model: "m".into(),

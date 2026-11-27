@@ -281,38 +281,60 @@ A provider has either `profiles` or `catalog`, not both.
 `https://api.deepseek.com` or `https://api.typesafe.ai`. Outbound requests ignore proxy environment variables, do not follow
 redirects and are never retried by the gateway.
 
-As a trial, the DeepSeek provider can run its adapter as a WebAssembly (WASM) component instead of
-the built-in code ([decision 0009](docs/decisions/0009-deepseek-adapter-as-wasm-trial.md)). Add
-both fields to the provider:
+As a trial, the DeepSeek and OpenAI providers can run their adapters as WebAssembly (WASM)
+components instead of the built-in code ([decision 0009](docs/decisions/0009-deepseek-adapter-as-wasm-trial.md),
+[decision 0013](docs/decisions/0013-openai-adapter-as-wasm.md)). The OpenAI component serves all
+three OpenAI APIs: `responses`, `openai_chat` and `embeddings`. Add both fields to the provider:
 
 ```yaml
   - provider: deepseek
     base_url: https://api.deepseek.com
     adapter: /app/adapters/deepseek.wasm     # in the release image
     adapter_sha256: <64 lowercase hex digits>
+  - provider: openai
+    base_url: https://api.openai.com
+    adapter: /app/adapters/openai.wasm       # in the release image
+    adapter_sha256: <64 lowercase hex digits>
 ```
 
 The gateway does not start if the file's SHA-256 differs, if the component imports anything, if it
-reports a provider name or API that the built-in adapter does not have, or if an API's usage
-categories differ from those of the built-in adapter. The component must export the interface
-`m-gated:adapter@0.2.0` ([decision 0012](docs/decisions/0012-usage-categories.md)). A component built for version 0.1.0 is refused at start. Each call gets a new
+reports a provider name or API that the built-in adapter does not have. It also does not start if
+the component reports other values than the built-in adapter for any of these three facts:
+
+- the usage categories of an API;
+- whether an API can use the model catalog (`catalog`);
+- the provider's name in the models.dev price list (`models-dev-name`).
+
+The catalog, its sync and the dashboard know only the built-in values today, so the values must be
+equal. The component must export version 0.3.0 of the adapter interface, under the name
+`m-gated:adapter/provider@0.3.0` ([decision 0013](docs/decisions/0013-openai-adapter-as-wasm.md)).
+A component built for an earlier version (0.1.0 or 0.2.0) is refused at start. Each call gets a new
 sandbox with a 128 MiB memory limit and a CPU limit. If the component fails while it checks a
 request, the gateway refuses the request with `500` and `x-gateway-error-code: adapter_failed`, and
 does not send it. If it fails while it reads a response, the response is malformed and the request
 becomes `unknown`. One process uses one implementation per provider, so every configuration that a
 process loads must name the same component for that provider.
 
-Release images contain the component at `/app/adapters/deepseek.wasm`. Its SHA-256 is in
-`/app/adapters/deepseek.wasm.sha256` and in the image label `m-gated.adapters.deepseek.sha256`.
-The gateway uses the component only when the config names it. Without `adapter`, the built-in
+Release images contain both components:
+
+The image labels let you read a component's SHA-256 from the image metadata (`docker inspect`)
+without starting a container.
+
+| Provider | Component | SHA-256 file | Image label |
+|---|---|---|---|
+| DeepSeek | `/app/adapters/deepseek.wasm` | `/app/adapters/deepseek.wasm.sha256` | `m-gated.adapters.deepseek.sha256` |
+| OpenAI | `/app/adapters/openai.wasm` | `/app/adapters/openai.wasm.sha256` | `m-gated.adapters.openai.sha256` |
+
+The gateway uses a component only when the config names it. Without `adapter`, the built-in
 adapter runs. To get the value for `adapter_sha256`:
 
 ```sh
 docker run --rm --entrypoint cat <image> /app/adapters/deepseek.wasm.sha256
+docker run --rm --entrypoint cat <image> /app/adapters/openai.wasm.sha256
 ```
 
-The release workflow builds the component once, on Linux amd64, and puts the same file in the
-amd64 and arm64 images. So one `adapter_sha256` fits both. A build on another kind of machine
+The release workflow builds the components once, on Linux amd64, and puts the same files in the
+amd64 and arm64 images. So one `adapter_sha256` per component fits both. A build on another kind of machine
 (for example macOS, or Linux arm64) gives a different file with a different SHA-256, because Cargo
 puts the kind of machine into the names that it gives each crate.
 
@@ -1111,28 +1133,54 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 (cd web && npm ci && npm run typecheck && npm test)  # dashboard unit tests (Vitest)
 ```
 
-The DeepSeek adapter can also be built as a WebAssembly (WASM) component. This is a trial
-([decision 0009](docs/decisions/0009-deepseek-adapter-as-wasm-trial.md)). Its interface is
-`m-gated:adapter@0.2.0` in `crates/adapter-kit/wit/adapter.wit`. In version 0.2.0, the component
-describes each API in an `api-info` record, which lists the API's usage categories. The `usage`
-record has three parts: the actual model, a list of category and token count pairs, and the
-reasoning count ([decision 0012](docs/decisions/0012-usage-categories.md)). The gateway accepts only version 0.2.0. To
-build it and run its tests:
+The DeepSeek and OpenAI adapters can also be built as WebAssembly (WASM) components. This is a
+trial ([decision 0009](docs/decisions/0009-deepseek-adapter-as-wasm-trial.md),
+[decision 0013](docs/decisions/0013-openai-adapter-as-wasm.md)). The adapter logic is in ordinary
+Rust crates, `adapters/deepseek` and `adapters/openai`, which the gateway also links directly as
+its built-in adapters. The crates `adapters/deepseek/component` and `adapters/openai/component`
+only convert between the interface types and the types of those crates. Code that the gateway and
+the adapters share, such as the JSON request checker, the stream decoders and the PNG image check,
+is in `crates/adapter-kit`.
+
+The interface is the WIT package `m-gated:adapter@0.3.0` in `crates/adapter-kit/wit/adapter.wit`.
+A component exports its one interface, `provider`, so the export name is
+`m-gated:adapter/provider@0.3.0`. The gateway accepts only version 0.3.0.
+
+- At start, the gateway calls `describe()`. It returns a `description` record with the provider's
+  fixed facts: its name, the upstream address, the key rules, the provider's name in the models.dev
+  price list (`models-dev-name`, or none), and a list of `api-info` records.
+- Each `api-info` record describes one API: its routes, upstream path, error format, usage
+  categories, whether it streams, and whether it can use the model catalog (`catalog`).
+- The `profile` record is the part of a model profile that the component sees. For OpenAI it also
+  has `chat_output_limit_field`, `embedding_dimensions` and `embedding_encodings`.
+- The function `read` reads a non-streamed response. It also gets the client's request body,
+  because the Embeddings adapter checks the response against the number of inputs and the vector
+  size that the request asked for.
+- The `usage` record has three parts: the actual model, a list of category and token count pairs,
+  and the reasoning count ([decision 0012](docs/decisions/0012-usage-categories.md)). To
+build the components and run their tests:
 
 ```sh
-scripts/build-adapter.sh   # writes target/adapters/deepseek.wasm and deepseek.wasm.sha256
+scripts/build-adapter.sh   # writes target/adapters/{deepseek,openai}.wasm and their .sha256 files
 cargo test --locked --test wasm_adapter -- --ignored
 ```
 
-The tests compare the component with the built-in DeepSeek adapter, and check the limits and the
-refusal of wrong files, including a component that exports interface version 0.1.0.
+The tests compare each component with its built-in adapter, and check the memory and CPU limits
+and the refusal of wrong files, including components that export interface version 0.1.0, 0.2.0 or 0.3.1. A unit
+test in `src/providers/wasm.rs` checks that a description with a wrong `catalog` or
+`models-dev-name` is refused.
 
 The script adds the `wasm32-unknown-unknown` target, installs `wasm-tools` 1.259.0 in
-`target/tools`, and refuses a component that imports anything. It replaces the absolute paths
-of the source and the Cargo home with fixed names, so the file does not contain your paths. A
-`docker build` of the release Dockerfile builds the component in its `adapter-build` stage. The component's code compiles only
-for wasm32, so check it with
-`cargo clippy --locked --target wasm32-unknown-unknown -p m-gated-adapter-deepseek-component -- -D warnings`.
+`target/tools`, and refuses a component that imports anything or that does not export
+`m-gated:adapter/provider@0.3.0`. It replaces the absolute paths of the source and the Cargo home
+with fixed names, so the files do not contain your paths. A `docker build` of the release
+Dockerfile builds the components in its `adapter-build` stage. The components' code compiles only
+for wasm32, so check it with:
+
+```sh
+cargo clippy --locked --target wasm32-unknown-unknown -p m-gated-adapter-deepseek-component -- -D warnings
+cargo clippy --locked --target wasm32-unknown-unknown -p m-gated-adapter-openai-component -- -D warnings
+```
 
 The Postgres-backed suites are marked `#[ignore]`. They need a dedicated local database at exactly
 `postgres://m_gated_test@127.0.0.1:64603/m_gated_test`: no password (trust authentication), no TLS
@@ -1144,15 +1192,21 @@ cargo test --locked --test postgres_contract -- --ignored
 cargo test --locked --test auth_postgres -- --ignored
 ```
 
-To run the DeepSeek Postgres suite against the WASM component instead of the built-in adapter,
-build the component and give its path in `TEST_DEEPSEEK_ADAPTER`. Each test then checks that the
-component is installed. To measure the component's costs against the built-in adapter, run the
+To run a provider's Postgres suites against its WASM component instead of the built-in adapter,
+build the components and give the component's path in an environment variable:
+`TEST_DEEPSEEK_ADAPTER` for `deepseek_postgres`, and `TEST_OPENAI_ADAPTER` for
+`responses_postgres` and `chat_embeddings_postgres`. Each test then checks that the component is
+installed. To measure the DeepSeek component's run time and size against the built-in adapter, run the
 measurement suite in release mode. It prints times and fuel, and checks nothing.
 
 ```sh
 scripts/build-adapter.sh
 TEST_DEEPSEEK_ADAPTER=$PWD/target/adapters/deepseek.wasm \
   cargo test --locked --test deepseek_postgres -- --ignored --test-threads=1
+TEST_OPENAI_ADAPTER=$PWD/target/adapters/openai.wasm \
+  cargo test --locked --test responses_postgres -- --ignored --test-threads=1
+TEST_OPENAI_ADAPTER=$PWD/target/adapters/openai.wasm \
+  cargo test --locked --test chat_embeddings_postgres -- --ignored --test-threads=1
 cargo test --release --locked --test wasm_adapter_cost -- --ignored --nocapture --test-threads=1
 ```
 
@@ -1222,12 +1276,13 @@ alternatives were rejected, one file for each decision.
 Pushing a `vX.Y.Z` tag runs [`.github/workflows/release-image.yml`](.github/workflows/release-image.yml):
 
 1. `verify`: dashboard tests and build, `cargo fmt`, `clippy` and `cargo test` (the `#[ignore]`d
-   suites above are not run in CI), and the WASM adapter's clippy, build and tests. The adapter
-   file goes to the `build` job.
-2. `build`: the image is built natively on amd64 and arm64 runners, with the adapter file from
-   `verify` (`--build-context adapter=...`), pushed by digest, and checked
+   suites above are not run in CI), and the WASM adapters' clippy, build and tests. The DeepSeek
+   and OpenAI component files go to the `build` job.
+2. `build`: the image is built natively on amd64 and arm64 runners, with the component files from
+   `verify` (`--build-context adapter=...`) and the labels `m-gated.adapters.deepseek.sha256` and
+   `m-gated.adapters.openai.sha256`, pushed by digest, and checked
    with `scripts/test-package.sh` (non-root, no Node/npm/cargo in the runtime layer, read-only root,
-   the adapter file matches its SHA-256 and cannot be written, refuses to start without a valid
+   each component file matches its SHA-256 and cannot be written, refuses to start without a valid
    config).
 3. `publish tags`: both digests are combined into one multi-arch manifest tagged `X.Y.Z`, `X.Y`,
    `X` (from 1.0 on), `latest` (non-prerelease only) and `sha-<short>`.

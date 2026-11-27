@@ -39,6 +39,12 @@ pub trait Visitor {
 pub trait Cooperate {
     fn cooperate(&mut self) -> impl Future<Output = ()> + Send;
 }
+/// 빌린 [`Cooperate`]. 검사 하나가 같은 방법으로 JSON 검사와 PNG 검사를 차례로 할 때 쓴다.
+impl<C: Cooperate> Cooperate for &mut C {
+    fn cooperate(&mut self) -> impl Future<Output = ()> + Send {
+        (**self).cooperate()
+    }
+}
 /// 실행을 넘기지 않는다. 런타임이 없는 곳(WASM 어댑터)에서 쓴다.
 pub struct NoYield;
 impl Cooperate for NoYield {

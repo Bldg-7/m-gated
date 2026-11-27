@@ -1,0 +1,14 @@
+[package]
+name = "m-gated-adapter-openai-component"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The OpenAI adapter as a WASM component (decision 0013). Build with scripts/build-adapter.sh."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+m-gated-adapter-openai = { path = ".." }
+m-gated-adapter-kit = { path = "../../../crates/adapter-kit" }
+wit-bindgen = { version = "=0.62.0", default-features = false, features = ["macros", "realloc", "std"] }

@@ -24,15 +24,42 @@ fn configuration() -> config::ValidatedConfig {
     configuration_yaml(&yaml)
 }
 fn configuration_yaml(yaml: &str) -> config::ValidatedConfig {
+    let (yaml, adapter) = with_openai_adapter(yaml);
     let mut env = support::environment();
     // alice가 고정 관리자다. 시험은 store를 직접 만들므로 `postgres::grant_access`로 넣는다.
     env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
-    config::load(ConfigInputs {
-        yaml,
+    let cfg = config::load(ConfigInputs {
+        yaml: &yaml,
         file_environment: None,
         environment: &env,
     })
-    .unwrap()
+    .unwrap();
+    assert_eq!(
+        m_gated::providers::port::installed(config::ProviderId::Openai),
+        adapter
+    );
+    cfg
+}
+/// `TEST_OPENAI_ADAPTER`에 컴포넌트 경로가 있으면 모든 시험이 WASM 어댑터로 돈다(결정 0013).
+/// 설정의 OpenAI Provider에 그 파일과 SHA-256을 넣는다. 경로가 없으면 설정을 바꾸지 않는다.
+fn with_openai_adapter(yaml: &str) -> (String, bool) {
+    use sha2::{Digest, Sha256};
+    let Ok(path) = std::env::var("TEST_OPENAI_ADAPTER") else {
+        return (yaml.to_string(), false);
+    };
+    let bytes = std::fs::read(&path).expect("TEST_OPENAI_ADAPTER 파일을 읽는다");
+    let sha: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let yaml = yaml.replacen(
+        "    base_url: https://api.openai.com\n",
+        &format!(
+            "    base_url: https://api.openai.com\n    adapter: {path}\n    adapter_sha256: {sha}\n"
+        ),
+        1,
+    );
+    (yaml, true)
 }
 /// client tool·thinking·cache·json_schema·이미지 기능과 cache 읽기 가격을 둔 Responses profile.
 fn feature_yaml() -> String {
