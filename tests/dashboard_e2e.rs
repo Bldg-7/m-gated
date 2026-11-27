@@ -79,14 +79,11 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
     ledger
         .finalize_request(
             spec.id,
-            &FinalObservation::completed(FinalUsage {
-                actual_model: "synthetic-text".into(),
-                input_tokens: 1,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: None,
-            }),
+            &FinalObservation::completed(FinalUsage::new(
+                "synthetic-text",
+                [(m_gated::ledger::finance::UsageCategory::Input, 1)],
+                None,
+            )),
         )
         .await
         .unwrap();

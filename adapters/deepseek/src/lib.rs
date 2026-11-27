@@ -6,7 +6,7 @@
 use m_gated_adapter_kit::{
     adapter::{
         ApiError, ErrorFormat, Feature, Header, Profile, ProfileError, ReadError, Reading,
-        RequestMetadata, Step, Usage,
+        RequestMetadata, Step, Usage, UsageCategory,
     },
     json::{self, Cooperate, JsonError, Kind, Visitor},
     openai,
@@ -35,6 +35,12 @@ pub const UPSTREAM_PATH: &str = "chat/completions";
 pub const ERROR_FORMAT: ErrorFormat = ErrorFormat::Openai;
 /// 가격표 snapshot에 남기는 토큰 포함 규칙.
 pub const TOKEN_RULE: &str = "deepseek_prompt_includes_hit_completion_includes_reasoning_v1";
+/// 사용량 칸(결정 0012). `input`은 캐시에 없던 입력(miss)이고, `cache_read`는 캐시에서 읽은 입력(hit)이다.
+pub const USAGE_CATEGORIES: &[UsageCategory] = &[
+    UsageCategory::Input,
+    UsageCategory::Output,
+    UsageCategory::CacheRead,
+];
 
 /// `sk-` 키만 받는다.
 pub fn accepts_key(secret: &str) -> bool {
@@ -547,10 +553,11 @@ fn usage(v: &BTreeMap<String, Scalar>) -> Option<Usage> {
     }
     Some(Usage {
         actual_model: v.get("model")?.text()?.into(),
-        input_tokens: input,
-        output_tokens: output,
-        cache_read_tokens: hit,
-        cache_write_tokens: 0,
+        tokens: vec![
+            (UsageCategory::Input, miss),
+            (UsageCategory::Output, output),
+            (UsageCategory::CacheRead, hit),
+        ],
         reasoning_tokens: reasoning,
     })
 }
@@ -742,12 +749,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             (
-                expected.input_tokens,
-                expected.output_tokens,
-                expected.cache_read_tokens,
+                expected.get(UsageCategory::Input),
+                expected.get(UsageCategory::Output),
+                expected.get(UsageCategory::CacheRead),
                 expected.reasoning_tokens
             ),
-            (100, 20, 40, Some(10))
+            (60, 20, 40, Some(10))
         );
         let mut empty = chunk(true);
         empty["choices"] = json!([]);
@@ -970,7 +977,7 @@ mod tests {
         let read = |status, body: &str| now(read_with(status, body.as_bytes(), &mut NoYield));
         let ok = read(200, &v.to_string()).unwrap();
         assert!(!ok.failed);
-        assert_eq!(ok.usage.unwrap().input_tokens, 100);
+        assert_eq!(ok.usage.unwrap().get(UsageCategory::Input), 60);
 
         let error =
             |message: &str| json!({"error":{"message":message,"type":"server_error"}}).to_string();

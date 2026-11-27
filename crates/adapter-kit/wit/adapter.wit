@@ -1,8 +1,10 @@
-/// m-gated Provider 어댑터 인터페이스(결정 0009). 본체의 Provider port를 따른다.
+/// m-gated Provider 어댑터 인터페이스(결정 0009, 0012). 본체의 Provider port를 따른다.
+///
+/// 0.2.0: 사용량을 본체의 사용량 칸 목록으로 알린다(결정 0012). 본체는 0.2.0만 받는다.
 ///
 /// 컴포넌트는 import를 하나도 가질 수 없다. 본체는 import가 있는 컴포넌트를 시작할 때 거절한다.
 /// 키(secret)는 컴포넌트에 넘기지 않는다. 키 접두사 규칙은 `describe`로 알리고 본체가 검사한다.
-package m-gated:adapter@0.1.0;
+package m-gated:adapter@0.2.0;
 
 interface provider {
     /// 요청 검사 실패.
@@ -29,13 +31,14 @@ interface provider {
         stream-limit,
         too-large,
     }
-    /// Provider가 알린 사용량.
+    /// Provider가 알린 사용량(결정 0012).
     record usage {
         actual-model: string,
-        input-tokens: u64,
-        output-tokens: u64,
-        cache-read-tokens: u64,
-        cache-write-tokens: u64,
+        /// 사용량 칸 이름(`input`, `output`, `cache_read`, `cache_write`, `cache_write_5m`,
+        /// `cache_write_1h`)과 토큰 수. 한 칸은 한 번만 나온다. `api-info`가 알린 칸만 쓴다.
+        /// 없는 칸은 0이다. 본체는 모르는 칸, 알리지 않은 칸, 같은 칸이 두 번 나온 사용량을 받지 않는다.
+        tokens: list<tuple<string, u64>>,
+        /// 추론 토큰. `output`에 들어 있고 따로 값을 매기지 않는다.
         reasoning-tokens: option<u64>,
     }
     /// 비스트림 응답을 읽은 결과.
@@ -99,6 +102,8 @@ interface provider {
         error-format: error-format,
         /// 가격표 snapshot에 남기는 토큰 포함 규칙 이름.
         token-rule: string,
+        /// 이 API의 사용량이 가질 수 있는 사용량 칸 이름. 본체 어댑터의 목록과 같아야 한다.
+        usage-categories: list<string>,
         /// 스트림 응답을 읽을 수 있는지.
         %stream: bool,
     }

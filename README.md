@@ -292,8 +292,10 @@ both fields to the provider:
     adapter_sha256: <64 lowercase hex digits>
 ```
 
-The gateway does not start if the file's SHA-256 differs, if the component imports anything, or if
-it reports a provider name or API that the built-in adapter does not have. Each call gets a new
+The gateway does not start if the file's SHA-256 differs, if the component imports anything, if it
+reports a provider name or API that the built-in adapter does not have, or if an API's usage
+categories differ from those of the built-in adapter. The component must export the interface
+`m-gated:adapter@0.2.0` ([decision 0012](docs/decisions/0012-usage-categories.md)). A component built for version 0.1.0 is refused at start. Each call gets a new
 sandbox with a 128 MiB memory limit and a CPU limit. If the component fails while it checks a
 request, the gateway refuses the request with `500` and `x-gateway-error-code: adapter_failed`, and
 does not send it. If it fails while it reads a response, the response is malformed and the request
@@ -336,18 +338,41 @@ the container with a volume, or build an image `FROM` the release image that add
 | `embedding_dimensions`, `embedding_encodings` | `embeddings` only, and required: `{default, max ≤ 4096}` and a subset of `[float, base64]`. Embedding profiles take no `features`. |
 
 **Rates.** Rates are **USD per 1,000,000 tokens**. Each one is a quoted fixed-point string with
-exactly 12 decimal places, for example `'3.000000000000'`. Categories: `input`, `output`, `cache_read`,
-and a cache-write rate under either name, `cache_write` or `cache_write_5m` (they mean the same
-thing). Which ones are required depends on the profile:
+exactly 12 decimal places, for example `'3.000000000000'`. The gateway splits usage and rates into
+usage categories, so that each kind of token, such as a cache write that lives one hour, is priced
+at its own rate ([decision 0012](docs/decisions/0012-usage-categories.md)). The gateway has one list
+of usage categories, and they are also the price categories:
+
+| Category | Tokens |
+|---|---|
+| `input` | Input that was not read from the cache |
+| `output` | Output. Reasoning (thinking) tokens are part of it and are not priced again |
+| `cache_read` | Input read from the cache |
+| `cache_write` | A cache write whose price does not depend on how long the cache lives. No built-in API uses it now |
+| `cache_write_5m` | A cache write that lives five minutes |
+| `cache_write_1h` | A cache write that lives one hour |
+
+Each API declares the categories that its usage can have, and a profile can set rates only for
+those categories:
+
+| API | Categories |
+|---|---|
+| Anthropic `messages` | `input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h` |
+| Anthropic `count_tokens`, OpenAI `embeddings` | `input` |
+| OpenAI `responses` and `openai_chat`, DeepSeek `deepseek_chat` | `input`, `output`, `cache_read` |
+| TypeSafe `systemone` | `input`, `output` |
+
+Which rates are required depends on the profile:
 
 - Every profile needs `input`. Generating APIs also need `output`.
 - `embeddings`: `input` only.
-- DeepSeek: exactly `input`, `output` and `cache_read`.
+- DeepSeek: exactly `input`, `output` and `cache_read`, with or without the `cache` feature.
 - TypeSafe: exactly `input` and `output`, and `output` must be `'0.000000000000'`. TypeSafe does
   not charge for output tokens, and a request has no output limit that could bound an output cost.
-- OpenAI or DeepSeek with the `cache` feature: `cache_read`.
-- Anthropic with the `cache` feature: `cache_read` and one cache-write rate (not both names).
-  Requests may use only the 5-minute cache TTL.
+- OpenAI with the `cache` feature: `cache_read`.
+- Anthropic `messages` with the `cache` feature: `cache_read` and `cache_write_5m`.
+  `cache_write_1h` is optional. Without it, a request that asks for the one-hour cache is refused
+  (see [Anthropic pass-through policy](#anthropic-pass-through-policy)).
 
 `config.example.yaml` ships with every rate set to `'0.000000000000'` as a placeholder. Zero is a
 valid rate, so if you leave the placeholders in place, every request settles at 0 USD and budgets
@@ -647,8 +672,17 @@ Every inference request goes through the ledger in Postgres:
    the current minute: a call's tokens are added to the minute in which it is settled, and once they
    reach the limit, new calls are rejected with `rate_limited` until the next minute.
 3. **Settlement.** The gateway verifies the provider's final usage from the complete response or
-   stream: the terminal event, the model name, and usage fields that match standard pricing. It then
-   prices the usage with the profile's rates (fixed-point, 12 decimals). The result is recorded once.
+   stream: the terminal event, the model name, and usage fields that match standard pricing. The
+   adapter reports the usage as a token count per [usage category](#providers-and-profiles), plus
+   the reasoning count. The rates come from the price snapshot: the copy of the profile's rates
+   that the gateway stored with the request when it admitted it. For each category, the gateway
+   multiplies the tokens by the category's rate. It adds the results and rounds the sum once
+   (fixed-point, 12 decimals). If a category has tokens but no rate, or the API did not declare the
+   category, the cost is `unknown`, never 0. The result is recorded once. The request's usage record keeps the
+   token count of each category (`input_tokens`, `output_tokens`, `cache_read_tokens`,
+   `cache_write_tokens`, `cache_write_5m_tokens`, `cache_write_1h_tokens`), and the request detail
+   on *Admin → Requests* shows them. For `tpm` limits and the ledger's per-call token totals, a
+   call's input tokens are `input` plus every cache category, and its output tokens are `output`.
 4. **No final usage.** If the final usage cannot be verified, the request is settled by why it
    ended (see decision [0005](docs/decisions/0005-gateway-prices-and-cut-off-requests.md)):
    - **An Anthropic stream cut off after its start event**: the client disconnected, the gateway
@@ -669,8 +703,9 @@ Every inference request goes through the ledger in Postgres:
      a request that is not streamed was cut off before its response. The request is settled at
      0 USD.
    - **Otherwise `unknown`**: the process stopped during the request, the reported model is not in
-     `actual_models`, a usage field is unexpected or non-standard, a price cannot be resolved, or an
-     OpenAI or DeepSeek stream was cut off after it started. Unknown costs are never estimated.
+     `actual_models`, a usage field is unexpected or non-standard, a usage category has tokens but
+     no rate, a price cannot be resolved, or an OpenAI or DeepSeek stream was cut off after it
+     started. Unknown costs are never estimated.
      While any of a principal's requests are `unknown`, that principal's paid calls are rejected
      with `unsettled_usage_block`. An admin resolves each request on *Admin → Requests*
      (`PUT /api/admin/requests/{id}/settlement` with `decision: charged|no_charge`, `cost_usd` and
@@ -694,10 +729,15 @@ not poll, *Admin → Token check* says that the check is off, and correction can
   of each key. A provider key that is not found is listed on the screen and left out of the
   comparison.
 - For each provider key, model and hour, the gateway compares the report with the tokens of its own
-  requests in that hour. The gateway computes its own totals when it stores the report, so the
-  screen reads stored totals. A difference sends no alert.
+  requests in that hour. It compares each usage category separately: `input`, `cache_read`,
+  `cache_write_5m`, `cache_write_1h` and `output`. Like the report, the gateway's own totals keep
+  five-minute and one-hour cache writes apart ([decision 0012](docs/decisions/0012-usage-categories.md)).
+  The gateway computes its own totals when it
+  stores the report, so the screen reads stored totals. A difference sends no alert.
 - *Admin → Token check* (`/dashboard/admin/token-check`) shows the tokens that the provider counted
-  more and the tokens that the gateway counted more, priced at the current catalog prices. The
+  more and the tokens that the gateway counted more, priced at the current catalog prices. Each usage
+  category is priced at its own rate; the gateway never uses another category's rate in its place.
+  A model that has no rate for a category with tokens is listed as unpriced. The
   tokens that the provider counted more are split by reason. Each hour gets the first reason that
   applies: use of the key outside the gateway (no gateway request with that key in that hour),
   cut-off requests in that hour, requests with unknown usage in that hour, or unexplained.
@@ -720,8 +760,8 @@ cut-off request ends it replaces the request's output tokens with the provider's
   - every other request that the assignment puts in the same minute, with the same provider key
     and model, was settled with the usage that the provider sent in its response;
   - the request is more than 5 seconds away from a minute boundary;
-  - the bucket's input and cache tokens, minus those of the other requests, equal the request's
-    own.
+  - the bucket's input, cache-read, five-minute cache-write and one-hour cache-write tokens, minus
+    those of the other requests, each equal the request's own.
 
   The new output never exceeds the request's `max_tokens`.
 - The cost change goes to the request's original budget period. The request detail shows the
@@ -741,8 +781,11 @@ forwarded unparsed.
 
 - **Validated:** `model`, `max_tokens` (≤ profile `max_output_tokens`), `stream`, message roles
   and content block types, thinking, client tool definitions, PNG image sources, `cache_control`
-  (5-minute TTL), `output_config.format`, the `type` of each `context_management` edit, and
-  `tool_use.caller` (only `{"type": "direct"}`).
+  (`ttl` `5m`, the default, or `1h`), `output_config.format`, the `type` of each
+  `context_management` edit, and `tool_use.caller` (only `{"type": "direct"}`).
+- **Cache lifetimes:** a five-minute and a one-hour cache write have different prices. A
+  `messages` request that asks for a cache lifetime whose rate the profile does not have
+  (`cache_write_5m` or `cache_write_1h`) is refused with `400 unsupported_option` and is not sent.
 - **Rejected:** `service_tier`, `speed`, `inference_geo`, `mcp_servers` and `container`, both at the
   top level and inside messages. Also rejected: server tools, a non-`direct` tool_use `caller`,
   context edits other than `clear_*` (compaction, for example), unapproved betas, and any
@@ -753,7 +796,11 @@ forwarded unparsed.
 
 Response usage follows the same rule. Values that match standard pricing settle normally
 (`service_tier` `standard`, `speed` `standard`, `inference_geo` `global` or empty, zero server-tool use).
-Any other value, or any unknown usage field, makes the request's cost `unknown`.
+Any other value, or any unknown usage field, makes the request's cost `unknown`. Cache writes are
+priced by lifetime: `cache_creation.ephemeral_5m_input_tokens` at `cache_write_5m` and
+`cache_creation.ephemeral_1h_input_tokens` at `cache_write_1h`. If the two do not add up to
+`cache_creation_input_tokens`, or they are missing while cache writes are not zero, the cost is
+`unknown`.
 
 ### Using Claude Code
 
@@ -808,7 +855,7 @@ It has no inline scripts and loads nothing from external CDNs.
 | Organization-wide usage | `/dashboard/admin/usage` | admins |
 | Requests and manual settlement | `/dashboard/admin/requests` | admins |
 | Provider keys (register, replace, retire) | `/dashboard/admin/credentials` | admins |
-| Model & price catalog (sync, compare, approve) | `/dashboard/admin/models` | admins |
+| Model & price catalog (sync, compare, approve, edit rates) | `/dashboard/admin/models` | admins |
 | Token check against Anthropic's usage report | `/dashboard/admin/token-check` | admins |
 | Settings (budget time zone, cut-off rule, correction) | `/dashboard/admin/settings` | admins |
 
@@ -854,8 +901,12 @@ For providers configured with `catalog`, models and prices live in Postgres
    disappeared from models.dev, and new models whose name starts with one of the catalog's
    `model_prefixes`. For each one it shows the current value next to the proposed value.
    Some models cost more once the input exceeds a certain size (tiered pricing). The ledger stores
-   a single price for each price type (input, output, cache read, cache write), so for such models
-   the proposed `max_input_tokens` stays below that size and requests above it are rejected.
+   a single price for each usage category, so for such models the proposed `max_input_tokens`
+   stays below that size and requests above it are rejected.
+   A sync proposes values only for the categories that models.dev gives: input, output, cache
+   read and its one cache-write price. That cache-write price goes to `cache_write_5m` for Anthropic
+   models. The other APIs declare no cache-write category, so a sync does not use it for them. A
+   rate that models.dev does not give, such as `cache_write_1h`, keeps the value that an admin set.
 3. The admin ticks the items to apply and approves. Changed and missing models start ticked, new
    models do not; a "select all" box in the table header ticks or clears every item at once. If
    another admin approved a different proposal after this proposal was built, the approval is
@@ -866,16 +917,28 @@ For providers configured with `catalog`, models and prices live in Postgres
    instances load the new version at their next health check. Requests keep the price they were
    admitted with, so amounts already in the ledger never change.
 
-Every approval is recorded in the command and audit logs with the before and after values. Policies
-can grant catalog models like any other model.
+**Editing rates.** An admin can set or clear the rate of any usage category that the model's API
+declares ([decision 0012](docs/decisions/0012-usage-categories.md)). On `/dashboard/admin/models`, the **Edit rates** button of a model opens a form
+with one field per category; an empty field means no rate. The form sends
+`PUT /api/admin/model-catalog/rates`. Categories that the body does not name keep their rate. The
+result must still be a valid profile: for example, an Anthropic model with the `cache` feature
+cannot lose its `cache_write_5m` rate. Each change makes a new catalog version, like an approval.
+A body that changes nothing returns `effect: noop` and makes no version. An Anthropic catalog model
+has no `cache_write_1h` rate until an admin sets one, and until then its one-hour cache requests
+are refused.
+
+Every approval and every rate change is recorded in the command and audit logs with the before and
+after values (operations `approve_model_catalog` and `edit_model_catalog_rates`). Policies can grant
+catalog models like any other model.
 
 | Method and path | Body | Result |
 |---|---|---|
-| `GET /api/admin/model-catalog` | – | Current version, entries and the catalog policy per provider |
+| `GET /api/admin/model-catalog` | – | Current version, entries and the catalog policy per provider, with the usage categories of its API (`usage_categories`) |
 | `POST /api/admin/model-catalog/sync` | empty or `{}` | `201` with `proposal_id` and the proposal; `502 catalog_sources_unavailable` if models.dev could not be downloaded (the code keeps its earlier plural name) |
 | `POST /api/admin/model-catalog/approve` | `{"proposal_id": "<uuid>", "expected_version": "<n>", "items": [{"provider": "...", "model": "..."}]}` | `200` with the new `result_version` |
+| `PUT /api/admin/model-catalog/rates` | `{"provider": "...", "model": "...", "rates": {"<category>": "<USD per 1M tokens>" \| null}, "expected_version": "<n>"}` | `200` with the new `result_version`; `400 invalid_request` for a category that the API does not declare, a rate with more than 12 decimal places, or a result that is not a valid profile; `404` for a model that is not in the catalog; `409 version_conflict` if the catalog changed |
 
-Both writes need `X-Gateway-Command-Id` and replay like other admin commands.
+All three writes need `X-Gateway-Command-Id` and replay like other admin commands.
 
 ### Provider keys
 
@@ -1049,8 +1112,12 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
 The DeepSeek adapter can also be built as a WebAssembly (WASM) component. This is a trial
-([decision 0009](docs/decisions/0009-deepseek-adapter-as-wasm-trial.md)). Its interface is in
-`crates/adapter-kit/wit/adapter.wit`. To build it and run its tests:
+([decision 0009](docs/decisions/0009-deepseek-adapter-as-wasm-trial.md)). Its interface is
+`m-gated:adapter@0.2.0` in `crates/adapter-kit/wit/adapter.wit`. In version 0.2.0, the component
+describes each API in an `api-info` record, which lists the API's usage categories. The `usage`
+record has three parts: the actual model, a list of category and token count pairs, and the
+reasoning count ([decision 0012](docs/decisions/0012-usage-categories.md)). The gateway accepts only version 0.2.0. To
+build it and run its tests:
 
 ```sh
 scripts/build-adapter.sh   # writes target/adapters/deepseek.wasm and deepseek.wasm.sha256
@@ -1058,7 +1125,7 @@ cargo test --locked --test wasm_adapter -- --ignored
 ```
 
 The tests compare the component with the built-in DeepSeek adapter, and check the limits and the
-refusal of wrong files.
+refusal of wrong files, including a component that exports interface version 0.1.0.
 
 The script adds the `wasm32-unknown-unknown` target, installs `wasm-tools` 1.259.0 in
 `target/tools`, and refuses a component that imports anything. It replaces the absolute paths

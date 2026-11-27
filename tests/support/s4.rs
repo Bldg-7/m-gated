@@ -401,14 +401,11 @@ pub(super) fn count_observation(free: bool) -> FinalObservation {
         usage: if free {
             None
         } else {
-            Some(FinalUsage {
-                actual_model: "synthetic-text".into(),
-                input_tokens: 10,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: None,
-            })
+            Some(FinalUsage::new(
+                "synthetic-text",
+                [(m_gated::ledger::finance::UsageCategory::Input, 10)],
+                None,
+            ))
         },
         counted_input_tokens: Some(10),
         reason: "completed",
@@ -860,7 +857,12 @@ async fn s4_count_bound_violation_and_system_audit_are_atomic_for_both_scopes() 
     sqlx::raw_sql("CREATE FUNCTION gw_fixture_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic audit fault'; END $$; CREATE TRIGGER gw_fixture_fail_audit BEFORE INSERT ON gw_audit_events FOR EACH ROW EXECUTE FUNCTION gw_fixture_fail_audit()").execute(db.store.pool()).await.unwrap();
     // 비용 상한(4096 토큰)을 넘는 정산은 안전 정지를 남긴다. 감사 기록이 실패하면 두 scope 모두 바뀌지 않는다.
     let mut usage = count_observation(false);
-    usage.usage.as_mut().unwrap().input_tokens = 5000;
+    usage
+        .usage
+        .as_mut()
+        .unwrap()
+        .tokens
+        .set(m_gated::ledger::finance::UsageCategory::Input, 5000);
     usage.counted_input_tokens = Some(5000);
     assert_eq!(
         ledger.finalize_request(a.id, &usage).await.err(),

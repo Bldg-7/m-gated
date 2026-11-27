@@ -306,6 +306,10 @@ impl DashboardApi {
                 route(&s, admin, "POST", post(m::catalog_approve)),
             )
             .route(
+                "/api/admin/model-catalog/rates",
+                route(&s, admin, "PUT", put(m::catalog_rates)),
+            )
+            .route(
                 "/api/admin/usage",
                 route(&s, admin, "GET", get(m::admin_usage)),
             )

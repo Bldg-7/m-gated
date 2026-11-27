@@ -36,15 +36,65 @@ pub enum ReadError {
     /// 응답 본문이 상한을 넘었다.
     TooLarge,
 }
-/// Provider가 알린 사용량.
+/// 게이트웨이의 사용량 칸(결정 0012). 가격 칸과 같은 목록이다. 새 칸은 게이트웨이를 고쳐야 생긴다.
+/// 추론 토큰은 칸이 아니다. `output`에 들어 있고 따로 값을 매기지 않는다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UsageCategory {
+    /// 캐시가 아닌 입력.
+    Input,
+    Output,
+    CacheRead,
+    /// 캐시가 사는 시간과 관계없이 값이 같은 캐시 쓰기.
+    CacheWrite,
+    /// 5분 동안 사는 캐시 쓰기.
+    CacheWrite5m,
+    /// 1시간 동안 사는 캐시 쓰기.
+    CacheWrite1h,
+}
+impl UsageCategory {
+    pub const ALL: [Self; 6] = [
+        Self::Input,
+        Self::Output,
+        Self::CacheRead,
+        Self::CacheWrite,
+        Self::CacheWrite5m,
+        Self::CacheWrite1h,
+    ];
+    /// 칸 이름. 가격 항목 이름과 같다.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::CacheRead => "cache_read",
+            Self::CacheWrite => "cache_write",
+            Self::CacheWrite5m => "cache_write_5m",
+            Self::CacheWrite1h => "cache_write_1h",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.name() == name)
+    }
+    /// 캐시 칸인지. 분당 토큰 한도의 입력 토큰은 `input`과 모든 캐시 칸의 합이다.
+    pub const fn is_cache(self) -> bool {
+        !matches!(self, Self::Input | Self::Output)
+    }
+}
+/// Provider가 알린 사용량(결정 0012).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Usage {
     pub actual_model: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
+    /// 칸과 토큰 수. 한 칸은 한 번만 나온다. API가 알린 칸만 쓴다. 없는 칸은 0이다.
+    pub tokens: Vec<(UsageCategory, u64)>,
     pub reasoning_tokens: Option<u64>,
+}
+impl Usage {
+    /// 한 칸의 토큰 수. 없으면 0이다.
+    pub fn get(&self, category: UsageCategory) -> u64 {
+        self.tokens
+            .iter()
+            .find(|(c, _)| *c == category)
+            .map_or(0, |(_, n)| *n)
+    }
 }
 /// 비스트림 응답을 읽은 결과.
 #[derive(Clone, Debug, PartialEq, Eq)]

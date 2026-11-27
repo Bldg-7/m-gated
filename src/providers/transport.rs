@@ -56,11 +56,13 @@ pub struct StreamProgress {
     pub started: bool,
     /// Anthropic `message_start`가 알린 입력 usage. 끊긴 요청의 입력 토큰이다.
     pub start: Option<crate::ledger::finance::StartUsage>,
+    /// 사용량의 단가를 고를 수 없다([`super::port::StreamReader::unpriced`]). 비용은 unknown이다.
+    pub unpriced: bool,
     /// 끊기기 전에 받은 출력 내용(텍스트, thinking, 도구 인자).
     pub received: ReceivedOutput,
 }
 impl StreamProgress {
-    // FinalUsage 고정 필드와 최대200byte model의 별도 보관을 기존 parser 예산에서 예약한다.
+    // FinalUsage 고정 필드(칸별 토큰 포함)와 최대200byte model의 별도 보관을 기존 parser 예산에서 예약한다.
     pub const RETAINED_BYTES: usize = 512;
     pub fn invalidate(&mut self) {
         self.final_usage = None;
@@ -626,14 +628,14 @@ mod tests {
     fn supervisor_final_usage_fits_reserved_parser_budget() {
         assert!(std::mem::size_of::<StreamProgress>() + 200 <= StreamProgress::RETAINED_BYTES);
         let mut progress = StreamProgress {
-            final_usage: Some(FinalUsage {
-                actual_model: "m".repeat(200),
-                input_tokens: 100,
-                output_tokens: 20,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: None,
-            }),
+            final_usage: Some(FinalUsage::new(
+                "m".repeat(200),
+                [
+                    (crate::ledger::finance::UsageCategory::Input, 100),
+                    (crate::ledger::finance::UsageCategory::Output, 20),
+                ],
+                None,
+            )),
             provider_error_observed: false,
             ..Default::default()
         };

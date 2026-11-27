@@ -35,12 +35,14 @@ CREATE INDEX gw_provider_usage_hour ON gw_provider_usage(hour_start);
 
 -- 같은 칸의 게이트웨이 쪽 합계. 사용량 보고서를 받을 때 같은 시간을 다시 계산해 둔다(화면은 이 표만 읽는다).
 -- 정산한 messages 요청의 토큰이고, 사후 보정한 요청은 고친 출력이다.
+-- 캐시 쓰기는 사용량 보고서처럼 5분과 1시간으로 나눠 따로 비교한다(결정 0012).
 CREATE TABLE gw_gateway_usage (
  api_key_id text NOT NULL CHECK(octet_length(api_key_id) BETWEEN 1 AND 200 AND api_key_id !~ '[[:cntrl:]]'),
  model text NOT NULL CHECK(octet_length(model) BETWEEN 1 AND 200 AND model !~ '[[:cntrl:]]'),
  hour_start timestamptz NOT NULL CHECK(extract(epoch FROM hour_start)::numeric % 3600=0),
  input_tokens bigint NOT NULL CHECK(input_tokens>=0),
- cache_write_tokens bigint NOT NULL CHECK(cache_write_tokens>=0),
+ cache_write_5m_tokens bigint NOT NULL CHECK(cache_write_5m_tokens>=0),
+ cache_write_1h_tokens bigint NOT NULL CHECK(cache_write_1h_tokens>=0),
  cache_read_tokens bigint NOT NULL CHECK(cache_read_tokens>=0),
  output_tokens bigint NOT NULL CHECK(output_tokens>=0),
  cutoff_requests bigint NOT NULL CHECK(cutoff_requests>=0),

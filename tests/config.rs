@@ -923,6 +923,8 @@ fn anthropic_native_features_prices_and_access_digest_are_explicit() {
         ),
         StartupError::InvalidPrice,
     );
+    // 결정 0012: messages의 캐시 쓰기 단가는 5분과 1시간 칸에 둔다. 5분 단가는 꼭 있어야 하고,
+    // 1시간 단가는 있어도 된다. 사는 시간과 관계없는 `cache_write`는 이 API의 칸이 아니다.
     reject(
         &valid.replace(
             "cache_write_5m: '2.500000000000'",
@@ -930,6 +932,18 @@ fn anthropic_native_features_prices_and_access_digest_are_explicit() {
         ),
         StartupError::InvalidPrice,
     );
+    reject(
+        &valid.replace(
+            "cache_write_5m: '2.500000000000'",
+            "cache_write: '2.500000000000'",
+        ),
+        StartupError::InvalidPrice,
+    );
+    load(&valid.replace(
+        "cache_write_5m: '2.500000000000'",
+        "cache_write_5m: '2.500000000000'\n          cache_write_1h: '4.000000000000'",
+    ))
+    .unwrap();
     let mut secrets = support::environment();
     secrets.insert(
         "CREDENTIAL_ENCRYPTION_KEY".into(),

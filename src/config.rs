@@ -1217,16 +1217,11 @@ impl ModelProfile {
         {
             return Err(StartupError::InvalidPrice);
         }
+        // 가격 항목은 그 API가 알린 사용량 칸만 쓴다(결정 0012).
+        let declared = api.map_or(&[][..], |api| api.usage_categories());
         for (category, value) in &self.rates {
-            if ![
-                "input",
-                "output",
-                "cache_read",
-                "cache_write",
-                "cache_write_5m",
-                "cache_write_1h",
-            ]
-            .contains(&category.as_str())
+            if !crate::ledger::finance::UsageCategory::from_name(category)
+                .is_some_and(|c| declared.contains(&c))
                 || !valid_price(value)
                 || (self.billing_class == BillingClass::GuaranteedFree && value != "0.000000000000")
             {

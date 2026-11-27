@@ -1361,14 +1361,16 @@ async fn deepseek_price_snapshot_survives_mutation_and_alias_uncertainty() {
         .insert("input".into(), "999.000000000000".into());
     let observation = FinalObservation {
         outcome: FinalOutcome::Completed,
-        usage: Some(FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: 100,
-            output_tokens: 20,
-            cache_read_tokens: 40,
-            cache_write_tokens: 0,
-            reasoning_tokens: Some(10),
-        }),
+        usage: Some(FinalUsage::new(
+            "synthetic-text",
+            [
+                // `input`은 캐시에 없던 입력(miss)이다(결정 0012).
+                (m_gated::ledger::finance::UsageCategory::Input, 60),
+                (m_gated::ledger::finance::UsageCategory::Output, 20),
+                (m_gated::ledger::finance::UsageCategory::CacheRead, 40),
+            ],
+            Some(10),
+        )),
         counted_input_tokens: None,
         reason: "completed",
         http_status: Some(200),

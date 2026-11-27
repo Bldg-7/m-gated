@@ -3,12 +3,15 @@
 //! - 관리자가 동기화하면 공개 가격 목록 models.dev 를 받아 변경안을 만든다. 가격 출처는 이 하나만 쓴다.
 //! - 관리자가 변경안을 승인해야 새 버전으로 적용된다. 자동 적용은 없다.
 //! - 승인된 목록은 공급사별 정책(`CatalogTemplate`)과 합쳐 일반 profile 이 되고, 설정 파일 profile 과 같은 규칙으로 검증한다.
+//! - 관리자는 모델 하나의 칸별 단가를 직접 고칠 수 있다(결정 0012). 고칠 때마다 새 버전이 된다.
+//!   동기화는 models.dev 가 주는 칸만 바꾸고, `cache_write_1h` 처럼 models.dev 에 없는 칸은 관리자가 정한 값을 둔다.
 //! - 요청마다 입장 시점의 가격이 장부에 저장되므로, 버전이 바뀌어도 이미 기록된 금액은 바뀌지 않는다.
 use crate::{
     config::{CatalogTemplate, Limits, ModelProfile, ProviderId, StartupError, ValidatedConfig},
     ledger::{
         PgIdentityStore,
         commands::CommandContext,
+        finance::UsageCategory,
         management::{self, CommandResult, ManagementError},
         management_query::stamp,
     },
@@ -62,12 +65,32 @@ fn insert(parsed: &mut Parsed, provider: ProviderId, model: &str, candidate: Can
         .or_insert((model.to_owned(), candidate));
 }
 
+/// 이 정책의 API가 알린 사용량 칸(결정 0012). 단가는 이 칸에만 둔다.
+fn usage_categories(provider: ProviderId, template: &CatalogTemplate) -> &'static [UsageCategory] {
+    crate::providers::port::api(provider, template.api).map_or(&[], |a| a.usage_categories())
+}
+/// 관리자가 넣은 단가(100만 토큰당 USD)를 소수점 12자리 문자열로 맞춘다. 형식이 틀리면 None.
+fn rate_value(value: &str) -> Option<String> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    (!whole.is_empty()
+        && whole.len() <= 16
+        && (whole.len() == 1 || !whole.starts_with('0'))
+        && digits(whole)
+        && fraction.len() <= 12
+        && digits(fraction)
+        && !(value.contains('.') && fraction.is_empty()))
+    .then(|| format!("{whole}.{fraction:0<12}"))
+}
+
 pub fn parse_models_dev(body: &Value) -> Parsed {
     let mut parsed = Parsed::new();
     for provider in crate::providers::port::providers() {
         let Some(name) = provider.models_dev_name() else {
             continue;
         };
+        // models.dev 의 캐시 쓰기 가격은 하나뿐이다. 그 칸을 알린 Provider(Anthropic은 `cache_write_5m`)만 쓴다.
+        let cache_write = provider.cache_write_rate();
         let provider = provider.id();
         let Some(models) = body[name]["models"].as_object() else {
             continue;
@@ -79,8 +102,10 @@ pub fn parse_models_dev(body: &Value) -> Parsed {
                 ("input", "input"),
                 ("output", "output"),
                 ("cache_read", "cache_read"),
-                ("cache_write_5m", "cache_write"),
-            ] {
+            ]
+            .into_iter()
+            .chain(cache_write.map(|key| (key, "cache_write")))
+            {
                 if let Some(v) = per_mtok(&cost[field]) {
                     rates.insert(key.to_owned(), v);
                 }
@@ -165,11 +190,14 @@ pub struct Proposal {
 }
 
 /// 가격 출처의 값으로 모델 하나의 제안 값을 만든다. 필요한 가격·토큰 한도가 하나라도 없으면 None.
+/// 가격 출처는 API가 선언한 칸 가운데 자기가 주는 칸만 정한다. 주지 않는 칸(`cache_write_1h` 등)은
+/// 지금 값을 둔다(결정 0012).
 fn propose(
     provider: ProviderId,
     template: &CatalogTemplate,
     model: &str,
     found: &Candidate,
+    current: Option<&Entry>,
 ) -> Option<Entry> {
     let required = template.required_rates(provider);
     if !required.iter().all(|k| found.rates.contains_key(*k)) {
@@ -180,10 +208,13 @@ fn propose(
     // 구간 가격(일정 입력 이상은 더 비쌈)은 장부가 표현하지 않으므로 그 아래로 입력을 제한한다.
     let tier = found.tier_threshold;
     let max_input = tier.map_or(context, |t| t.min(context));
-    let rates = required
-        .iter()
-        .map(|k| ((*k).to_owned(), found.rates[*k].clone()))
-        .collect();
+    let declared = usage_categories(provider, template);
+    let mut rates: BTreeMap<String, String> = current.map(|c| c.rates.clone()).unwrap_or_default();
+    for (k, v) in &found.rates {
+        if declared.iter().any(|c| c.name() == k) {
+            rates.insert(k.clone(), v.clone());
+        }
+    }
     Some(Entry {
         provider: provider.name().to_owned(),
         model: model.to_owned(),
@@ -226,7 +257,7 @@ pub fn build_proposal(
             .iter()
             .find(|e| e.provider_id() == Some(provider) && match_key(&e.model) == key)
             .cloned();
-        let proposed = found.and_then(|f| propose(provider, template, &model, f));
+        let proposed = found.and_then(|f| propose(provider, template, &model, f, current.as_ref()));
         let status = match (&current, &proposed) {
             (Some(_), None) if found.is_none() => ItemStatus::Missing,
             (_, None) => ItemStatus::Incomplete,
@@ -388,7 +419,7 @@ impl CatalogService {
         let providers: Vec<Value> = self
             .templates
             .iter()
-            .map(|(p, t)| json!({"provider":p.name(),"api":crate::ledger::finance::api_name(t.api),"model_prefixes":t.model_prefixes,"required_rates":t.required_rates(*p)}))
+            .map(|(p, t)| json!({"provider":p.name(),"api":crate::ledger::finance::api_name(t.api),"model_prefixes":t.model_prefixes,"required_rates":t.required_rates(*p),"usage_categories":usage_categories(*p, t).iter().map(|c|c.name()).collect::<Vec<_>>()}))
             .collect();
         Ok(match row {
             None => {
@@ -606,6 +637,99 @@ impl CatalogService {
             replayed: false,
         })
     }
+
+    /// 모델 하나의 칸별 단가를 고친다(결정 0012). `rates`의 값이 None이면 그 칸의 단가를 지운다.
+    /// 적지 않은 칸은 그대로 둔다. 고칠 수 있는 칸은 그 API가 알린 사용량 칸이다.
+    /// 승인처럼 새 버전을 만들고 명령 기록과 감사 기록을 남긴다. 바뀐 것이 없으면 버전을 만들지 않는다.
+    pub async fn edit_rates(
+        &self,
+        ctx: &CommandContext<'_>,
+        provider: &str,
+        model: &str,
+        rates: BTreeMap<String, Option<String>>,
+        expected_version: i64,
+    ) -> Result<CommandResult, ManagementError> {
+        if !self.enabled() {
+            return Err(ManagementError::NotFound);
+        }
+        let id = ProviderId::from_name(provider)
+            .filter(|p| self.templates.contains_key(p))
+            .ok_or(ManagementError::Invalid)?;
+        let declared = usage_categories(id, &self.templates[&id]);
+        if rates.is_empty() || model.is_empty() || model.len() > 200 {
+            return Err(ManagementError::Invalid);
+        }
+        let mut changes: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for (category, value) in rates {
+            if !UsageCategory::from_name(&category).is_some_and(|c| declared.contains(&c)) {
+                return Err(ManagementError::Invalid);
+            }
+            let value = match value {
+                Some(v) => Some(rate_value(&v).ok_or(ManagementError::Invalid)?),
+                None => None,
+            };
+            changes.insert(category, value);
+        }
+        let input = json!({"provider":provider,"model":model,"rates":changes,"expected_version":expected_version.to_string()});
+        let digest = management::input_digest(ctx.method, ctx.path, &input);
+        if let Some(result) = self.replay(ctx, &digest).await? {
+            return Ok(result);
+        }
+        let mut tx = self.store.begin_transaction().await?;
+        management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
+        // 승인과 단가 고치기를 하나씩 처리한다.
+        sqlx::query("SELECT pg_advisory_xact_lock(7234638650625913)")
+            .execute(&mut *tx)
+            .await?;
+        let (version, current) = Self::latest(&mut tx).await?;
+        if version != expected_version {
+            return Err(ManagementError::Version(version));
+        }
+        let mut entries = current;
+        let entry = entries
+            .iter_mut()
+            .find(|e| e.provider == provider && e.model == model)
+            .ok_or(ManagementError::NotFound)?;
+        let before = entry.rates.clone();
+        for (category, value) in &changes {
+            match value {
+                Some(v) => entry.rates.insert(category.clone(), v.clone()),
+                None => entry.rates.remove(category),
+            };
+        }
+        let after = entry.rates.clone();
+        let changed = before != after;
+        let next = if changed { version + 1 } else { version };
+        // 고친 단가로도 profile을 만들 수 있어야 한다(예: 캐시를 쓰는 Anthropic 모델의 5분 캐시 쓰기 단가).
+        if changed && self.profiles(next, &entries).len() != entries.len() {
+            return Err(ManagementError::Invalid);
+        }
+        let target = Uuid::from_u64_pair(0, next as u64);
+        let ack = json!({"command_id":ctx.command_id,"operation":"edit_model_catalog_rates","target":{"kind":"catalog","id":target},"result_version":next.to_string(),"effect":if changed {"changed"} else {"noop"}});
+        if changed {
+            sqlx::query("INSERT INTO gw_model_catalog_versions(version,proposal_id,approved_by,entries) VALUES($1,NULL,$2,$3)")
+                .bind(next).bind(ctx.actor).bind(serde_json::to_value(&entries).map_err(|_|ManagementError::Invariant)?)
+                .execute(&mut *tx).await?;
+        }
+        sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_version,result_projection,created_at) VALUES($1,$2,$3,'edit_model_catalog_rates','catalog',$4,200,$5,$6,clock_timestamp())")
+            .bind(ctx.actor).bind(ctx.command_id).bind(digest.as_slice()).bind(target).bind(next).bind(&ack)
+            .execute(&mut *tx).await?;
+        if changed {
+            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'edit_model_catalog_rates','catalog',$4,$5,$6)")
+                .bind(ctx.actor).bind(ctx.command_id).bind(ctx.digest.as_slice()).bind(target)
+                .bind(json!({"version":version,"provider":provider,"model":model,"rates":before}))
+                .bind(json!({"version":next,"provider":provider,"model":model,"rates":after}))
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        let mut body = ack;
+        body["replayed"] = json!(false);
+        Ok(CommandResult {
+            status: 200,
+            body: Some(body),
+            replayed: false,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -693,6 +817,41 @@ mod tests {
             (p.source.source.as_str(), p.source.models),
             ("models_dev", 5)
         );
+    }
+    #[test]
+    fn sync_sets_the_categories_that_models_dev_gives_and_keeps_the_others() {
+        // 정책에 캐시 기능이 없어도 models.dev가 주는 캐시 단가는 갱신한다. 주지 않는 1시간 단가는 둔다.
+        let mut no_cache = template("claude-");
+        no_cache
+            .features
+            .retain(|f| *f != crate::config::NativeFeature::Cache);
+        let templates = BTreeMap::from([(ProviderId::Anthropic, no_cache)]);
+        let current = vec![Entry {
+            provider: "anthropic".into(),
+            model: "claude-opus-5-5".into(),
+            rates: BTreeMap::from([
+                ("input".into(), "5.000000000000".into()),
+                ("output".into(), "20.000000000000".into()),
+                ("cache_read".into(), "0.900000000000".into()),
+                ("cache_write_5m".into(), "9.000000000000".into()),
+                ("cache_write_1h".into(), "8.000000000000".into()),
+            ]),
+            max_input_tokens: 1000000,
+            max_output_tokens: 128000,
+            source: "models_dev".into(),
+            note: None,
+        }];
+        let p = build_proposal(1, &current, &templates, &fetched());
+        let opus = p
+            .items
+            .iter()
+            .find(|i| i.model == "claude-opus-5-5")
+            .unwrap();
+        let rates = &opus.proposed.as_ref().unwrap().rates;
+        assert_eq!(rates["cache_read"], "0.200000000000");
+        assert_eq!(rates["cache_write_5m"], "5.000000000000");
+        assert_eq!(rates["cache_write_1h"], "8.000000000000");
+        assert!(!rates.contains_key("cache_write"));
     }
     #[test]
     fn incomplete_prices_cannot_be_proposed() {

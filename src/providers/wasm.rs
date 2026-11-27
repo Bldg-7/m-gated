@@ -1,4 +1,5 @@
-//! WASM 어댑터 컴포넌트를 port 뒤에 붙인다(결정 0009).
+//! WASM 어댑터 컴포넌트를 port 뒤에 붙인다(결정 0009). 인터페이스는 `m-gated:adapter@0.2.0`이고
+//! 다른 판의 컴포넌트는 시작할 때 거절한다(결정 0012).
 //!
 //! - 컴포넌트는 import를 가질 수 없다. 그래서 네트워크, 파일, 시계, 난수에 닿지 못한다.
 //! - 시작할 때 한 번 컴파일하고 인스턴스를 준비한다. 호출마다 store를 새로 만들어 요청 사이에
@@ -16,7 +17,7 @@ use super::{
 };
 use crate::{
     config::{ApiKind, ModelProfile, ProviderId, StartupError},
-    ledger::finance::FinalUsage,
+    ledger::finance::{FinalUsage, UsageCategory},
     stream::{Event, SseDecoder},
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
@@ -150,15 +151,19 @@ fn read_error(e: wit::ReadError) -> UpstreamError {
         wit::ReadError::TooLarge => UpstreamError::TooLarge,
     }
 }
-fn usage(u: wit::Usage) -> FinalUsage {
-    FinalUsage {
-        actual_model: u.actual_model,
-        input_tokens: u.input_tokens,
-        output_tokens: u.output_tokens,
-        cache_read_tokens: u.cache_read_tokens,
-        cache_write_tokens: u.cache_write_tokens,
-        reasoning_tokens: u.reasoning_tokens,
-    }
+/// 컴포넌트가 알린 사용량(결정 0012). 모르는 칸, 이 API가 알리지 않은 칸, 같은 칸이 두 번 나온
+/// 사용량은 형식 오류로 보고 None을 돌려준다. 그러면 본체는 금액을 정하지 않는다(`unknown`).
+fn usage(u: wit::Usage, declared: &[UsageCategory]) -> Option<FinalUsage> {
+    let tokens = u
+        .tokens
+        .into_iter()
+        .map(|(name, n)| {
+            UsageCategory::from_name(&name)
+                .filter(|c| declared.contains(c))
+                .map(|c| (c, n))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    FinalUsage::from_list(u.actual_model, tokens, u.reasoning_tokens)
 }
 fn event(e: Event) -> wit::Event {
     use crate::stream::Scalar;
@@ -264,6 +269,7 @@ struct WasmApi {
     upstream_path: &'static str,
     error_format: ErrorFormat,
     token_rule: &'static str,
+    usage_categories: &'static [UsageCategory],
     stream: bool,
 }
 impl Api for WasmApi {
@@ -365,7 +371,7 @@ impl Api for WasmApi {
             .await;
             match result {
                 Ok(Ok(r)) => Ok(Reading {
-                    usage: r.usage.map(usage),
+                    usage: r.usage.and_then(|u| usage(u, self.usage_categories)),
                     counted_input_tokens: None,
                     failed: r.failed,
                 }),
@@ -402,13 +408,17 @@ impl Api for WasmApi {
                         reader,
                     })),
                     decoder: Some(decoder),
+                    usage_categories: self.usage_categories,
                 }
             }
-            _ => WasmStream::broken(),
+            _ => WasmStream::broken(self.usage_categories),
         }))
     }
     fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
         self.token_rule
+    }
+    fn usage_categories(&self) -> &'static [UsageCategory] {
+        self.usage_categories
     }
 }
 
@@ -456,12 +466,14 @@ type Call<T> = Box<
 struct WasmStream {
     open: RefCell<Option<Open>>,
     decoder: Option<wit::Decoder>,
+    usage_categories: &'static [UsageCategory],
 }
 impl WasmStream {
-    fn broken() -> Self {
+    fn broken(usage_categories: &'static [UsageCategory]) -> Self {
         Self {
             open: RefCell::new(None),
             decoder: None,
+            usage_categories,
         }
     }
     /// 컴포넌트 함수 하나를 부른다. 호출마다 fuel을 다시 채운다. 멈추면 store를 버린다.
@@ -517,7 +529,7 @@ impl StreamReader for WasmStream {
             })
         }))
         .flatten()
-        .map(usage)
+        .and_then(|u| usage(u, self.usage_categories))
     }
     fn provider_error(&self) -> bool {
         self.call(Box::new(|store, adapter, reader| {
@@ -542,7 +554,10 @@ impl StreamReader for WasmStream {
             })
         }));
         match result {
-            Some(Ok(c)) => Ok((c.usage.map(usage), c.failed)),
+            Some(Ok(c)) => Ok((
+                c.usage.and_then(|u| usage(u, self.usage_categories)),
+                c.failed,
+            )),
             Some(Err(e)) => Err(read_error(e)),
             None => Err(UpstreamError::Protocol),
         }
@@ -578,7 +593,14 @@ pub fn load_with(
     config.consume_fuel(true);
     let engine = Engine::new(&config).map_err(|_| StartupError::InvalidAdapter)?;
     let component = Component::new(&engine, &bytes).map_err(|_| StartupError::InvalidAdapter)?;
-    if component.component_type().imports(&engine).next().is_some() {
+    // 내보내는 인터페이스는 판 0.2.0이어야 한다(결정 0012). wasmtime은 export 이름을 semver 호환으로
+    // 찾아 0.2.1도 받을 수 있으므로 이름을 직접 비교한다.
+    let ty = component.component_type();
+    if ty.imports(&engine).next().is_some()
+        || !ty
+            .exports(&engine)
+            .any(|(name, _)| name == "m-gated:adapter/provider@0.2.0")
+    {
         return Err(StartupError::InvalidAdapter);
     }
     let pre = Linker::new(&engine)
@@ -640,6 +662,25 @@ fn describe(
             .find(|k| api_name(*k) == a.kind)
             .ok_or(StartupError::InvalidAdapter)?;
         let token_rule = leak(a.token_rule);
+        // 사용량 칸은 본체 어댑터와 같아야 한다(결정 0012). 장부, 시간별 사용량, 대시보드가 이 칸만 안다.
+        let native_categories = native
+            .apis()
+            .iter()
+            .find(|n| n.kind() == kind)
+            .map(|n| n.usage_categories())
+            .ok_or(StartupError::InvalidAdapter)?;
+        let usage_categories = a
+            .usage_categories
+            .iter()
+            .map(|name| UsageCategory::from_name(name))
+            .collect::<Option<std::collections::BTreeSet<_>>>()
+            .filter(|set| {
+                set.len() == a.usage_categories.len()
+                    && set.iter().eq(native_categories
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>())
+            })
+            .ok_or(StartupError::InvalidAdapter)?;
         if apis.iter().any(|x| x.kind() == kind)
             || a.routes.is_empty()
             || !a
@@ -662,6 +703,12 @@ fn describe(
                 wit::ErrorFormat::Detail => ErrorFormat::Detail,
             },
             token_rule,
+            usage_categories: Box::leak(
+                usage_categories
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
             stream: a.stream,
         })));
     }
@@ -692,4 +739,33 @@ fn describe(
         response_headers: Box::leak(response_headers.into_boxed_slice()),
         apis: Box::leak(apis.into_boxed_slice()),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn wit_usage(tokens: &[(&str, u64)]) -> wit::Usage {
+        wit::Usage {
+            actual_model: "m".into(),
+            tokens: tokens.iter().map(|(c, n)| (c.to_string(), *n)).collect(),
+            reasoning_tokens: None,
+        }
+    }
+    #[test]
+    fn usage_uses_only_known_declared_categories_once() {
+        use UsageCategory::*;
+        let declared = [Input, Output, CacheRead];
+        let u = usage(wit_usage(&[("input", 60), ("cache_read", 40)]), &declared).unwrap();
+        assert_eq!((u.get(Input), u.get(CacheRead), u.get(Output)), (60, 40, 0));
+        for bad in [
+            // 게이트웨이가 모르는 칸.
+            vec![("input", 1), ("cache_write_2h", 1)],
+            // 이 API가 알리지 않은 칸. 0이어도 받지 않는다.
+            vec![("input", 1), ("cache_write", 0)],
+            // 같은 칸이 두 번 나온다.
+            vec![("input", 1), ("input", 2)],
+        ] {
+            assert!(usage(wit_usage(&bad), &declared).is_none(), "{bad:?}");
+        }
+    }
 }

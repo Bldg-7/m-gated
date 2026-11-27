@@ -7,7 +7,7 @@ use super::{
 use crate::{
     config::{ApiKind, ModelProfile},
     json::{self, JsonError, Kind, Visitor},
-    ledger::finance::FinalUsage,
+    ledger::finance::{FinalUsage, UsageCategory},
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -282,14 +282,11 @@ pub async fn response_usage(
         (Some(model), Some(input), Some(total))
             if input == total && v.vectors == shape.count && !model.is_empty() =>
         {
-            Some(FinalUsage {
-                actual_model: model,
-                input_tokens: input,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: None,
-            })
+            Some(FinalUsage::new(
+                model,
+                [(UsageCategory::Input, input)],
+                None,
+            ))
         }
         _ => None,
     };
@@ -349,5 +346,8 @@ impl Api for Embeddings {
     }
     fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
         "openai_embeddings_prompt_v1"
+    }
+    fn usage_categories(&self) -> &'static [UsageCategory] {
+        &[UsageCategory::Input]
     }
 }

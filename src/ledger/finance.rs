@@ -1,5 +1,6 @@
 use super::{CurrentHuman, PgIdentityStore, amount::Amount};
 use crate::config::{ApiKind, BillingClass, ModelProfile, ProviderId};
+pub use m_gated_adapter_kit::adapter::UsageCategory;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -76,12 +77,8 @@ impl PricingSnapshot {
             included_token_rules: crate::providers::port::api(provider, profile.api)
                 .map_or("", |api| api.token_rule(profile))
                 .into(),
-            cache_tier_rules: if profile.rates.contains_key("cache_write_5m") {
-                "anthropic_5m_v1"
-            } else {
-                "explicit_categories_v1"
-            }
-            .into(),
+            // 사용량이 칸을 모두 따로 알리므로 칸마다 그 칸의 단가를 쓴다(결정 0012).
+            cache_tier_rules: "explicit_categories_v1".into(),
             billing_time_rule: "fixed_admission_v1".into(),
             rounding_version: "sum_half_up_12_v1".into(),
             currency: "USD".into(),
@@ -95,13 +92,15 @@ impl PricingSnapshot {
             || self.currency != "USD"
             || (self.provider == "openai"
                 && self.api == "responses"
-                && !self.input_includes_cache())
+                && self.included_token_rules
+                    != "openai_responses_input_includes_cache_output_includes_reasoning_v1")
             || (self.included_token_rules
                 == "openai_responses_input_includes_cache_output_includes_reasoning_v1"
                 && (self.provider != "openai" || self.api != "responses"))
             || (self.provider == "openai"
                 && self.api == "chat_completions"
-                && !self.input_includes_cache())
+                && self.included_token_rules
+                    != "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1")
             || (self.included_token_rules
                 == "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1"
                 && (self.provider != "openai" || self.api != "chat_completions"))
@@ -153,16 +152,10 @@ impl PricingSnapshot {
                 .any(|(a, b)| !text(a, 200) || !self.allowed_actual_models.contains(b))
             || self.rates.is_empty()
             || self.rates.len() > 8
+            // 단가는 그 API가 알린 사용량 칸에만 둔다(결정 0012). 그래서 Anthropic에는 `cache_write`가 없다.
             || self.rates.iter().any(|r| {
-                ![
-                    "input",
-                    "output",
-                    "cache_read",
-                    "cache_write",
-                    "cache_write_5m",
-                    "cache_write_1h",
-                ]
-                .contains(&r.category.as_str())
+                !UsageCategory::from_name(&r.category)
+                    .is_some_and(|c| self.usage_categories().contains(&c))
                     || r.usd_per_million_tokens.parse::<Amount>().is_err()
             })
             || self
@@ -182,8 +175,7 @@ impl PricingSnapshot {
                 "typesafe_input_output_v1",
             ]
             .contains(&self.included_token_rules.as_str())
-            || !["explicit_categories_v1", "anthropic_5m_v1"]
-                .contains(&self.cache_tier_rules.as_str())
+            || self.cache_tier_rules != "explicit_categories_v1"
             || self.billing_time_rule != "fixed_admission_v1"
             || self.rounding_version != "sum_half_up_12_v1"
         {
@@ -191,63 +183,47 @@ impl PricingSnapshot {
         }
         Ok(())
     }
-    fn input_includes_cache(&self) -> bool {
-        (self.provider == "deepseek"
-            && self.api == "chat_completions"
-            && self.included_token_rules
-                == "deepseek_prompt_includes_hit_completion_includes_reasoning_v1")
-            || self.provider == "openai"
-                && ((self.api == "responses"
-                    && self.included_token_rules
-                        == "openai_responses_input_includes_cache_output_includes_reasoning_v1")
-                    || (self.api == "chat_completions"
-                        && self.included_token_rules
-                            == "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1"))
+    /// 이 snapshot의 API가 알린 사용량 칸(결정 0012). 모르는 Provider나 API면 빈 목록이다.
+    pub fn usage_categories(&self) -> &'static [UsageCategory] {
+        ProviderId::from_name(&self.provider)
+            .and_then(|id| {
+                crate::providers::port::provider(id)
+                    .apis()
+                    .iter()
+                    .find(|a| api_name(a.kind()) == self.api)
+            })
+            .map_or(&[], |a| a.usage_categories())
     }
-    fn billable_input(&self, u: &FinalUsage) -> Result<u64, LedgerError> {
-        if self.input_includes_cache() {
-            u.input_tokens
-                .checked_sub(u.cache_read_tokens)
-                .ok_or(LedgerError::InvalidSnapshot)
-        } else {
-            Ok(u.input_tokens)
-        }
-    }
+    /// 분당 토큰 한도와 기간 합계에 더할 (입력, 출력) 토큰.
     fn tokens(&self, u: &FinalUsage) -> Result<(i64, i64), LedgerError> {
-        if self.input_includes_cache() {
-            if u.cache_read_tokens > u.input_tokens
-                || u.cache_write_tokens != 0
-                || u.reasoning_tokens.is_some_and(|n| n > u.output_tokens)
-            {
-                return Err(LedgerError::InvalidSnapshot);
-            }
-            let i = i64::try_from(u.input_tokens).map_err(|_| LedgerError::AmountOverflow)?;
-            let o = i64::try_from(u.output_tokens).map_err(|_| LedgerError::AmountOverflow)?;
-            i.checked_add(o).ok_or(LedgerError::AmountOverflow)?;
-            Ok((i, o))
-        } else {
-            u.checked_tokens()
-        }
+        u.checked_tokens()
     }
+    /// 장부의 `provider_usage`. Provider 응답의 사용량 모양으로 다시 쓴다.
     fn provider_usage(&self, u: &FinalUsage) -> Value {
+        use UsageCategory::*;
+        let (input, output, cache_read) = (u.get(Input), u.get(Output), u.get(CacheRead));
+        // OpenAI와 DeepSeek의 입력 토큰에는 캐시에서 읽은 입력이 들어 있다.
+        let prompt = input.checked_add(cache_read);
         if self.provider == "deepseek" {
-            let mut selected = json!({"prompt_tokens":u.input_tokens,"completion_tokens":u.output_tokens,"total_tokens":u.input_tokens.checked_add(u.output_tokens),"prompt_cache_hit_tokens":u.cache_read_tokens,"prompt_cache_miss_tokens":u.input_tokens.checked_sub(u.cache_read_tokens)});
+            let mut selected = json!({"prompt_tokens":prompt,"completion_tokens":output,"total_tokens":prompt.and_then(|n|n.checked_add(output)),"prompt_cache_hit_tokens":cache_read,"prompt_cache_miss_tokens":input});
             if let Some(reasoning) = u.reasoning_tokens {
                 selected["completion_tokens_details"] = json!({"reasoning_tokens":reasoning});
             }
             selected
         } else if self.provider == "openai" && self.api == "chat_completions" {
-            json!({"prompt_tokens":u.input_tokens,"completion_tokens":u.output_tokens,"total_tokens":u.input_tokens.checked_add(u.output_tokens),"prompt_tokens_details":{"cached_tokens":u.cache_read_tokens},"completion_tokens_details":{"reasoning_tokens":u.reasoning_tokens}})
+            json!({"prompt_tokens":prompt,"completion_tokens":output,"total_tokens":prompt.and_then(|n|n.checked_add(output)),"prompt_tokens_details":{"cached_tokens":cache_read},"completion_tokens_details":{"reasoning_tokens":u.reasoning_tokens}})
         } else if self.provider == "openai" && self.api == "embeddings" {
-            json!({"prompt_tokens":u.input_tokens,"total_tokens":u.input_tokens})
+            json!({"prompt_tokens":input,"total_tokens":input})
         } else if self.included_token_rules == "typesafe_input_output_v1" {
-            json!({"input_tokens":u.input_tokens,"output_tokens":u.output_tokens})
-        } else if self.input_includes_cache() {
-            json!({"input_tokens":u.input_tokens,"output_tokens":u.output_tokens,"total_tokens":u.input_tokens.checked_add(u.output_tokens),"input_tokens_details":{"cached_tokens":u.cache_read_tokens},"output_tokens_details":{"reasoning_tokens":u.reasoning_tokens}})
+            json!({"input_tokens":input,"output_tokens":output})
+        } else if self.provider == "openai" {
+            json!({"input_tokens":prompt,"output_tokens":output,"total_tokens":prompt.and_then(|n|n.checked_add(output)),"input_tokens_details":{"cached_tokens":cache_read},"output_tokens_details":{"reasoning_tokens":u.reasoning_tokens}})
         } else {
-            json!({"input_tokens":u.input_tokens,"output_tokens":u.output_tokens,"cache_read_input_tokens":u.cache_read_tokens,"cache_creation_input_tokens":u.cache_write_tokens})
+            anthropic_usage(&u.tokens, Some(output))
         }
     }
+    /// 칸마다 토큰 수 × 그 칸의 단가를 더하고 한 번 반올림한다(결정 0012).
+    /// 토큰이 있는 칸이 API가 알리지 않은 칸이거나 단가가 없으면 금액을 정하지 않는다(`unknown`). 0원으로 보지 않는다.
     pub fn price(&self, usage: &FinalUsage, reservation: bool) -> Result<Amount, LedgerError> {
         self.validate()?;
         if self.billing_time_rule != "fixed_admission_v1"
@@ -258,42 +234,29 @@ impl PricingSnapshot {
         {
             return Err(LedgerError::InvalidSnapshot);
         }
-        let embeddings = self.provider == "openai"
-            && self.api == "embeddings"
-            && self.included_token_rules == "openai_embeddings_prompt_v1";
-        if embeddings
-            && (usage.output_tokens != 0
-                || usage.cache_read_tokens != 0
-                || usage.cache_write_tokens != 0
-                || usage.reasoning_tokens.is_some())
-        {
+        let declared = self.usage_categories();
+        // 추론 토큰은 출력에 들어 있는 몫이다. 출력이 없는 API는 추론 토큰도 없다.
+        if usage.reasoning_tokens.is_some_and(|n| {
+            !declared.contains(&UsageCategory::Output) || n > usage.get(UsageCategory::Output)
+        }) {
             return Err(LedgerError::InvalidSnapshot);
         }
-        let categories = [
-            ("input", self.billable_input(usage)?),
-            ("output", usage.output_tokens),
-            ("cache_read", usage.cache_read_tokens),
-            ("cache_write", usage.cache_write_tokens),
-        ];
         let mut items = Vec::new();
-        for (category, tokens) in categories {
-            if (self.api == "count_tokens" || embeddings) && category == "output" && tokens == 0 {
+        for category in UsageCategory::ALL {
+            let tokens = usage.tokens.get(category);
+            // 입력과 출력 단가는 토큰이 0이어도 있어야 한다. 빠진 단가를 0원으로 짐작하지 않는다.
+            let base = matches!(category, UsageCategory::Input | UsageCategory::Output)
+                && declared.contains(&category);
+            if tokens == 0 && !base {
                 continue;
             }
-            if tokens == 0 && !["input", "output"].contains(&category) {
-                continue;
+            if !declared.contains(&category) {
+                return Err(LedgerError::InvalidSnapshot);
             }
             let rate = self
                 .rates
                 .iter()
-                .find(|r| r.category == category)
-                .or_else(|| {
-                    if category == "cache_write" && self.cache_tier_rules == "anthropic_5m_v1" {
-                        self.rates.iter().find(|r| r.category == "cache_write_5m")
-                    } else {
-                        None
-                    }
-                })
+                .find(|r| r.category == category.name())
                 .ok_or(LedgerError::InvalidSnapshot)?;
             items.push((
                 tokens,
@@ -304,6 +267,45 @@ impl PricingSnapshot {
         }
         Amount::price(items, reservation).map_err(|_| LedgerError::AmountOverflow)
     }
+    /// 가격 계산 기록의 칸 목록. 단가가 있는 칸마다 토큰 수와 단가를 남긴다.
+    fn resolution_categories(&self, usage: Option<&FinalUsage>) -> Vec<Value> {
+        let Some(u) = usage else {
+            return Vec::new();
+        };
+        self.rates
+            .iter()
+            .filter_map(|rate| {
+                let category = UsageCategory::from_name(&rate.category)?;
+                Some(json!({"category":rate.category,"tokens":u.get(category).to_string(),"rate":rate.usd_per_million_tokens}))
+            })
+            .collect()
+    }
+}
+/// Anthropic 응답 모양의 사용량. 캐시 쓰기는 합계와 5분·1시간 몫을 함께 쓴다.
+fn anthropic_usage(tokens: &UsageTokens, output: Option<u64>) -> Value {
+    use UsageCategory::*;
+    let get = |c| tokens.get(c);
+    let mut usage = json!({"input_tokens":get(Input),"cache_read_input_tokens":get(CacheRead),"cache_creation_input_tokens":get(CacheWrite5m).checked_add(get(CacheWrite1h)),"cache_creation":{"ephemeral_5m_input_tokens":get(CacheWrite5m),"ephemeral_1h_input_tokens":get(CacheWrite1h)}});
+    if let Some(output) = output {
+        usage["output_tokens"] = json!(output);
+    }
+    usage
+}
+/// 장부의 사용량 기록(`normalized_usage`). 칸마다 `<칸>_tokens`를 남긴다(결정 0012).
+/// `tokens`가 None이면 토큰을 모르는 것이고 칸의 값은 null이다. 없는 칸은 0이다.
+pub(crate) fn usage_record(
+    source: &str,
+    actual_model: Option<&str>,
+    tokens: Option<&UsageTokens>,
+    reasoning_tokens: Option<u64>,
+) -> Value {
+    let mut record = json!({"source":source,"actual_model":actual_model});
+    for c in UsageCategory::ALL {
+        record[format!("{}_tokens", c.name())] = json!(tokens.map(|t| t.get(c).to_string()));
+    }
+    record["reasoning_tokens"] = json!(reasoning_tokens.map(|n| n.to_string()));
+    record["counted_input_tokens"] = Value::Null;
+    record
 }
 pub(crate) fn policy_limits(p: &PgRow) -> Result<super::policy::PolicyLimits, LedgerError> {
     use super::policy::{BudgetLimit, BudgetPeriod, PolicyLimits};
@@ -347,13 +349,44 @@ pub fn api_name(a: ApiKind) -> &'static str {
     }
 }
 
+/// 칸별 토큰 수(결정 0012). 칸마다 자리가 하나라서 한 칸은 한 번만 있다. 없는 칸은 0이다.
+/// 고정 크기라서 스트림 감독자가 예약한 메모리 안에 들어간다.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsageTokens([u64; 6]);
+impl UsageTokens {
+    pub fn get(&self, category: UsageCategory) -> u64 {
+        self.0[category as usize]
+    }
+    pub fn set(&mut self, category: UsageCategory, tokens: u64) {
+        self.0[category as usize] = tokens;
+    }
+    /// 토큰이 있는(0이 아닌) 칸. 칸 목록 순서다.
+    pub fn iter(&self) -> impl Iterator<Item = (UsageCategory, u64)> + '_ {
+        UsageCategory::ALL
+            .into_iter()
+            .map(|c| (c, self.get(c)))
+            .filter(|(_, n)| *n > 0)
+    }
+    /// 관측 지문과 기록에 쓰는 모양(`{"input": n, ...}`). 0인 칸은 뺀다.
+    fn projection(&self) -> BTreeMap<&'static str, u64> {
+        self.iter().map(|(c, n)| (c.name(), n)).collect()
+    }
+}
+impl FromIterator<(UsageCategory, u64)> for UsageTokens {
+    fn from_iter<I: IntoIterator<Item = (UsageCategory, u64)>>(iter: I) -> Self {
+        let mut tokens = Self::default();
+        for (c, n) in iter {
+            tokens.set(c, n);
+        }
+        tokens
+    }
+}
 /// Anthropic 시작 event(`message_start`)가 알린 입력 usage. 끊긴 요청을 정산할 때 입력 토큰으로 쓴다.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartUsage {
     pub actual_model: String,
-    pub input_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
+    /// 입력과 캐시 칸의 토큰 수(결정 0012).
+    pub tokens: UsageTokens,
 }
 /// 최종 usage 없이 끝난 요청을 어떻게 정산할지. 게이트웨이가 끝난 까닭을 보고 정한다(결정 0005).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -371,47 +404,68 @@ pub enum NoUsage {
         count_failure: Option<&'static str>,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// Provider가 알린 최종 사용량(결정 0012).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FinalUsage {
     pub actual_model: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
-    #[serde(default)]
+    /// 칸별 토큰 수. 없는 칸은 0이다.
+    pub tokens: UsageTokens,
+    /// 추론 토큰. `output`에 들어 있고 따로 값을 매기지 않는다.
     pub reasoning_tokens: Option<u64>,
 }
 impl FinalUsage {
-    fn selected(&self) -> Value {
-        json!({"source":"provider","actual_model":self.actual_model,"input_tokens":self.input_tokens.to_string(),"output_tokens":self.output_tokens.to_string(),"cache_read_tokens":self.cache_read_tokens.to_string(),"cache_write_tokens":self.cache_write_tokens.to_string(),"reasoning_tokens":self.reasoning_tokens.map(|n|n.to_string()),"counted_input_tokens":null})
+    /// 본체 어댑터가 만든다. 한 칸은 한 번만 넘긴다.
+    pub fn new(
+        actual_model: impl Into<String>,
+        tokens: impl IntoIterator<Item = (UsageCategory, u64)>,
+        reasoning_tokens: Option<u64>,
+    ) -> Self {
+        Self {
+            actual_model: actual_model.into(),
+            tokens: tokens.into_iter().collect(),
+            reasoning_tokens,
+        }
     }
+    /// 어댑터 crate가 알린 사용량. 같은 칸이 두 번 나오면 형식 오류(None)다.
+    pub fn from_list(
+        actual_model: String,
+        tokens: Vec<(UsageCategory, u64)>,
+        reasoning_tokens: Option<u64>,
+    ) -> Option<Self> {
+        let unique: std::collections::BTreeSet<_> = tokens.iter().map(|(c, _)| *c).collect();
+        (unique.len() == tokens.len()).then(|| Self::new(actual_model, tokens, reasoning_tokens))
+    }
+    /// 한 칸의 토큰 수. 없으면 0이다.
+    pub fn get(&self, category: UsageCategory) -> u64 {
+        self.tokens.get(category)
+    }
+    fn selected(&self) -> Value {
+        usage_record(
+            "provider",
+            Some(&self.actual_model),
+            Some(&self.tokens),
+            self.reasoning_tokens,
+        )
+    }
+    /// 관측 지문에 넣는 모양.
+    fn projection(&self) -> Value {
+        json!({"actual_model":self.actual_model,"tokens":self.tokens.projection(),"reasoning_tokens":self.reasoning_tokens})
+    }
+    /// (입력, 출력) 토큰. 입력은 `input`과 모든 캐시 칸의 합이고 출력은 `output`이다.
     fn checked_tokens(&self) -> Result<(i64, i64), LedgerError> {
-        let input = self
-            .input_tokens
-            .checked_add(self.cache_read_tokens)
-            .and_then(|n| n.checked_add(self.cache_write_tokens))
-            .and_then(|n| i64::try_from(n).ok())
-            .ok_or(LedgerError::AmountOverflow)?;
-        let output = i64::try_from(self.output_tokens).map_err(|_| LedgerError::AmountOverflow)?;
+        let mut input = 0u64;
+        for (category, n) in self.tokens.iter() {
+            if category != UsageCategory::Output {
+                input = input.checked_add(n).ok_or(LedgerError::AmountOverflow)?;
+            }
+        }
+        let input = i64::try_from(input).map_err(|_| LedgerError::AmountOverflow)?;
+        let output = i64::try_from(self.get(UsageCategory::Output))
+            .map_err(|_| LedgerError::AmountOverflow)?;
         input
             .checked_add(output)
             .ok_or(LedgerError::AmountOverflow)?;
         Ok((input, output))
-    }
-}
-fn final_safety_violation_with_pricing(
-    usage: &FinalUsage,
-    pricing: &PricingSnapshot,
-    price: &Result<Amount, LedgerError>,
-    execution: &Value,
-) -> Result<Option<&'static str>, LedgerError> {
-    if pricing.input_includes_cache() {
-        let mut normalized = usage.clone();
-        normalized.input_tokens = pricing.billable_input(usage)?;
-        final_safety_violation(&normalized, price, execution)
-    } else {
-        final_safety_violation(usage, price, execution)
     }
 }
 // 정상/늦은 final은 같은 고정 snapshot의 금액·token 상한과 overflow 우선순위를 쓴다.
@@ -565,7 +619,7 @@ impl FinalObservation {
         }
     }
     fn digest(&self) -> Vec<u8> {
-        Sha256::digest(serde_json::to_vec(&json!({"outcome":self.outcome.name(),"usage":self.usage,"counted_input_tokens":self.counted_input_tokens,"reason":self.reason,"status":self.http_status,"provider_request_id":self.provider_request_id})).expect("유한 typed projection")).to_vec()
+        Sha256::digest(serde_json::to_vec(&json!({"outcome":self.outcome.name(),"usage":self.usage.as_ref().map(FinalUsage::projection),"counted_input_tokens":self.counted_input_tokens,"reason":self.reason,"status":self.http_status,"provider_request_id":self.provider_request_id})).expect("유한 typed projection")).to_vec()
     }
     /// 같은 관측이라도 usage 없이 정산한 방법이 다르면 다른 마감이다.
     fn digest_with(&self, settlement: &NoUsage) -> Vec<u8> {
@@ -577,7 +631,7 @@ impl FinalObservation {
                 received_output,
                 count_failure,
             } => {
-                json!({"kind":"cutoff","model":start.actual_model,"input":start.input_tokens,"cache_read":start.cache_read_tokens,"cache_write":start.cache_write_tokens,"received_output":received_output,"count_failure":count_failure})
+                json!({"kind":"cutoff","model":start.actual_model,"tokens":start.tokens.projection(),"received_output":received_output,"count_failure":count_failure})
             }
         };
         let mut bytes = self.digest();
@@ -1305,12 +1359,11 @@ impl PgLedger {
                     .map_err(|_| LedgerError::InvalidSnapshot)?;
                 let execution = read_execution_snapshot(r.get("execution_snapshot"))?;
                 let price = pricing.price(usage, false);
-                let reason =
-                    final_safety_violation_with_pricing(usage, &pricing, &price, &execution)?;
+                let reason = final_safety_violation(usage, &price, &execution)?;
                 let mut selected = usage.selected();
                 selected["counted_input_tokens"] =
                     json!(observation.counted_input_tokens.map(|n| n.to_string()));
-                let resolution = json!({"pricing_version":pricing.pricing_version,"categories":pricing.rates.iter().filter_map(|rate|{let tokens=match rate.category.as_str(){"input"=>pricing.billable_input(usage).ok()?,"output"=>usage.output_tokens,"cache_read"=>usage.cache_read_tokens,"cache_write"|"cache_write_5m"=>usage.cache_write_tokens,_=>return None};Some(json!({"category":rate.category,"tokens":tokens.to_string(),"rate":rate.usd_per_million_tokens}))}).collect::<Vec<_>>(),"rounding_version":pricing.rounding_version,"cost_usd":price.as_ref().ok().map(|n|n.to_string()),"unresolved_reason":if price.is_err(){Some("price_unresolved")}else{None}});
+                let resolution = json!({"pricing_version":pricing.pricing_version,"categories":pricing.resolution_categories(Some(usage)),"rounding_version":pricing.rounding_version,"cost_usd":price.as_ref().ok().map(|n|n.to_string()),"unresolved_reason":if price.is_err(){Some("price_unresolved")}else{None}});
                 sqlx::query("INSERT INTO gw_usage_events(request_id,kind,actual_model,provider_usage,normalized_usage,pricing_resolution,reason_code,content_digest) VALUES($1,'late_final',$2,$3,$4,$5,$6,$7)").bind(id).bind(&usage.actual_model).bind(pricing.provider_usage(usage)).bind(selected).bind(resolution).bind(observation.reason).bind(&digest).execute(&mut *tx).await?;
                 if let Some(reason) = reason {
                     self.pause(&mut tx, &p, &r, id, reason).await?;
@@ -1358,14 +1411,15 @@ impl PgLedger {
             };
             if let Some((output, source, why)) = way {
                 cutoff = Some((
-                    FinalUsage {
-                        actual_model: start.actual_model.clone(),
-                        input_tokens: start.input_tokens,
-                        output_tokens: output,
-                        cache_read_tokens: start.cache_read_tokens,
-                        cache_write_tokens: start.cache_write_tokens,
-                        reasoning_tokens: None,
-                    },
+                    FinalUsage::new(
+                        start.actual_model.clone(),
+                        start
+                            .tokens
+                            .iter()
+                            .filter(|(c, _)| *c != UsageCategory::Output)
+                            .chain([(UsageCategory::Output, output)]),
+                        None,
+                    ),
                     source,
                     why,
                 ));
@@ -1381,7 +1435,7 @@ impl PgLedger {
             Some(Amount::ZERO)
         } else if let Some(usage) = priced {
             let price = pricing.price(usage, false);
-            safety = final_safety_violation_with_pricing(usage, &pricing, &price, &execution)?;
+            safety = final_safety_violation(usage, &price, &execution)?;
             price.ok()
         } else {
             None
@@ -1409,7 +1463,16 @@ impl PgLedger {
             };
             (
                 source,
-                json!({"source":source,"actual_model":null,"input_tokens":"0","output_tokens":"0","cache_read_tokens":"0","cache_write_tokens":"0","reasoning_tokens":null,"counted_input_tokens":if free{observation.counted_input_tokens.map(|n|n.to_string())}else{None}}),
+                {
+                    let mut record =
+                        usage_record(source, None, Some(&UsageTokens::default()), None);
+                    record["counted_input_tokens"] = json!(if free {
+                        observation.counted_input_tokens.map(|n| n.to_string())
+                    } else {
+                        None
+                    });
+                    record
+                },
                 json!({}),
                 Some((0, 0)),
             )
@@ -1433,23 +1496,18 @@ impl PgLedger {
             selected["source"] = json!(source);
             selected["cutoff_rule"] = execution["cutoff_rule"].clone();
             selected["cutoff_fallback_reason"] = json!(why);
-            (
-                *source,
-                selected,
-                json!({"input_tokens":u.input_tokens,"cache_read_input_tokens":u.cache_read_tokens,"cache_creation_input_tokens":u.cache_write_tokens}),
-                tokens,
-            )
+            (*source, selected, anthropic_usage(&u.tokens, None), tokens)
         } else if no_response {
             (
                 "no_response",
-                json!({"source":"no_response","actual_model":null,"input_tokens":"0","output_tokens":"0","cache_read_tokens":"0","cache_write_tokens":"0","reasoning_tokens":null,"counted_input_tokens":null}),
+                usage_record("no_response", None, Some(&UsageTokens::default()), None),
                 json!({}),
                 Some((0, 0)),
             )
         } else {
             (
                 "provider",
-                json!({"source":"provider","actual_model":null,"input_tokens":null,"output_tokens":null,"cache_read_tokens":null,"cache_write_tokens":null,"reasoning_tokens":null,"counted_input_tokens":null}),
+                usage_record("provider", None, None, None),
                 json!({}),
                 None,
             )
@@ -1554,7 +1612,7 @@ impl PgLedger {
         } else {
             "partial"
         };
-        let resolution = json!({"pricing_version":pricing.pricing_version,"categories":pricing.rates.iter().filter_map(|rate|if source=="provider"{observation.usage.as_ref()}else{cutoff.as_ref().map(|(u,_,_)|u)}.and_then(|u|{let n=match rate.category.as_str(){"input"=>pricing.billable_input(u).ok()?,"output"=>u.output_tokens,"cache_read"=>u.cache_read_tokens,"cache_write"|"cache_write_5m"=>u.cache_write_tokens,_=>return None};Some(json!({"category":rate.category,"tokens":n.to_string(),"rate":rate.usd_per_million_tokens}))})).collect::<Vec<_>>(),"rounding_version":pricing.rounding_version,"cost_usd":amount.map(|n|n.to_string()),"unresolved_reason":if amount.is_none(){Some(reason)}else{None}});
+        let resolution = json!({"pricing_version":pricing.pricing_version,"categories":pricing.resolution_categories(if source=="provider"{observation.usage.as_ref()}else{cutoff.as_ref().map(|(u,_,_)|u)}),"rounding_version":pricing.rounding_version,"cost_usd":amount.map(|n|n.to_string()),"unresolved_reason":if amount.is_none(){Some(reason)}else{None}});
         sqlx::query("INSERT INTO gw_usage_events(request_id,kind,actual_model,provider_usage,normalized_usage,pricing_resolution,reason_code,content_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(kind).bind(if source=="provider"{observation.usage.as_ref().map(|u|u.actual_model.as_str())}else{cutoff.as_ref().map(|(u,_,_)|u.actual_model.as_str())}).bind(provider_usage).bind(usage).bind(resolution).bind(reason).bind(&digest).execute(&mut *tx).await?;
         sqlx::query("UPDATE gw_requests SET phase='finished',outcome=$2,accounting_state=$3,cost_usd=($4::numeric),finished_at=$9::timestamptz,provider_request_id=$5,http_status=$6,reason_code=$7,result_digest=$8,version=version+1 WHERE id=$1")
             .bind(id).bind(outcome).bind(state).bind(amount.map(|n|n.to_string())).bind(&observation.provider_request_id).bind(observation.http_status.map(|n|n as i16)).bind(reason).bind(&digest).bind(r.get::<String,_>("db_now")).execute(&mut *tx).await?;
@@ -1796,35 +1854,94 @@ mod snapshot_tests {
             assert!(read_grants(bad).is_err());
         }
     }
+    use UsageCategory::*;
+    fn usage(tokens: &[(UsageCategory, u64)]) -> FinalUsage {
+        FinalUsage::new("synthetic-text", tokens.iter().copied(), None)
+    }
     #[test]
     fn normalized_tokens_fit_the_bigint_rate_accumulator() {
-        let u = FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: i64::MAX as u64,
-            output_tokens: 1,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        };
+        let u = usage(&[(Input, i64::MAX as u64), (Output, 1)]);
         assert!(
             u.checked_tokens().is_err(),
             "combined normalized tokens overflowed the bigint rate lane"
         );
+        // 분당 토큰 한도의 입력은 input과 모든 캐시 칸의 합이다.
+        let u = usage(&[
+            (Input, 1),
+            (Output, 2),
+            (CacheRead, 3),
+            (CacheWrite5m, 4),
+            (CacheWrite1h, 5),
+        ]);
+        assert_eq!(u.checked_tokens(), Ok((13, 2)));
+    }
+    #[test]
+    fn duplicate_categories_are_malformed() {
+        assert!(FinalUsage::from_list("m".into(), vec![(Input, 1), (Input, 2)], None).is_none());
+        let u = FinalUsage::from_list("m".into(), vec![(Input, 1), (CacheRead, 0)], None).unwrap();
+        assert_eq!((u.get(Input), u.get(CacheRead), u.get(Output)), (1, 0, 0));
+    }
+    fn anthropic(rates: serde_json::Value) -> PricingSnapshot {
+        let profile: ModelProfile = serde_json::from_value(json!({"model":"synthetic-text","api":"messages","profile_version":"fixture-v1","pricing_version":"price-v1","fixture_version":"text-v1","actual_models":["synthetic-text"],"features":["cache"],"max_input_tokens":4096,"max_output_tokens":4096,"max_body_bytes":8388608,"max_response_bytes":16777216,"rates":rates})).unwrap();
+        PricingSnapshot::from_profile(ProviderId::Anthropic, &profile)
+    }
+    #[test]
+    fn categories_are_priced_separately_and_unpriced_tokens_are_unknown() {
+        let both = anthropic(
+            json!({"input":"1.000000000000","output":"2.000000000000","cache_read":"0.100000000000","cache_write_5m":"1.250000000000","cache_write_1h":"2.000000000000"}),
+        );
+        assert_eq!(both.cache_tier_rules, "explicit_categories_v1");
+        let u = usage(&[
+            (Input, 1_000_000),
+            (Output, 1_000_000),
+            (CacheRead, 1_000_000),
+            (CacheWrite5m, 1_000_000),
+            (CacheWrite1h, 1_000_000),
+        ]);
+        assert_eq!(both.price(&u, false).unwrap().to_string(), "6.350000000000");
+        let five = anthropic(
+            json!({"input":"1.000000000000","output":"2.000000000000","cache_read":"0.100000000000","cache_write_5m":"1.250000000000"}),
+        );
+        // 1시간 캐시 쓰기 단가가 없으면 5분 단가로 대신하지 않는다.
+        assert_eq!(five.price(&u, false), Err(LedgerError::InvalidSnapshot));
+        let without_1h = usage(&[(Input, 1_000_000), (CacheWrite5m, 1_000_000)]);
+        assert_eq!(
+            five.price(&without_1h, false).unwrap().to_string(),
+            "2.250000000000"
+        );
+        // Anthropic messages가 알리지 않은 칸(`cache_write`)에 토큰이 있으면 금액을 정하지 않는다.
+        assert_eq!(
+            both.price(&usage(&[(Input, 1), (CacheWrite, 1)]), false),
+            Err(LedgerError::InvalidSnapshot)
+        );
+        // 알리지 않은 칸도 0이면 없는 칸이다.
+        assert!(
+            both.price(&usage(&[(Input, 1), (CacheWrite, 0)]), false)
+                .is_ok()
+        );
+        // Anthropic snapshot에는 `cache_write` 단가를 둘 수 없다.
+        let mut legacy = five.clone();
+        legacy.rates.push(PriceRate {
+            category: "cache_write".into(),
+            usd_per_million_tokens: "1.000000000000".into(),
+        });
+        assert_eq!(legacy.validate(), Err(LedgerError::InvalidSnapshot));
+        let mut removed = five;
+        removed.cache_tier_rules = "anthropic_5m_v1".into();
+        assert_eq!(removed.validate(), Err(LedgerError::InvalidSnapshot));
     }
     #[test]
     fn final_safety_violation_shares_token_cost_and_overflow_precedence() {
         let execution = execution();
-        let usage = FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: 4094,
-            output_tokens: 100,
-            cache_read_tokens: 1,
-            cache_write_tokens: 1,
-            reasoning_tokens: None,
-        };
+        let base = usage(&[
+            (Input, 4094),
+            (Output, 100),
+            (CacheRead, 1),
+            (CacheWrite5m, 1),
+        ]);
         let price = Ok(Amount::ZERO);
         assert_eq!(
-            final_safety_violation(&usage, &price, &execution).unwrap(),
+            final_safety_violation(&base, &price, &execution).unwrap(),
             None
         );
         for (input, output, cache_read, cache_write) in [
@@ -1833,14 +1950,12 @@ mod snapshot_tests {
             (4094, 0, 1, 2),
             (10, 101, 0, 0),
         ] {
-            let u = FinalUsage {
-                input_tokens: input,
-                output_tokens: output,
-                cache_read_tokens: cache_read,
-                cache_write_tokens: cache_write,
-                reasoning_tokens: None,
-                ..usage.clone()
-            };
+            let u = usage(&[
+                (Input, input),
+                (Output, output),
+                (CacheRead, cache_read),
+                (CacheWrite1h, cache_write),
+            ]);
             assert_eq!(
                 final_safety_violation(&u, &price, &execution).unwrap(),
                 Some("cost_bound_violation")
@@ -1852,21 +1967,17 @@ mod snapshot_tests {
         }
         let cost = Ok("0.004296000001".parse().unwrap());
         assert_eq!(
-            final_safety_violation(&usage, &cost, &execution).unwrap(),
+            final_safety_violation(&base, &cost, &execution).unwrap(),
             Some("cost_bound_violation")
         );
-        let overflow = FinalUsage {
-            input_tokens: i64::MAX as u64,
-            ..usage.clone()
-        };
+        let mut overflow = base.clone();
+        overflow.tokens.set(Input, i64::MAX as u64);
         assert_eq!(
             final_safety_violation(&overflow, &cost, &execution).unwrap(),
             Some("amount_overflow")
         );
-        let overflow = FinalUsage {
-            cache_read_tokens: u64::MAX,
-            ..usage
-        };
+        let mut overflow = base;
+        overflow.tokens.set(CacheRead, u64::MAX);
         assert_eq!(
             final_safety_violation(&overflow, &price, &execution).unwrap(),
             Some("amount_overflow")

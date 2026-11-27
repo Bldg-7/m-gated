@@ -59,6 +59,7 @@ const PATHS: &[&str] = &[
     "/api/admin/model-catalog",
     "/api/admin/model-catalog/sync",
     "/api/admin/model-catalog/approve",
+    "/api/admin/model-catalog/rates",
     "/api/admin/usage",
     "/api/admin/requests",
     "/api/admin/requests/models",

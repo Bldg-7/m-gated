@@ -9,7 +9,7 @@
 use super::transport::UpstreamError;
 use crate::{
     config::{ApiKind, ModelProfile, NativeFeature, ProviderId, StartupError},
-    ledger::finance::{FinalUsage, StartUsage},
+    ledger::finance::{FinalUsage, StartUsage, UsageCategory},
     stream::{Event, SseDecoder},
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
@@ -66,7 +66,8 @@ pub trait Provider: Sync {
             ("x-request-id", HeaderRule::Id),
         ]
     }
-    /// 캐시 기능을 쓰는 카탈로그 모델에 필요한 캐시 쓰기 가격 항목. 없으면 None이다.
+    /// 캐시 기능을 쓰는 카탈로그 모델에 필요한 캐시 쓰기 가격 항목. models.dev의 캐시 쓰기 가격을
+    /// 이 칸에 넣는다(결정 0012). 없으면 None이고, 동기화는 그 가격을 쓰지 않는다.
     fn cache_write_rate(&self) -> Option<&'static str> {
         None
     }
@@ -179,6 +180,9 @@ pub trait Api: Sync {
     }
     /// 가격표 snapshot에 남기는 토큰 포함 규칙 이름.
     fn token_rule(&self, profile: &ModelProfile) -> &'static str;
+    /// 이 API의 사용량이 가질 수 있는 사용량 칸(결정 0012). profile의 가격 항목도 이 칸만 쓴다.
+    /// 사용량에 이 목록에 없는 칸의 토큰이 있으면 응답 형식 오류로 보고 금액을 정하지 않는다.
+    fn usage_categories(&self) -> &'static [UsageCategory];
     /// 카탈로그 정책(모델과 가격을 DB에서 관리)을 쓸 수 있는지.
     fn catalog(&self) -> bool {
         false
@@ -195,6 +199,10 @@ pub trait StreamReader: Send {
     /// 시작 event가 알린 입력 사용량. 끊긴 요청의 입력 토큰이다.
     fn start(&self) -> Option<StartUsage> {
         None
+    }
+    /// 사용량을 받았지만 칸별 단가를 고를 수 없는지(결정 0012). 응답은 그대로 전달하고, 비용은 unknown이다.
+    fn unpriced(&self) -> bool {
+        false
     }
     /// Provider가 실패를 알렸는지(오류 event, 실패 끝 event).
     fn provider_error(&self) -> bool;
@@ -258,17 +266,9 @@ impl From<kit::ReadError> for UpstreamError {
         }
     }
 }
-impl From<kit::Usage> for FinalUsage {
-    fn from(u: kit::Usage) -> Self {
-        Self {
-            actual_model: u.actual_model,
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cache_read_tokens: u.cache_read_tokens,
-            cache_write_tokens: u.cache_write_tokens,
-            reasoning_tokens: u.reasoning_tokens,
-        }
-    }
+/// 어댑터 crate가 알린 사용량. 같은 칸이 두 번 나오면 형식 오류(None)다.
+pub fn final_usage(u: kit::Usage) -> Option<FinalUsage> {
+    FinalUsage::from_list(u.actual_model, u.tokens, u.reasoning_tokens)
 }
 impl From<kit::ProfileError> for StartupError {
     fn from(e: kit::ProfileError) -> Self {

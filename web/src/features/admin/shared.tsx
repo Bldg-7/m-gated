@@ -46,6 +46,8 @@ export function ReadState({ loading, error, reload, asOf }: { loading: boolean; 
  * noBody: 본문 없이 보낸다(DELETE와 같음). body는 확인 창에 보여 줄 내용으로만 쓴다.
  */
 export type Action = { label: string; url: string; method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'; body: Record<string, unknown>; danger?: boolean; noBody?: true };
+/** 게이트웨이의 사용량 칸(결정 0012)과 화면 이름. 가격 칸과 같은 목록이며 이 순서로 보인다. */
+export const usageCategoryNames: [string, string][] = [['input', msgid('입력')], ['output', msgid('출력')], ['cache_read', msgid('캐시 읽기')], ['cache_write', msgid('캐시 쓰기')], ['cache_write_5m', msgid('캐시 쓰기 5분')], ['cache_write_1h', msgid('캐시 쓰기 1시간')]];
 export function useCommand(onRead: (ack?: CommandAck) => Promise<void>) {
   const { t } = useTranslation();
   const [pending, setPending] = useState<Action | null>(null), [busy, setBusy] = useState(false), [message, setMessage] = useState<string | null>(null);

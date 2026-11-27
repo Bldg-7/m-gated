@@ -6,7 +6,7 @@
 use super::{
     PgLedger,
     amount::Amount,
-    finance::{FinalUsage, LedgerError, PricingSnapshot},
+    finance::{FinalUsage, LedgerError, PricingSnapshot, UsageCategory},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -75,16 +75,16 @@ pub struct WindowRequest {
     pub sent_ms: i64,
     pub ended_ms: Option<i64>,
     pub known: Known,
-    /// 입력(캐시 제외), 캐시 읽기, 캐시 쓰기, 출력.
-    pub tokens: [u64; 4],
+    /// 입력(캐시 제외), 캐시 읽기, 5분 캐시 쓰기, 1시간 캐시 쓰기, 출력.
+    pub tokens: [u64; 5],
     pub max_tokens: Option<u64>,
     pub corrected: bool,
 }
 /// 모델별 가격(카테고리 → 백만 토큰당 USD). 차이 금액을 지금 카탈로그 가격으로 환산할 때 쓴다.
 pub type Prices = BTreeMap<String, BTreeMap<String, String>>;
 
-/// 토큰 종류. 배열 순서는 이 순서다. 게이트웨이는 캐시 쓰기를 5분과 1시간으로 나누지 않으므로
-/// 게이트웨이 쪽 값은 캐시 쓰기 합계를 5분 자리에 두고 1시간 자리는 0으로 둔다.
+/// 토큰 종류. 배열 순서는 이 순서다. 게이트웨이도 사용량 보고서처럼 캐시 쓰기를 5분과 1시간으로
+/// 나눠 기록하므로 종류마다 따로 비교한다(결정 0012).
 const KINDS: [&str; 5] = [
     "input",
     "cache_write_5m",
@@ -134,18 +134,8 @@ fn price(prices: &Prices, model: &str, tokens: &Tokens) -> Option<Amount> {
         if tokens[i] == 0 {
             continue;
         }
-        // 1시간 캐시 쓰기 가격이 없으면 5분 가격을 쓴다.
-        let names: &[&str] = match *kind {
-            "cache_write_5m" => &["cache_write_5m", "cache_write"],
-            "cache_write_1h" => &["cache_write_1h", "cache_write_5m", "cache_write"],
-            "input" => &["input"],
-            "cache_read" => &["cache_read"],
-            _ => &["output"],
-        };
-        let rate: Amount = names
-            .iter()
-            .find_map(|n| rates.get(*n))
-            .and_then(|r| r.parse().ok())?;
+        // 그 종류의 가격만 쓴다. 다른 종류의 가격으로 대신하지 않는다(결정 0012).
+        let rate: Amount = rates.get(*kind).and_then(|r| r.parse().ok())?;
         items.push((tokens[i], rate));
     }
     Amount::price(items, false).ok()
@@ -328,7 +318,7 @@ impl PgLedger {
                 .await?;
         }
         let usage_sql = format!(
-            "INSERT INTO gw_gateway_usage(api_key_id,model,hour_start,input_tokens,cache_write_tokens,cache_read_tokens,output_tokens,cutoff_requests,corrected_requests) SELECT m.api_key_id,e.actual_model,to_timestamp(floor(extract(epoch FROM {usage_column})/3600)*3600),sum(coalesce((e.normalized_usage->>'input_tokens')::bigint,0)),sum(coalesce((e.normalized_usage->>'cache_write_tokens')::bigint,0)),sum(coalesce((e.normalized_usage->>'cache_read_tokens')::bigint,0)),sum(coalesce((c.normalized_usage->>'output_tokens')::bigint,(e.normalized_usage->>'output_tokens')::bigint,0)),count(*) FILTER(WHERE e.normalized_usage->>'source' IN ('cutoff_received','cutoff_max_tokens')),count(c.id) FROM gw_requests r JOIN gw_provider_key_ids m ON m.credential_id=r.provider_credential_id JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' AND e.actual_model IS NOT NULL LEFT JOIN gw_usage_events c ON c.request_id=r.id AND c.kind='correction' WHERE r.phase='finished' AND r.accounting_state='settled' AND r.provider='anthropic' AND r.api='messages' AND m.api_key_id=ANY($3) AND {usage_filter} GROUP BY 1,2,3"
+            "INSERT INTO gw_gateway_usage(api_key_id,model,hour_start,input_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cache_read_tokens,output_tokens,cutoff_requests,corrected_requests) SELECT m.api_key_id,e.actual_model,to_timestamp(floor(extract(epoch FROM {usage_column})/3600)*3600),sum(coalesce((e.normalized_usage->>'input_tokens')::bigint,0)),sum(coalesce((e.normalized_usage->>'cache_write_5m_tokens')::bigint,0)),sum(coalesce((e.normalized_usage->>'cache_write_1h_tokens')::bigint,0)),sum(coalesce((e.normalized_usage->>'cache_read_tokens')::bigint,0)),sum(coalesce((c.normalized_usage->>'output_tokens')::bigint,(e.normalized_usage->>'output_tokens')::bigint,0)),count(*) FILTER(WHERE e.normalized_usage->>'source' IN ('cutoff_received','cutoff_max_tokens')),count(c.id) FROM gw_requests r JOIN gw_provider_key_ids m ON m.credential_id=r.provider_credential_id JOIN gw_usage_events e ON e.request_id=r.id AND e.kind='final' AND e.actual_model IS NOT NULL LEFT JOIN gw_usage_events c ON c.request_id=r.id AND c.kind='correction' WHERE r.phase='finished' AND r.accounting_state='settled' AND r.provider='anthropic' AND r.api='messages' AND m.api_key_id=ANY($3) AND {usage_filter} GROUP BY 1,2,3"
         );
         // 사용량을 모르는 요청: 정산하지 못했거나(unknown·실행 중), 정산했지만 Provider 사용량 기록이 없다(관리자가 금액만 정한 요청).
         // HTTP 오류 등으로 0원 정산한 요청은 규칙으로 정산했으므로 넣지 않는다.
@@ -438,7 +428,7 @@ impl PgLedger {
                     );
                 }
             }
-            for r in sqlx::query("SELECT api_key_id,model,extract(epoch FROM hour_start)::bigint AS hour,input_tokens,cache_write_tokens,cache_read_tokens,output_tokens,cutoff_requests,corrected_requests FROM gw_gateway_usage WHERE hour_start>=to_timestamp($1) AND hour_start<to_timestamp($2)")
+            for r in sqlx::query("SELECT api_key_id,model,extract(epoch FROM hour_start)::bigint AS hour,input_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cache_read_tokens,output_tokens,cutoff_requests,corrected_requests FROM gw_gateway_usage WHERE hour_start>=to_timestamp($1) AND hour_start<to_timestamp($2)")
                 .bind(from)
                 .bind(to)
                 .fetch_all(pool)
@@ -456,8 +446,8 @@ impl PgLedger {
                     key,
                     [
                         token(&r, "input_tokens"),
-                        token(&r, "cache_write_tokens"),
-                        0,
+                        token(&r, "cache_write_5m_tokens"),
+                        token(&r, "cache_write_1h_tokens"),
                         token(&r, "cache_read_tokens"),
                         token(&r, "output_tokens"),
                     ],
@@ -507,22 +497,12 @@ impl PgLedger {
         for key in keys {
             let p = provider.get(&key).copied().unwrap_or_default();
             let g = gateway.get(&key).copied().unwrap_or_default();
-            // 캐시 쓰기는 5분과 1시간을 합쳐 비교하고, 더 많은 몫은 1시간 쓰기부터 채운다.
-            let pairs = [
-                (p[0], g[0]),
-                (p[1].saturating_add(p[2]), g[1]),
-                (0, 0),
-                (p[3], g[3]),
-                (p[4], g[4]),
-            ];
             let mut more: Tokens = [0; 5];
             let mut less: Tokens = [0; 5];
-            for (i, (pv, gv)) in pairs.into_iter().enumerate() {
-                more[i] = pv.saturating_sub(gv);
-                less[i] = gv.saturating_sub(pv);
+            for i in 0..5 {
+                more[i] = p[i].saturating_sub(g[i]);
+                less[i] = g[i].saturating_sub(p[i]);
             }
-            more[2] = more[1].min(p[2]);
-            more[1] -= more[2];
             let sum = rows.entry((key.0.clone(), key.1.clone())).or_default();
             add(&mut sum.provider, &p);
             add(&mut sum.gateway, &g);
@@ -706,7 +686,8 @@ impl PgLedger {
                     tokens: [
                         usage_number(&usage, "input_tokens"),
                         usage_number(&usage, "cache_read_tokens"),
-                        usage_number(&usage, "cache_write_tokens"),
+                        usage_number(&usage, "cache_write_5m_tokens"),
+                        usage_number(&usage, "cache_write_1h_tokens"),
                         usage_number(&usage, "output_tokens"),
                     ],
                     max_tokens: r
@@ -756,16 +737,21 @@ impl PgLedger {
         let pricing: PricingSnapshot = serde_json::from_value(r.get("pricing_snapshot"))
             .map_err(|_| LedgerError::InvalidSnapshot)?;
         let previous_output = usage_number(&usage, "output_tokens");
-        let corrected_usage = FinalUsage {
-            actual_model: event
+        // 출력만 고치고 다른 칸은 기록한 그대로 둔다.
+        let corrected_usage = FinalUsage::new(
+            event
                 .get::<Option<String>, _>("actual_model")
                 .ok_or(LedgerError::InvalidSnapshot)?,
-            input_tokens: usage_number(&usage, "input_tokens"),
-            output_tokens: output,
-            cache_read_tokens: usage_number(&usage, "cache_read_tokens"),
-            cache_write_tokens: usage_number(&usage, "cache_write_tokens"),
-            reasoning_tokens: None,
-        };
+            UsageCategory::ALL.map(|c| {
+                let n = if c == UsageCategory::Output {
+                    output
+                } else {
+                    usage_number(&usage, &format!("{}_tokens", c.name()))
+                };
+                (c, n)
+            }),
+            None,
+        );
         let cost = pricing.price(&corrected_usage, false)?;
         let previous_cost: String =
             sqlx::query_scalar("SELECT cost_usd::text FROM gw_requests WHERE id=$1")

@@ -6,7 +6,7 @@ use super::{
 use crate::{
     config::{ApiKind, ModelProfile, ProviderId, StartupError},
     json::TokioYield,
-    ledger::finance::FinalUsage,
+    ledger::finance::{FinalUsage, UsageCategory},
     stream::{Event, SseDecoder},
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
@@ -88,7 +88,7 @@ impl Api for Chat {
         Box::pin(async move {
             let r = adapter::read_with(status.as_u16(), body, &mut TokioYield).await?;
             Ok(Reading {
-                usage: r.usage.map(Into::into),
+                usage: r.usage.and_then(port::final_usage),
                 counted_input_tokens: None,
                 failed: r.failed,
             })
@@ -100,6 +100,9 @@ impl Api for Chat {
     fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
         adapter::TOKEN_RULE
     }
+    fn usage_categories(&self) -> &'static [UsageCategory] {
+        adapter::USAGE_CATEGORIES
+    }
 }
 struct Stream(adapter::Stream);
 impl port::StreamReader for Stream {
@@ -110,13 +113,13 @@ impl port::StreamReader for Stream {
         Ok(self.0.accept(event)?)
     }
     fn final_usage(&self) -> Option<FinalUsage> {
-        self.0.final_usage().map(Into::into)
+        self.0.final_usage().and_then(port::final_usage)
     }
     fn provider_error(&self) -> bool {
         self.0.provider_error()
     }
     fn close(&self) -> Result<(Option<FinalUsage>, bool), UpstreamError> {
         let (usage, failed) = self.0.close()?;
-        Ok((usage.map(Into::into), failed))
+        Ok((usage.and_then(port::final_usage), failed))
     }
 }

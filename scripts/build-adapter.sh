@@ -34,8 +34,8 @@ if grep -qE '^[[:space:]]*import[[:space:]]' <<<"$WIT"; then
   echo "$WIT" >&2
   exit 1
 fi
-if ! grep -qE '^[[:space:]]*export m-gated:adapter/provider@0\.1\.0;' <<<"$WIT"; then
-  echo "컴포넌트가 m-gated:adapter/provider@0.1.0을 내보내지 않는다:" >&2
+if ! grep -qE '^[[:space:]]*export m-gated:adapter/provider@0\.2\.0;' <<<"$WIT"; then
+  echo "컴포넌트가 m-gated:adapter/provider@0.2.0을 내보내지 않는다:" >&2
   echo "$WIT" >&2
   exit 1
 fi

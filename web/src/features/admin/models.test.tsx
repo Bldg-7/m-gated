@@ -25,7 +25,7 @@ test('sync_shows_old_and_new_values_and_approves_only_checked_items', async () =
     if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
     if (url === '/api/admin/model-catalog/sync') return Promise.resolve(response({ command_id: 'c1', operation: 'sync_model_catalog', proposal_id: 'p1', result_version: '1', effect: 'changed', replayed: false, proposal }, 201));
     if (url === '/api/admin/model-catalog/approve') { version = '2'; return Promise.resolve(response({ command_id: 'c2', operation: 'approve_model_catalog', proposal_id: 'p1', result_version: '2', effect: 'changed', replayed: false })); }
-    if (url === '/api/admin/model-catalog') return Promise.resolve(response({ version, approved_at: '2026-11-13T00:00:00Z', approved_by_email: 'admin@example.test', entries: version === '1' ? [opusOld] : [opusNew, haiku], providers: [{ provider: 'anthropic', api: 'messages', model_prefixes: ['claude-'], required_rates: ['input'] }] }));
+    if (url === '/api/admin/model-catalog') return Promise.resolve(response({ version, approved_at: '2026-11-13T00:00:00Z', approved_by_email: 'admin@example.test', entries: version === '1' ? [opusOld] : [opusNew, haiku], providers: [{ provider: 'anthropic', api: 'messages', model_prefixes: ['claude-'], required_rates: ['input'], usage_categories: ['input', 'output', 'cache_read', 'cache_write_5m', 'cache_write_1h'] }] }));
     return Promise.resolve(response({ error: { code: 'resource_not_found' } }, 404));
   }));
   render(<App />);
@@ -79,4 +79,40 @@ test('stale_proposal_is_reported_and_not_retried', async () => {
   fireEvent.click(await screen.findByRole('button', { name: '고른 1개 승인' }));
   await screen.findByText(/이 변경안을 만든 뒤 카탈로그가 바뀌었습니다/);
   expect(approves).toBe(1);
+});
+
+test('rates_form_sends_each_declared_category_and_an_empty_field_clears_the_rate', async () => {
+  history.replaceState(null, '', '/dashboard/admin/models');
+  const calls: { url: string; method: string; body?: Record<string, unknown> }[] = [];
+  let version = '1';
+  const providers = [{ provider: 'anthropic', api: 'messages', model_prefixes: ['claude-'], required_rates: ['input', 'output', 'cache_read', 'cache_write_5m'], usage_categories: ['input', 'output', 'cache_read', 'cache_write_5m', 'cache_write_1h'] }];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    if (url === '/api/me') return Promise.resolve(response(me));
+    if (url === '/api/csrf') return Promise.resolve(response({ token: 'csrf' }));
+    if (url === '/api/admin/model-catalog/rates') { version = '2'; return Promise.resolve(response({ command_id: 'c1', operation: 'edit_model_catalog_rates', target: { kind: 'catalog', id: 'v2' }, result_version: '2', effect: 'changed', replayed: false })); }
+    if (url === '/api/admin/model-catalog') return Promise.resolve(response({ version, approved_at: '2026-11-13T00:00:00Z', approved_by_email: 'admin@example.test', entries: version === '1' ? [opusOld] : [{ ...opusOld, rates: { ...opusOld.rates, cache_write_1h: '8.000000000000' } }], providers }));
+    return Promise.resolve(response({ error: { code: 'resource_not_found' } }, 404));
+  }));
+  render(<App />);
+  const table = await screen.findByRole('region', { name: '현재 카탈로그' });
+  // 그 API가 알린 칸만 열로 보인다. 사는 시간과 관계없는 캐시 쓰기 칸은 Anthropic에 없다.
+  expect(within(table).getByRole('columnheader', { name: '캐시 쓰기 1시간' })).toBeTruthy();
+  expect(within(table).queryByRole('columnheader', { name: '캐시 쓰기' })).toBeNull();
+  fireEvent.click(within(table).getByRole('button', { name: 'claude-opus-5-5 단가 고치기' }));
+  const dialog = await screen.findByRole('dialog', { name: 'claude-opus-5-5 단가 고치기' });
+  const field = (name: string) => within(dialog).getByLabelText(name) as HTMLInputElement;
+  expect(['입력', '출력', '캐시 읽기', '캐시 쓰기 5분', '캐시 쓰기 1시간'].map(name => field(name).value)).toEqual(['5', '20', '0.2', '5', '']);
+  // 형식이 틀리면 보내지 않는다.
+  fireEvent.change(field('캐시 쓰기 1시간'), { target: { value: '1.2.3' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '단가 저장' }));
+  expect(within(dialog).getByRole('alert').textContent).toContain('캐시 쓰기 1시간 단가는');
+  expect(calls.some(c => c.url.endsWith('/rates'))).toBe(false);
+  fireEvent.change(field('캐시 쓰기 1시간'), { target: { value: '8' } });
+  fireEvent.change(field('캐시 읽기'), { target: { value: '' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '단가 저장' }));
+  await screen.findByText('현재 카탈로그 · 버전 2');
+  const sent = calls.find(c => c.url.endsWith('/rates'))!;
+  expect(sent.method).toBe('PUT');
+  expect(sent.body).toEqual({ provider: 'anthropic', model: 'claude-opus-5-5', rates: { input: '5', output: '20', cache_read: null, cache_write_5m: '5', cache_write_1h: '8' }, expected_version: '1' });
 });

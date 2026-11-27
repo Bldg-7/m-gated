@@ -9,7 +9,8 @@ CREATE TABLE gw_model_catalog_proposals (
 );
 CREATE TABLE gw_model_catalog_versions (
  version bigint PRIMARY KEY CHECK(version>0),
- proposal_id uuid NOT NULL REFERENCES gw_model_catalog_proposals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+ -- 관리자가 단가를 직접 고쳐 만든 버전(결정 0012)은 변경안이 없다.
+ proposal_id uuid REFERENCES gw_model_catalog_proposals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
  approved_by uuid NOT NULL REFERENCES gw_principals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
  approved_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  entries jsonb NOT NULL CHECK(jsonb_typeof(entries)='array' AND jsonb_array_length(entries)<=512)

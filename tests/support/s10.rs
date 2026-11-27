@@ -676,7 +676,12 @@ async fn retention_protects_entire_safety_family_then_deletes_child_before_root(
         .unwrap();
     ledger.authorize_dispatch(root.id).await.unwrap();
     let mut violation = observation();
-    violation.usage.as_mut().unwrap().input_tokens = 5000;
+    violation
+        .usage
+        .as_mut()
+        .unwrap()
+        .tokens
+        .set(m_gated::ledger::finance::UsageCategory::Input, 5000);
     ledger.finalize_request(root.id, &violation).await.unwrap();
     let safety:i64=sqlx::query_scalar("SELECT inference_safety_version FROM gw_principals WHERE id=$1 AND inference_paused_at IS NOT NULL AND inference_pause_request_id=$2").bind(principal).bind(root.id).fetch_one(database.pool()).await.unwrap();
     sqlx::query("UPDATE gw_usage_events e SET observed_at=r.admitted_at FROM gw_requests r WHERE r.id=e.request_id").execute(database.pool()).await.unwrap();
@@ -971,7 +976,12 @@ async fn telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_dupli
     ledger.authorize_dispatch(request.id).await.unwrap();
     let before = telemetry::get(Metric::AlarmBound);
     let mut final_usage = observation();
-    final_usage.usage.as_mut().unwrap().input_tokens = 5000;
+    final_usage
+        .usage
+        .as_mut()
+        .unwrap()
+        .tokens
+        .set(m_gated::ledger::finance::UsageCategory::Input, 5000);
     let finalized = ledger
         .finalize_request(request.id, &final_usage)
         .await
@@ -1562,7 +1572,12 @@ async fn telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_rea
         let ledger = PgLedger::new(faulty.clone(), [1; 32]);
         let mut final_usage = observation();
         if bound {
-            final_usage.usage.as_mut().unwrap().input_tokens = 5000;
+            final_usage
+                .usage
+                .as_mut()
+                .unwrap()
+                .tokens
+                .set(m_gated::ledger::finance::UsageCategory::Input, 5000);
         } else {
             final_usage.usage = None;
         }

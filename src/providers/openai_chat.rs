@@ -7,7 +7,7 @@ use super::{
 use crate::{
     config::{ApiKind, ModelProfile, NativeFeature},
     json::{self, JsonError, Kind, Visitor},
-    ledger::finance::FinalUsage,
+    ledger::finance::{FinalUsage, UsageCategory},
     stream::{Event, Scalar},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -599,14 +599,16 @@ pub(super) fn usage(v: &BTreeMap<String, Scalar>) -> Option<FinalUsage> {
     {
         return None;
     }
-    Some(FinalUsage {
-        actual_model: v.get("model")?.text()?.to_owned(),
-        input_tokens: input,
-        output_tokens: output,
-        cache_read_tokens: cached,
-        cache_write_tokens: 0,
-        reasoning_tokens: Some(reasoning),
-    })
+    // 입력 토큰에는 캐시에서 읽은 입력이 들어 있다. `input` 칸은 캐시가 아닌 입력이다(결정 0012).
+    Some(FinalUsage::new(
+        v.get("model")?.text()?,
+        [
+            (UsageCategory::Input, input - cached),
+            (UsageCategory::Output, output),
+            (UsageCategory::CacheRead, cached),
+        ],
+        Some(reasoning),
+    ))
 }
 /// native 오류는 성공 metadata와 공존할 수 없으며 문자열 본문은 shape만 보관한다.
 pub(super) fn native_error_shape(v: &BTreeMap<String, Scalar>) -> bool {
@@ -796,6 +798,13 @@ impl Api for Chat {
     }
     fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
         "openai_chat_prompt_includes_cache_completion_includes_reasoning_v1"
+    }
+    fn usage_categories(&self) -> &'static [UsageCategory] {
+        &[
+            UsageCategory::Input,
+            UsageCategory::Output,
+            UsageCategory::CacheRead,
+        ]
     }
     fn catalog(&self) -> bool {
         true

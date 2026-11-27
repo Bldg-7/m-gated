@@ -52,16 +52,17 @@ export const iso = (at: number) => new Date(at).toISOString();
 
 // ── 모델·가격 ──
 const entry = (provider: string, model: string, rates: Record<string, string>, max_input_tokens: number, max_output_tokens: number, note: string | null = null): CatalogEntry => ({ provider, model, rates: Object.fromEntries(Object.entries(rates).map(([k, v]) => [k, usd(pico(v))])), max_input_tokens, max_output_tokens, source: 'models_dev', note });
+/** usage_categories: 그 API가 알린 사용량 칸(결정 0012). 단가는 이 칸에만 둔다. */
 export const catalogProviders = [
-  { provider: 'anthropic', api: 'messages', model_prefixes: ['claude-'], required_rates: ['input', 'output', 'cache_read', 'cache_write_5m'] },
-  { provider: 'openai', api: 'responses', model_prefixes: ['gpt-'], required_rates: ['input', 'output', 'cache_read'] },
-  { provider: 'deepseek', api: 'chat_completions', model_prefixes: ['deepseek-'], required_rates: ['input', 'output', 'cache_read'] },
+  { provider: 'anthropic', api: 'messages', model_prefixes: ['claude-'], required_rates: ['input', 'output', 'cache_read', 'cache_write_5m'], usage_categories: ['input', 'output', 'cache_read', 'cache_write_5m', 'cache_write_1h'] },
+  { provider: 'openai', api: 'responses', model_prefixes: ['gpt-'], required_rates: ['input', 'output', 'cache_read'], usage_categories: ['input', 'output', 'cache_read'] },
+  { provider: 'deepseek', api: 'chat_completions', model_prefixes: ['deepseek-'], required_rates: ['input', 'output', 'cache_read'], usage_categories: ['input', 'output', 'cache_read'] },
 ];
 /** Provider 마다 정책에서 고를 수 있는 API. */
 export const capabilities: Record<string, string[]> = { anthropic: ['messages', 'count_tokens'], openai: ['responses', 'chat_completions'], deepseek: ['chat_completions'] };
 const OPUS = 'claude-opus-5-5', HAIKU = 'claude-haiku-5-5', GPT = 'gpt-5.5-mini';
 const approved: CatalogEntry[] = [
-  entry('anthropic', OPUS, { input: '5', output: '25', cache_read: '0.5', cache_write_5m: '6.25' }, 1000000, 128000),
+  entry('anthropic', OPUS, { input: '5', output: '25', cache_read: '0.5', cache_write_5m: '6.25', cache_write_1h: '10' }, 1000000, 128000),
   entry('anthropic', HAIKU, { input: '1', output: '5', cache_read: '0.1', cache_write_5m: '1.25' }, 200000, 64000, 'tier_input_limit:200000'),
   entry('openai', GPT, { input: '0.25', output: '2', cache_read: '0.025' }, 400000, 128000),
   entry('openai', 'gpt-4.1-legacy', { input: '2', output: '8', cache_read: '0.5' }, 1000000, 32000),
@@ -164,7 +165,7 @@ export function createState(): MockState {
     const credentialId = s.credential === undefined ? keys.find(k => k.id === s.key)?.bindings[s.provider] ?? null : s.credential, bound = credentials.find(c => c.id === credentialId);
     const owner = principals.find(p => p.id === s.principal)!, [input, output] = s.tokens ?? [0, 0];
     const cost = s.accounting !== 'settled' ? null : s.outcome === 'completed' || s.manual || s.settledBy?.startsWith('cutoff') ? usd(price(s.provider, s.model, input, s.corrected ?? output)) : usd(0n);
-    const observed = (source: string) => ({ source, actual_model: s.model, input_tokens: String(input), output_tokens: String(output), cache_read_tokens: '0', cache_write_tokens: '0', reasoning_tokens: null, counted_input_tokens: null });
+    const observed = (source: string) => ({ source, actual_model: s.model, input_tokens: String(input), output_tokens: String(output), cache_read_tokens: '0', cache_write_tokens: '0', cache_write_5m_tokens: '0', cache_write_1h_tokens: '0', reasoning_tokens: null, counted_input_tokens: null });
     return {
       id: uid(4, s.n), parent_request_id: s.parent ? uid(4, s.parent) : null, purpose: s.parent ? 'internal_count' : 'root', principal_id: s.principal, key_id: s.key, provider: s.provider, model: s.model, api: s.api,
       admitted_at: iso(admitted), finished_at: finished, phase: s.phase, outcome: s.outcome, accounting_state: s.accounting, cost_usd: cost, version: s.phase === 'finished' ? '3' : s.phase === 'dispatching' ? '2' : '1', reason_code: s.reason ?? null,

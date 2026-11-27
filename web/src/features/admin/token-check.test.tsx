@@ -114,7 +114,7 @@ test('correction_switch_can_still_be_turned_off_after_the_admin_key_is_removed',
 
 test('request_detail_shows_a_corrected_output', async () => {
   history.replaceState(null, '', '/dashboard/admin/requests?request_id=r21');
-  const usage = (source: string, output: string) => ({ source, actual_model: 'claude-opus-5-5', input_tokens: '31000', output_tokens: output, cache_read_tokens: '0', cache_write_tokens: '0', reasoning_tokens: null, counted_input_tokens: null });
+  const usage = (source: string, output: string) => ({ source, actual_model: 'claude-opus-5-5', input_tokens: '31000', output_tokens: output, cache_read_tokens: '0', cache_write_tokens: '0', cache_write_5m_tokens: '1200', cache_write_1h_tokens: '800', reasoning_tokens: null, counted_input_tokens: null });
   const detail = {
     id: 'r21', parent_request_id: null, purpose: 'root', principal_id: 'human1', key_id: 'k1', provider: 'anthropic', model: 'claude-opus-5-5', api: 'messages', admitted_at: '2026-11-24T09:00:00Z', finished_at: '2026-11-24T09:01:00Z', phase: 'finished', outcome: 'cancelled', accounting_state: 'settled', cost_usd: '0.210250000000', version: '4', reason_code: 'client_cancelled',
     provider_credential: platform, provider_request_id: null, http_status: null, pricing_snapshot: {}, execution_snapshot: {}, budgets: [], executor_id: 'ex1', execution_stopped_at: '2026-11-24T09:01:00Z', settlement: null,
@@ -127,4 +127,6 @@ test('request_detail_shows_a_corrected_output', async () => {
   const usages = screen.getByRole('region', { name: '선택 usage' });
   expect(within(usages).getByText('correction')).toBeTruthy();
   expect(within(usages).getByText(/출처: provider_report · 입력 31000 \/ 출력 2210/)).toBeTruthy();
+  // 사용량 칸(결정 0012)마다 토큰 수를 보인다. 0인 칸은 뺀다.
+  expect(within(usages).getByText('칸별 token: 입력 31000 · 출력 2210 · 캐시 쓰기 5분 1200 · 캐시 쓰기 1시간 800')).toBeTruthy();
 });

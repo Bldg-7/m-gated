@@ -19,6 +19,9 @@ struct Validation<'a> {
     image_ranges: Vec<std::ops::Range<usize>>,
     /// `data` 문자열은 소속 block type을 object_end에서 확정한 뒤 image/redacted_thinking으로 분류한다.
     pending_data: BTreeMap<Vec<String>, std::ops::Range<usize>>,
+    /// `cache_control` 수와, 그 가운데 1시간 캐시(`ttl: "1h"`)를 고른 수. 나머지는 5분 캐시다(결정 0012).
+    caches: usize,
+    hour_caches: usize,
     failure: Option<ApiError>,
 }
 /// 요청에 있으면 과금 방식·서버측 추가 실행이 바뀌는 top-level 옵션이다. 검증 전에는 통과시키지 않는다.
@@ -45,6 +48,8 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "top_p",
     "top_k",
     "context_management",
+    // 요청 전체에 거는 캐시(자동 캐시). 블록의 `cache_control`과 같이 검사하고 센다(결정 0012).
+    "cache_control",
 ];
 /// client tool 정의에서 검증기가 구조를 검사하는 필드. 그 외(defer_loading 등)는 원본 그대로 전달한다.
 const KNOWN_TOOL_FIELDS: &[&str] = &[
@@ -72,6 +77,8 @@ pub async fn validate(
         body_start: body.as_ptr() as usize,
         image_ranges: Vec::new(),
         pending_data: BTreeMap::new(),
+        caches: 0,
+        hour_caches: 0,
         failure: None,
     };
     if json::scan(body, &mut v).await.is_err() {
@@ -102,6 +109,14 @@ pub async fn validate(
         .is_some_and(|n| n < 1024 || v.output.is_none_or(|o| n >= o))
     {
         return Err(ApiError::InvalidRequest);
+    }
+    // 캐시 쓰기는 사는 시간마다 단가가 다르다. 단가가 없는 캐시 쓰기를 부를 수 있는 요청은 보내지 않는다
+    // (결정 0012). 토큰 세기는 캐시를 쓰지 않는다.
+    if api == ApiKind::Messages
+        && ((v.caches > v.hour_caches && !profile.rates.contains_key("cache_write_5m"))
+            || (v.hour_caches > 0 && !profile.rates.contains_key("cache_write_1h")))
+    {
+        return Err(ApiError::UnsupportedOption);
     }
     Ok(RequestMetadata {
         model,
@@ -258,6 +273,12 @@ impl Visitor for Validation<'_> {
                     integer(raw)?;
                     Kind::Number
                 }
+                // 요청 전체에 거는 캐시. 블록의 `cache_control`과 같이 세고, `type`·`ttl`은 아래에서 검사한다.
+                "cache_control" => {
+                    self.feature(NativeFeature::Cache)?;
+                    self.caches += 1;
+                    Kind::Object
+                }
                 _ if KNOWN_TOP_LEVEL.contains(&key) || COST_AFFECTING_TOP_LEVEL.contains(&key) => {
                     // count의 생성 전용 옵션과 과금 방식이 바뀌는 옵션은 계속 거부한다.
                     self.failure = Some(ApiError::UnsupportedOption);
@@ -402,18 +423,24 @@ impl Visitor for Validation<'_> {
             "cache_control" => {
                 self.feature(NativeFeature::Cache)?;
                 if kind == Kind::Object {
+                    self.caches += 1;
                     Ok(())
                 } else {
                     Err(JsonError)
                 }
             }
-            "ttl" => {
-                if json::string(raw, 8)? == "5m" {
-                    Ok(())
-                } else {
-                    Err(JsonError)
+            // 캐시가 사는 시간. 없으면 5분이다. 1시간 캐시는 단가가 따로 있다(결정 0012).
+            "ttl" if path.len() >= 2 && path[path.len() - 2] == "cache_control" => {
+                match json::string(raw, 8)?.as_str() {
+                    "5m" => Ok(()),
+                    "1h" => {
+                        self.hour_caches += 1;
+                        Ok(())
+                    }
+                    _ => Err(JsonError),
                 }
             }
+            "ttl" => Err(JsonError),
             "source" => {
                 self.feature(NativeFeature::InlinePng)?;
                 if kind == Kind::Object {
@@ -687,7 +714,93 @@ pub(super) async fn validate_png_input(input: &[u8]) -> Result<usize, JsonError>
 mod tests {
     use super::*;
     fn profile() -> ModelProfile {
-        serde_json::from_value(serde_json::json!({"model":"synthetic-text","api":"messages","profile_version":"fixture-v1","pricing_version":"price-v1","fixture_version":"text-v1","actual_models":["synthetic-text"],"features":["client_tools","thinking","cache","json_schema","inline_png"],"max_input_tokens":4096,"max_output_tokens":4096,"max_body_bytes":8388608,"max_response_bytes":16777216,"rates":{"input":"1.000000000000","output":"2.000000000000"}})).unwrap()
+        serde_json::from_value(serde_json::json!({"model":"synthetic-text","api":"messages","profile_version":"fixture-v1","pricing_version":"price-v1","fixture_version":"text-v1","actual_models":["synthetic-text"],"features":["client_tools","thinking","cache","json_schema","inline_png"],"max_input_tokens":4096,"max_output_tokens":4096,"max_body_bytes":8388608,"max_response_bytes":16777216,"rates":{"input":"1.000000000000","output":"2.000000000000","cache_read":"0.100000000000","cache_write_5m":"1.250000000000"}})).unwrap()
+    }
+    #[tokio::test]
+    async fn cache_lifetime_needs_its_rate() {
+        let body = |ttl: &str| {
+            format!(
+                r#"{{"model":"synthetic-text","max_tokens":10,"messages":[{{"role":"user","content":[{{"type":"text","text":"x","cache_control":{{"type":"ephemeral"{ttl}}}}}]}}]}}"#
+            )
+        };
+        let check = |raw: String, api: ApiKind, profile: ModelProfile| async move {
+            validate(raw.as_bytes(), api, &profile).await.map(|_| ())
+        };
+        let five = profile();
+        let mut hour = profile();
+        hour.rates
+            .insert("cache_write_1h".into(), "2.000000000000".into());
+        // 5분 캐시(기본값)는 5분 단가로 보낸다.
+        for ttl in ["", r#","ttl":"5m""#] {
+            assert_eq!(
+                check(body(ttl), ApiKind::Messages, five.clone()).await,
+                Ok(())
+            );
+        }
+        // 1시간 캐시는 1시간 단가가 있어야 보낸다.
+        assert_eq!(
+            check(body(r#","ttl":"1h""#), ApiKind::Messages, five.clone()).await,
+            Err(ApiError::UnsupportedOption)
+        );
+        assert_eq!(
+            check(body(r#","ttl":"1h""#), ApiKind::Messages, hour.clone()).await,
+            Ok(())
+        );
+        // 토큰 세기는 캐시를 쓰지 않는다.
+        assert_eq!(
+            check(
+                body(r#","ttl":"1h""#).replace(r#""max_tokens":10,"#, ""),
+                ApiKind::CountTokens,
+                five.clone()
+            )
+            .await,
+            Ok(())
+        );
+        // 1시간 단가만 있고 5분 단가가 없으면 5분 캐시를 보내지 않는다.
+        let mut only_hour = hour.clone();
+        only_hour.rates.remove("cache_write_5m");
+        assert_eq!(
+            check(body(""), ApiKind::Messages, only_hour.clone()).await,
+            Err(ApiError::UnsupportedOption)
+        );
+        assert_eq!(
+            check(body(r#","ttl":"1h""#), ApiKind::Messages, only_hour).await,
+            Ok(())
+        );
+        for bad in [r#","ttl":"2h""#, r#","ttl":1"#] {
+            assert_eq!(
+                check(body(bad), ApiKind::Messages, hour.clone()).await,
+                Err(ApiError::InvalidRequest)
+            );
+        }
+        // 요청 전체에 거는 `cache_control`도 같은 규칙이다. 검사 없이 보내지 않는다.
+        let top = |ttl: &str| {
+            format!(
+                r#"{{"model":"synthetic-text","max_tokens":10,"cache_control":{{"type":"ephemeral"{ttl}}},"messages":[{{"role":"user","content":"x"}}]}}"#
+            )
+        };
+        assert_eq!(
+            check(top(""), ApiKind::Messages, five.clone()).await,
+            Ok(())
+        );
+        assert_eq!(
+            check(top(r#","ttl":"1h""#), ApiKind::Messages, five.clone()).await,
+            Err(ApiError::UnsupportedOption)
+        );
+        assert_eq!(
+            check(top(r#","ttl":"1h""#), ApiKind::Messages, hour.clone()).await,
+            Ok(())
+        );
+        assert_eq!(
+            check(top(r#","ttl":"2h""#), ApiKind::Messages, hour.clone()).await,
+            Err(ApiError::InvalidRequest)
+        );
+        let mut no_cache = hour.clone();
+        no_cache.features.retain(|f| *f != NativeFeature::Cache);
+        assert_eq!(
+            check(top(""), ApiKind::Messages, no_cache).await,
+            Err(ApiError::UnsupportedOption)
+        );
     }
     #[tokio::test]
     async fn numeric_scalar_conversion_has_a_small_lexical_bound() {
@@ -899,7 +1012,7 @@ mod tests {
     }
 }
 
-use crate::ledger::finance::FinalUsage;
+use crate::ledger::finance::{FinalUsage, UsageCategory};
 use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -964,13 +1077,15 @@ impl port::Provider for Anthropic {
     fn cache_write_rate(&self) -> Option<&'static str> {
         Some("cache_write_5m")
     }
+    /// 캐시를 쓰는 유료 messages profile에는 캐시 읽기와 5분 캐시 쓰기 단가가 있어야 한다.
+    /// 1시간 캐시 쓰기 단가는 있어도 되고 없어도 된다. 없으면 1시간 캐시 요청을 거절한다(결정 0012).
+    /// 사는 시간과 관계없는 `cache_write` 단가는 API가 알린 칸이 아니라서 공통 규칙이 거절한다.
     fn check_profile(&self, profile: &ModelProfile) -> Result<(), crate::config::StartupError> {
         if profile.features.contains(&NativeFeature::Cache)
             && profile.billing_class == crate::config::BillingClass::Chargeable
+            && profile.api == ApiKind::Messages
             && (!profile.rates.contains_key("cache_read")
-                || !(profile.rates.contains_key("cache_write")
-                    ^ profile.rates.contains_key("cache_write_5m"))
-                || profile.rates.contains_key("cache_write_1h"))
+                || !profile.rates.contains_key("cache_write_5m"))
         {
             return Err(crate::config::StartupError::InvalidPrice);
         }
@@ -1074,13 +1189,8 @@ impl Api for AnthropicApi {
             if self.0 == ApiKind::CountTokens
                 && profile.count_billing.as_deref() == Some("counted_input_tokens")
             {
-                usage = counted.map(|n| FinalUsage {
-                    actual_model: profile.model.clone(),
-                    input_tokens: n,
-                    output_tokens: 0,
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0,
-                    reasoning_tokens: None,
+                usage = counted.map(|n| {
+                    FinalUsage::new(profile.model.clone(), [(UsageCategory::Input, n)], None)
                 });
             }
             Ok(Reading {
@@ -1109,6 +1219,14 @@ impl Api for AnthropicApi {
     }
     fn catalog(&self) -> bool {
         self.0 == ApiKind::Messages
+    }
+    fn usage_categories(&self) -> &'static [UsageCategory] {
+        use UsageCategory::*;
+        if self.0 == ApiKind::Messages {
+            &[Input, Output, CacheRead, CacheWrite5m, CacheWrite1h]
+        } else {
+            &[Input]
+        }
     }
 }
 pub fn approved_headers(
@@ -1308,25 +1426,35 @@ async fn parse_response(
     if !v.message || !v.role || !v.content || !v.terminal {
         return Err(UpstreamError::Protocol);
     }
-    let cache = v.cache5.unwrap_or(0).checked_add(v.cache1.unwrap_or(0));
-    if v.invalid_usage
-        || v.cache1.unwrap_or(0) > 0
-        || ((v.cache5.is_some() || v.cache1.is_some()) && cache != Some(v.cache_write))
-    {
+    let Some(split) = cache_split(v.cache_write, v.cache5, v.cache1).filter(|_| !v.invalid_usage)
+    else {
         return Ok((None, None));
-    }
+    };
     let usage = match (v.model, v.input, v.output) {
-        (Some(actual_model), Some(input_tokens), Some(output_tokens)) => Some(FinalUsage {
+        (Some(actual_model), Some(input), Some(output)) => Some(FinalUsage::new(
             actual_model,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens: v.cache_read,
-            cache_write_tokens: v.cache_write,
-            reasoning_tokens: None,
-        }),
+            [
+                (UsageCategory::Input, input),
+                (UsageCategory::Output, output),
+                (UsageCategory::CacheRead, v.cache_read),
+                (UsageCategory::CacheWrite5m, split.0),
+                (UsageCategory::CacheWrite1h, split.1),
+            ],
+            None,
+        )),
         _ => None,
     };
     Ok((usage, None))
+}
+/// 캐시 쓰기(`cache_creation_input_tokens`)를 5분 몫과 1시간 몫으로 나눈다(결정 0012).
+/// 나눈 값(`cache_creation.ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`)의 합이 캐시 쓰기와
+/// 다르거나, 캐시 쓰기가 있는데 나눈 값이 없으면 어느 단가를 쓸지 모르므로 None이다.
+pub(super) fn cache_split(total: u64, five: Option<u64>, hour: Option<u64>) -> Option<(u64, u64)> {
+    if five.is_none() && hour.is_none() {
+        return (total == 0).then_some((0, 0));
+    }
+    let (five, hour) = (five.unwrap_or(0), hour.unwrap_or(0));
+    (five.checked_add(hour) == Some(total)).then_some((five, hour))
 }
 async fn validate_native_error(bytes: &[u8]) -> Result<(), UpstreamError> {
     struct ErrorMetadata {
@@ -1448,7 +1576,11 @@ mod response_tests {
             let (usage, _) = parse_response(body(ok).as_bytes(), ApiKind::Messages)
                 .await
                 .unwrap();
-            assert_eq!(usage.map(|u| u.output_tokens), Some(20), "{ok}");
+            assert_eq!(
+                usage.map(|u| u.get(UsageCategory::Output)),
+                Some(20),
+                "{ok}"
+            );
         }
         for bad in [
             r#","service_tier":"priority""#,
@@ -1463,6 +1595,48 @@ mod response_tests {
                 .unwrap();
             assert!(usage.is_none(), "{bad} must stay unresolved");
         }
+    }
+
+    #[tokio::test]
+    async fn nonstream_cache_writes_split_into_five_minute_and_one_hour_categories() {
+        let body = |usage: &str| {
+            format!(
+                r#"{{"type":"message","role":"assistant","model":"synthetic-text","content":[],"stop_reason":"end_turn","usage":{{"input_tokens":100,"output_tokens":20{usage}}}}}"#
+            )
+        };
+        let split = r#","cache_read_input_tokens":7,"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}"#;
+        let (usage, _) = parse_response(body(split).as_bytes(), ApiKind::Messages)
+            .await
+            .unwrap();
+        let usage = usage.unwrap();
+        assert_eq!(
+            usage.tokens.iter().collect::<Vec<_>>(),
+            vec![
+                (UsageCategory::Input, 100),
+                (UsageCategory::Output, 20),
+                (UsageCategory::CacheRead, 7),
+                (UsageCategory::CacheWrite5m, 10),
+                (UsageCategory::CacheWrite1h, 20),
+            ]
+        );
+        for unresolved in [
+            // 합이 다르다.
+            r#","cache_creation_input_tokens":31,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}"#,
+            // 캐시 쓰기가 있는데 나눈 값이 없다.
+            r#","cache_creation_input_tokens":30"#,
+        ] {
+            let (usage, _) = parse_response(body(unresolved).as_bytes(), ApiKind::Messages)
+                .await
+                .unwrap();
+            assert!(usage.is_none(), "{unresolved}");
+        }
+        let (usage, _) = parse_response(
+            body(r#","cache_creation_input_tokens":0"#).as_bytes(),
+            ApiKind::Messages,
+        )
+        .await
+        .unwrap();
+        assert!(usage.is_some(), "캐시 쓰기가 0이면 나눈 값이 없어도 된다");
     }
 
     #[tokio::test]

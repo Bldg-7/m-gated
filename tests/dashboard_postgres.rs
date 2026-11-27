@@ -248,14 +248,14 @@ async fn settled_fixture(db: &postgres::TestDb) -> (uuid::Uuid, uuid::Uuid, Arc<
     ledger
         .finalize_request(
             spec.id,
-            &FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
-                actual_model: "synthetic-text".into(),
-                input_tokens: 1,
-                output_tokens: 1,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: None,
-            }),
+            &FinalObservation::completed(m_gated::ledger::finance::FinalUsage::new(
+                "synthetic-text",
+                [
+                    (m_gated::ledger::finance::UsageCategory::Input, 1),
+                    (m_gated::ledger::finance::UsageCategory::Output, 1),
+                ],
+                None,
+            )),
         )
         .await
         .unwrap();

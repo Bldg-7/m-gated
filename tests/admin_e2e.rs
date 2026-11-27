@@ -181,14 +181,14 @@ async fn administrator_browser_commands_queries_and_current_authority() {
     ledger
         .finalize_request(
             requests[0],
-            &FinalObservation::completed(FinalUsage {
-                actual_model: "synthetic-text".into(),
-                input_tokens: 100,
-                output_tokens: 10,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: None,
-            }),
+            &FinalObservation::completed(FinalUsage::new(
+                "synthetic-text",
+                [
+                    (m_gated::ledger::finance::UsageCategory::Input, 100),
+                    (m_gated::ledger::finance::UsageCategory::Output, 10),
+                ],
+                None,
+            )),
         )
         .await
         .unwrap();
@@ -235,7 +235,7 @@ async fn administrator_browser_commands_queries_and_current_authority() {
     let late_ledger = Arc::new(ledger);
     let late_request = requests[5];
     let control = axum::Router::new()
-        .route("/new-safety-cause", axum::routing::post(move || { let ledger=late_ledger.clone(); async move { ledger.finalize_request(late_request, &FinalObservation::completed(FinalUsage {actual_model:"synthetic-text".into(),input_tokens:5000,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,reasoning_tokens:None})).await.unwrap(); axum::http::StatusCode::NO_CONTENT } }))
+        .route("/new-safety-cause", axum::routing::post(move || { let ledger=late_ledger.clone(); async move { ledger.finalize_request(late_request, &FinalObservation::completed(FinalUsage::new("synthetic-text", [(m_gated::ledger::finance::UsageCategory::Input, 5000)], None))).await.unwrap(); axum::http::StatusCode::NO_CONTENT } }))
         .route("/stale-policy", axum::routing::post(move || { let store=stale_store.clone(); async move { sqlx::query("UPDATE gw_policies SET version=version+1 WHERE id=$1").bind(policy).execute(store.pool()).await.unwrap(); axum::http::StatusCode::NO_CONTENT } }))
         // 관리자 권한은 요청마다 접근 목록에서 읽는다. 브라우저 시험이 alice를 강등했다가 되돌린다.
         .route("/role/{role}", axum::routing::post(move |axum::extract::Path(role): axum::extract::Path<String>| { let store=role_store.clone(); async move { sqlx::query("UPDATE gw_access SET role=$1 WHERE email='alice@example.test'").bind(role).execute(store.pool()).await.unwrap(); axum::http::StatusCode::NO_CONTENT } }))

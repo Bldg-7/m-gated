@@ -7,7 +7,7 @@ use super::{
 use crate::{
     config::{ApiKind, ModelProfile, ProviderId, StartupError},
     json::{self, JsonError, Kind, Visitor},
-    ledger::finance::FinalUsage,
+    ledger::finance::{FinalUsage, UsageCategory},
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use std::collections::{BTreeMap, BTreeSet};
@@ -126,6 +126,9 @@ impl Api for Systemone {
     }
     fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
         "typesafe_input_output_v1"
+    }
+    fn usage_categories(&self) -> &'static [UsageCategory] {
+        &[UsageCategory::Input, UsageCategory::Output]
     }
 }
 const DANGER_ZONE_HEADERS: [&str; 2] = [
@@ -399,14 +402,14 @@ async fn read_success(body: &[u8]) -> Result<Option<FinalUsage>, UpstreamError> 
         return Ok(None);
     }
     Ok(match (v.input, v.output) {
-        (Some(input_tokens), Some(output_tokens)) => Some(FinalUsage {
-            actual_model: model,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        }),
+        (Some(input), Some(output)) => Some(FinalUsage::new(
+            model,
+            [
+                (UsageCategory::Input, input),
+                (UsageCategory::Output, output),
+            ],
+            None,
+        )),
         _ => None,
     })
 }
@@ -562,17 +565,15 @@ mod tests {
         let r = read(200, r#"{"model":"jev-1.14.0","answers":{"q":{"type":"noul","noul":0.98}},"usage":{"input_tokens":120,"output_tokens":12}}"#).await.unwrap();
         let u = r.usage.unwrap();
         assert_eq!(
-            (u.actual_model.as_str(), u.input_tokens, u.output_tokens),
+            (
+                u.actual_model.as_str(),
+                u.get(UsageCategory::Input),
+                u.get(UsageCategory::Output)
+            ),
             ("jev-1.14.0", 120, 12)
         );
-        assert_eq!(
-            (
-                u.cache_read_tokens,
-                u.cache_write_tokens,
-                u.reasoning_tokens
-            ),
-            (0, 0, None)
-        );
+        assert_eq!(u.tokens.iter().count(), 2);
+        assert_eq!(u.reasoning_tokens, None);
         assert!(!r.failed);
     }
     #[tokio::test]

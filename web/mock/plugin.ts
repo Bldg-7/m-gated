@@ -332,8 +332,11 @@ function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
   /** 지금 카탈로그와 가짜 가격 목록을 비교해 변경안을 만든다. 승인 전에는 아무것도 바뀌지 않는다. */
   const syncCatalog = (commandId: string): Reply => {
     const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-    const items: CatalogProposalItem[] = priceSource.map(({ provider, model, proposed }) => {
+    const items: CatalogProposalItem[] = priceSource.map(({ provider, model, proposed: found }) => {
       const current = state.catalog.entries.find(e => e.provider === provider && e.model === model) ?? null;
+      // 동기화는 가격 목록이 주는 칸만 바꾸고, 그 밖의 칸(1시간 캐시 쓰기 등)은 관리자가 정한 값을 둔다(결정 0012).
+      const required = catalogProviders.find(p => p.provider === provider)?.required_rates ?? [];
+      const proposed = found && current ? { ...found, rates: { ...Object.fromEntries(Object.entries(current.rates).filter(([k]) => !required.includes(k))), ...found.rates } } : found;
       return { provider, model, status: !proposed ? 'incomplete' : !current ? 'new' : same(current, proposed) ? 'unchanged' : 'changed', current, proposed };
     });
     for (const current of state.catalog.entries) if (!priceSource.some(s => s.provider === current.provider && s.model === current.model)) items.push({ provider: current.provider, model: current.model, status: 'missing', current, proposed: null });
@@ -357,6 +360,31 @@ function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
     Object.assign(state.catalog, { version: state.catalog.version + 1, approved_at: now(), approved_by_email: email(ADMIN_ID) });
     state.proposals.clear();
     return { status: 200, body: ack(commandId, 'approve_model_catalog', 'catalog', id, state.catalog.version, true, { proposal_id: id }) };
+  };
+  /** 모델 하나의 칸별 단가를 고친다(결정 0012). null은 단가를 지운다. 바뀌면 새 카탈로그 버전이 된다. */
+  const editRates = (body: Json, commandId: string): Reply => {
+    const provider = text(body.provider), model = text(body.model);
+    const declared = catalogProviders.find(p => p.provider === provider)?.usage_categories ?? fail(400, 'invalid_request');
+    const rates = (body.rates ?? {}) as Record<string, unknown>;
+    if (Object.keys(rates).length === 0) fail(400, 'invalid_request');
+    expect(body.expected_version, state.catalog.version);
+    const index = state.catalog.entries.findIndex(e => e.provider === provider && e.model === model);
+    if (index < 0) fail(404, 'resource_not_found');
+    const current = state.catalog.entries[index], next = { ...current.rates };
+    for (const [k, v] of Object.entries(rates)) {
+      if (!declared.includes(k) || (v !== null && (typeof v !== 'string' || !/^(0|[1-9][0-9]{0,15})(\.[0-9]{1,12})?$/.test(v)))) fail(400, 'invalid_request');
+      if (v === null) delete next[k]; else next[k] = usd(pico(v as string));
+    }
+    // 캐시를 쓰는 모델은 정책이 요구하는 단가(입력, 출력, 캐시 읽기, 5분 캐시 쓰기)를 지울 수 없다.
+    const required = catalogProviders.find(p => p.provider === provider)?.required_rates ?? [];
+    if (required.some(k => next[k] === undefined)) fail(400, 'invalid_request');
+    const changed = JSON.stringify(Object.entries(next).sort()) !== JSON.stringify(Object.entries(current.rates).sort());
+    if (changed) {
+      state.catalog.entries[index] = { ...current, rates: next };
+      Object.assign(state.catalog, { version: state.catalog.version + 1, approved_at: now(), approved_by_email: email(ADMIN_ID) });
+      state.proposals.clear();
+    }
+    return { status: 200, body: ack(commandId, 'edit_model_catalog_rates', 'catalog', crypto.randomUUID(), state.catalog.version, changed) };
   };
 
   // ── 설정 ──
@@ -546,6 +574,7 @@ function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
       case 'PUT /api/admin/requests': if (s[4] === 'settlement') return settle(s[3], body, commandId); break;
       case 'GET /api/admin/model-catalog': if (s.length === 3) return ok(catalogView()); break;
       case 'POST /api/admin/model-catalog': if (s[3] === 'sync') return syncCatalog(commandId); if (s[3] === 'approve') return approveCatalog(body, commandId); break;
+      case 'PUT /api/admin/model-catalog': if (s[3] === 'rates' && s.length === 4) return editRates(body, commandId); break;
       case 'GET /api/admin/access': if (s.length === 3) return ok({ items: state.access.map(accessView) }); break;
       case 'POST /api/admin/access': if (s.length === 3) return addAccess(body, commandId); if (s.length === 5 && s[4] === 'link') return accessLink(s[3], commandId); break;
       case 'PATCH /api/admin/access': if (s.length === 4) return updateAccess(s[3], body, commandId); break;

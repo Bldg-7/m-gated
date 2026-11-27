@@ -1242,12 +1242,13 @@ access_handler!(
 
 // ---- 모델·가격 카탈로그 ----
 
-/// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인.
+/// 모델·가격 카탈로그 조회, 공개 가격 목록 동기화(변경안 만들기), 변경안 승인, 단가 고치기(결정 0012).
 #[derive(Clone, Copy, PartialEq)]
 enum Catalog {
     View,
     Sync,
     Approve,
+    Rates,
 }
 
 async fn catalog(
@@ -1302,6 +1303,25 @@ async fn catalog(
             return error(ManagementError::Invalid);
         }
         service.sync(&ctx).await
+    } else if action == Catalog::Rates {
+        /// 칸 이름 → 단가(100만 토큰당 USD 문자열). null은 단가를 지운다.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Rates {
+            provider: String,
+            model: String,
+            rates: std::collections::BTreeMap<String, Option<String>>,
+            expected_version: String,
+        }
+        let Ok(edit) = serde_json::from_value::<Rates>(input) else {
+            return error(ManagementError::Invalid);
+        };
+        let Ok(expected) = edit.expected_version.parse::<i64>() else {
+            return error(ManagementError::Invalid);
+        };
+        service
+            .edit_rates(&ctx, &edit.provider, &edit.model, edit.rates, expected)
+            .await
     } else {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -1368,6 +1388,11 @@ catalog_handler!(
     /// `POST /api/admin/model-catalog/approve`.
     catalog_approve,
     Catalog::Approve
+);
+catalog_handler!(
+    /// `PUT /api/admin/model-catalog/rates`.
+    catalog_rates,
+    Catalog::Rates
 );
 
 #[cfg(test)]

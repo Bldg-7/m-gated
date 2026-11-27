@@ -1,4 +1,5 @@
-//! DeepSeek 어댑터를 WASM 컴포넌트로 내보낸다(결정 0009). WIT 타입과 어댑터 crate의 타입을 바꿔 줄 뿐이다.
+//! DeepSeek 어댑터를 WASM 컴포넌트(`m-gated:adapter@0.2.0`)로 내보낸다(결정 0009, 0012).
+//! WIT 타입과 어댑터 crate의 타입을 바꿔 줄 뿐이다.
 //!
 //! `scripts/build-adapter.sh`가 `wasm32-unknown-unknown`으로 빌드하고 컴포넌트로 감싼다.
 //! 실행기가 없으므로 검사기는 실행을 넘기지 않고 한 번에 끝낸다([`json::ready`]).
@@ -65,10 +66,11 @@ fn error_format(f: kit::ErrorFormat) -> wit::ErrorFormat {
 fn usage(u: kit::Usage) -> wit::Usage {
     wit::Usage {
         actual_model: u.actual_model,
-        input_tokens: u.input_tokens,
-        output_tokens: u.output_tokens,
-        cache_read_tokens: u.cache_read_tokens,
-        cache_write_tokens: u.cache_write_tokens,
+        tokens: u
+            .tokens
+            .into_iter()
+            .map(|(c, n)| (c.name().to_string(), n))
+            .collect(),
         reasoning_tokens: u.reasoning_tokens,
     }
 }
@@ -126,6 +128,10 @@ impl Guest for Component {
                 upstream_path: deepseek::UPSTREAM_PATH.into(),
                 error_format: error_format(deepseek::ERROR_FORMAT),
                 token_rule: deepseek::TOKEN_RULE.into(),
+                usage_categories: deepseek::USAGE_CATEGORIES
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect(),
                 stream: true,
             }],
         }

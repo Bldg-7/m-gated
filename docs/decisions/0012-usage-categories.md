@@ -1,7 +1,7 @@
 # 0012. Report usage in the gateway's usage categories, with each API declaring the ones it uses
 
 - Date: 2026-11-27
-- Status: Accepted, not implemented
+- Status: Implemented
 
 ## Context
 

@@ -715,6 +715,10 @@ async fn no_usage(
             NoUsage::NoResponse
         };
     }
+    // 사용량을 받았지만 칸별 단가를 고를 수 없다(결정 0012). 끝까지 받았든 끊겼든 0원으로 두지 않는다.
+    if progress.stream.unpriced {
+        return NoUsage::Unknown;
+    }
     // 첫 event 전, 또는 시작 event(예: Anthropic `message_start`) 전에 끊기면 입력 토큰도 모른다.
     if !progress.stream.started || (progress.counter.is_some() && progress.stream.start.is_none()) {
         return NoUsage::NoResponse;

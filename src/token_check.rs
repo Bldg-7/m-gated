@@ -47,11 +47,11 @@ const CANDIDATE_EDGE_MS: i64 = 5_000;
 /// 보정에 쓰는 시간. 넘으면 남은 요청은 다음 조회로 넘긴다.
 const CORRECTION_BUDGET: Duration = Duration::from_secs(120);
 
-/// 1분 칸 보고서. 칸 값은 [입력(캐시 제외), 캐시 읽기, 캐시 쓰기(5분+1시간), 출력]이고,
+/// 1분 칸 보고서. 칸 값은 [입력(캐시 제외), 캐시 읽기, 5분 캐시 쓰기, 1시간 캐시 쓰기, 출력]이고,
 /// 열쇠의 분은 칸이 시작하는 시각(epoch 밀리초)이다. `minutes`는 보고서가 돌려준 분이다.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MinuteReport {
-    pub cells: BTreeMap<(String, String, i64), [u64; 4]>,
+    pub cells: BTreeMap<(String, String, i64), [u64; 5]>,
     pub minutes: BTreeSet<i64>,
 }
 /// 사용량 보고서 한 번 조회한 결과. `starts`는 돌려준 칸의 시작 시각, `until`은 돌려준 마지막 칸의 끝 시각(epoch 초)이다.
@@ -436,7 +436,8 @@ fn minute_report(fetched: &Fetched) -> MinuteReport {
         for (i, n) in [
             b.uncached_input,
             b.cache_read,
-            b.cache_write_5m.saturating_add(b.cache_write_1h),
+            b.cache_write_5m,
+            b.cache_write_1h,
             b.output,
         ]
         .into_iter()
@@ -450,8 +451,8 @@ fn minute_report(fetched: &Fetched) -> MinuteReport {
 fn minute_of(ms: i64) -> i64 {
     ms.div_euclid(MINUTE_MS) * MINUTE_MS
 }
-fn add_tokens(a: [u64; 4], b: &[u64; 4]) -> [u64; 4] {
-    [0, 1, 2, 3].map(|i| a[i].saturating_add(b[i]))
+fn add_tokens(a: [u64; 5], b: &[u64; 5]) -> [u64; 5] {
+    [0, 1, 2, 3, 4].map(|i| a[i].saturating_add(b[i]))
 }
 /// `[from, to)`의 분 가운데, 같은 API 키·모델의 요청 사용량을 모두 알고 보낸 분 기준과 끝난 분 기준이
 /// 다른 요청을 묶는 분을 골라, 보고서 칸과 맞는 기준을 센다. (보낸 분으로만 맞은 분, 끝난 분으로만 맞은 분).
@@ -521,7 +522,7 @@ pub fn count_minutes(
                 let sum = |ids: &BTreeSet<Uuid>| {
                     same.iter()
                         .filter(|r| ids.contains(&r.id))
-                        .fold([0u64; 4], |a, r| add_tokens(a, &r.tokens))
+                        .fold([0u64; 5], |a, r| add_tokens(a, &r.tokens))
                 };
                 match (sum(&sent) == *cell, sum(&ended) == *cell) {
                     (true, false) => start += 1,
@@ -578,7 +579,8 @@ pub fn attribute(
             *left = left.checked_sub(used)?;
         }
     }
-    if rest[..3] != candidate.tokens[..3] {
+    // 입력과 캐시 칸(5분·1시간 캐시 쓰기는 따로)이 모두 같아야 한다.
+    if rest[..4] != candidate.tokens[..4] {
         return None;
     }
     let evidence = json!({
@@ -588,10 +590,10 @@ pub fn attribute(
         "convention": convention.name(),
         "api_key_id": candidate.api_key_id,
         "model": model,
-        "report": {"uncached_input_tokens":cell[0],"cache_read_tokens":cell[1],"cache_write_tokens":cell[2],"output_tokens":cell[3]},
+        "report": {"uncached_input_tokens":cell[0],"cache_read_tokens":cell[1],"cache_write_5m_tokens":cell[2],"cache_write_1h_tokens":cell[3],"output_tokens":cell[4]},
         "other_requests": others.len(),
     });
-    Some((rest[3].min(max_tokens), evidence))
+    Some((rest[4].min(max_tokens), evidence))
 }
 fn epoch(t: i64) -> Result<OffsetDateTime, &'static str> {
     OffsetDateTime::from_unix_timestamp(t).map_err(|_| "admin_api_unavailable")
@@ -609,7 +611,7 @@ mod tests {
         sent: i64,
         ended: Option<i64>,
         known: Known,
-        tokens: [u64; 4],
+        tokens: [u64; 5],
     ) -> WindowRequest {
         WindowRequest {
             id: Uuid::from_u128(n),
@@ -623,7 +625,7 @@ mod tests {
             corrected: false,
         }
     }
-    fn report(cells: &[(i64, [u64; 4])]) -> MinuteReport {
+    fn report(cells: &[(i64, [u64; 5])]) -> MinuteReport {
         MinuteReport {
             cells: cells
                 .iter()
@@ -658,27 +660,27 @@ mod tests {
             M - 30_000,
             Some(M + 20_000),
             Known::Exact,
-            [100, 0, 0, 10],
+            [100, 0, 0, 0, 10],
         );
         let b = request(
             2,
             M + 40_000,
             Some(M + 90_000),
             Known::Exact,
-            [200, 0, 0, 20],
+            [200, 0, 0, 0, 20],
         );
         let requests = [a, b];
         // 보고서가 끝난 분 기준이면 이 분의 칸은 A다.
-        let by_end = report(&[(M, [100, 0, 0, 10])]);
+        let by_end = report(&[(M, [100, 0, 0, 0, 10])]);
         assert_eq!(count_minutes(&by_end, &requests, M, M + MINUTE_MS), (0, 1));
         // 보낸 분 기준이면 B다.
-        let by_start = report(&[(M, [200, 0, 0, 20])]);
+        let by_start = report(&[(M, [200, 0, 0, 0, 20])]);
         assert_eq!(
             count_minutes(&by_start, &requests, M, M + MINUTE_MS),
             (1, 0)
         );
         // 어느 쪽과도 맞지 않으면 세지 않는다.
-        let neither = report(&[(M, [300, 0, 0, 30])]);
+        let neither = report(&[(M, [300, 0, 0, 0, 30])]);
         assert_eq!(count_minutes(&neither, &requests, M, M + MINUTE_MS), (0, 0));
     }
     #[test]
@@ -688,24 +690,36 @@ mod tests {
             M - 30_000,
             Some(M + 20_000),
             Known::Exact,
-            [100, 0, 0, 10],
+            [100, 0, 0, 0, 10],
         );
-        let by_end = report(&[(M, [100, 0, 0, 10])]);
+        let by_end = report(&[(M, [100, 0, 0, 0, 10])]);
         // 같은 분에 걸친 끊긴 요청이 있으면 모른다.
-        let cut = request(3, M + 10_000, Some(M + 50_000), Known::Cutoff, [5, 0, 0, 1]);
+        let cut = request(
+            3,
+            M + 10_000,
+            Some(M + 50_000),
+            Known::Cutoff,
+            [5, 0, 0, 0, 1],
+        );
         assert_eq!(
             count_minutes(&by_end, &[a.clone(), cut], M, M + MINUTE_MS),
             (0, 0)
         );
         // 모델을 모르는 요청은 모든 모델의 칸을 막는다.
-        let mut unknown = request(4, M + 10_000, None, Known::Unknown, [0; 4]);
+        let mut unknown = request(4, M + 10_000, None, Known::Unknown, [0; 5]);
         unknown.model = None;
         assert_eq!(
             count_minutes(&by_end, &[a.clone(), unknown], M, M + MINUTE_MS),
             (0, 0)
         );
         // 분 경계 3초 안에 끝난 요청이 있으면 쓰지 않는다.
-        let edge = request(5, M - 50_000, Some(M + 1_000), Known::Exact, [7, 0, 0, 1]);
+        let edge = request(
+            5,
+            M - 50_000,
+            Some(M + 1_000),
+            Known::Exact,
+            [7, 0, 0, 0, 1],
+        );
         assert_eq!(
             count_minutes(&by_end, &[a.clone(), edge], M, M + MINUTE_MS),
             (0, 0)
@@ -723,29 +737,56 @@ mod tests {
             M - 50_000,
             Some(M + 20_000),
             Known::Cutoff,
-            [500, 0, 0, 40],
+            [500, 0, 0, 0, 40],
         );
         let a = request(
             2,
             M + 10_000,
             Some(M + 30_000),
             Known::Exact,
-            [100, 0, 0, 10],
+            [100, 0, 0, 0, 10],
         );
         let requests = [c.clone(), a];
-        let by_end = report(&[(M, [600, 0, 0, 910])]);
+        let by_end = report(&[(M, [600, 0, 0, 0, 910])]);
         let (output, evidence) = attribute(&by_end, &requests, Convention::End, &c).unwrap();
         assert_eq!(output, 900);
         assert_eq!(evidence["convention"], "end");
         assert_eq!(evidence["other_requests"], 1);
         // 입력이 맞지 않으면 고치지 않는다.
-        let wrong = report(&[(M, [601, 0, 0, 910])]);
+        let wrong = report(&[(M, [601, 0, 0, 0, 910])]);
         assert_eq!(attribute(&wrong, &requests, Convention::End, &c), None);
         // 남은 출력은 max_tokens를 넘지 않는다.
-        let big = report(&[(M, [600, 0, 0, 9_000])]);
+        let big = report(&[(M, [600, 0, 0, 0, 9_000])]);
         assert_eq!(
             attribute(&big, &requests, Convention::End, &c).map(|r| r.0),
             Some(4096)
+        );
+    }
+    #[test]
+    fn five_minute_and_one_hour_cache_writes_must_match_separately() {
+        // 칸 값은 [입력, 캐시 읽기, 5분 캐시 쓰기, 1시간 캐시 쓰기, 출력]이다(결정 0012).
+        let c = request(
+            1,
+            M + 10_000,
+            Some(M + 20_000),
+            Known::Cutoff,
+            [500, 8, 4, 6, 40],
+        );
+        let same = report(&[(M, [500, 8, 4, 6, 900])]);
+        assert_eq!(
+            attribute(&same, std::slice::from_ref(&c), Convention::End, &c).map(|r| r.0),
+            Some(900)
+        );
+        let evidence = attribute(&same, std::slice::from_ref(&c), Convention::End, &c)
+            .unwrap()
+            .1;
+        assert_eq!(evidence["report"]["cache_write_5m_tokens"], 4);
+        assert_eq!(evidence["report"]["cache_write_1h_tokens"], 6);
+        // 합계(10)는 같지만 5분·1시간 몫이 다르면 고치지 않는다.
+        let swapped = report(&[(M, [500, 8, 6, 4, 900])]);
+        assert_eq!(
+            attribute(&swapped, std::slice::from_ref(&c), Convention::End, &c),
+            None
         );
     }
     #[test]
@@ -757,17 +798,20 @@ mod tests {
             M - 40_000,
             Some(M + 20_000),
             Known::Cutoff,
-            [500, 0, 0, 40],
+            [500, 0, 0, 0, 40],
         );
         let r = request(
             2,
             M + 25_000,
             Some(M + 100_000),
             Known::Exact,
-            [500, 0, 0, 1800],
+            [500, 0, 0, 0, 1800],
         );
         let requests = [c.clone(), r];
-        let by_start = report(&[(M - MINUTE_MS, [500, 0, 0, 300]), (M, [500, 0, 0, 1800])]);
+        let by_start = report(&[
+            (M - MINUTE_MS, [500, 0, 0, 0, 300]),
+            (M, [500, 0, 0, 0, 1800]),
+        ]);
         // 기준을 보낸 분으로 알고 있으면 C의 칸(앞 분)에서 C의 실제 출력 300을 찾는다.
         assert_eq!(
             attribute(&by_start, &requests, Convention::Start, &c).map(|r| r.0),
@@ -791,9 +835,9 @@ mod tests {
             M - 50_000,
             Some(M + 3_000),
             Known::Cutoff,
-            [500, 0, 0, 40],
+            [500, 0, 0, 0, 40],
         );
-        let by_end = report(&[(M, [500, 0, 0, 900])]);
+        let by_end = report(&[(M, [500, 0, 0, 0, 900])]);
         assert_eq!(
             attribute(&by_end, std::slice::from_ref(&c), Convention::End, &c),
             None
@@ -803,16 +847,16 @@ mod tests {
             M - 50_000,
             Some(M + 20_000),
             Known::Cutoff,
-            [500, 0, 0, 40],
+            [500, 0, 0, 0, 40],
         );
         let other = request(
             2,
             M - 10_000,
             Some(M + 40_000),
             Known::Cutoff,
-            [100, 0, 0, 5],
+            [100, 0, 0, 0, 5],
         );
-        let by_end = report(&[(M, [600, 0, 0, 905])]);
+        let by_end = report(&[(M, [600, 0, 0, 0, 905])]);
         assert_eq!(
             attribute(&by_end, &[c.clone(), other], Convention::End, &c),
             None

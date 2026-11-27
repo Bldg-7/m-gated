@@ -45,7 +45,7 @@ impl PgLedger {
             // 확인하지 못한 토큰은 분당 토큰 칸에 더하지 않는다. 관리자는 금액만 넣는다.
             sqlx::query("UPDATE gw_request_budgets SET state='settled',applied_cost_usd=($3::numeric),applied_input_tokens=NULL,applied_output_tokens=NULL WHERE request_id=$1 AND scope_id=$2").bind(id).bind(scope).bind(cost.to_string()).execute(&mut *c).await?;
         }
-        let selected = json!({"source":"manual_entry","actual_model":null,"input_tokens":null,"output_tokens":null,"cache_read_tokens":null,"cache_write_tokens":null,"reasoning_tokens":null,"counted_input_tokens":null});
+        let selected = super::finance::usage_record("manual_entry", None, None, None);
         let record = json!({"source":"manual_entry","decision":input.decision,"cost_usd":input.cost_usd,"reason":input.reason,"actor_principal_id":actor,"settled_at":now,"executor_id":r.get::<Uuid,_>("executor_id"),"execution_stop_source":stop_source});
         sqlx::query("INSERT INTO gw_usage_events(request_id,kind,provider_usage,normalized_usage,pricing_resolution,content_digest) VALUES($1,'settlement','{}',$2,$3,$4)").bind(id).bind(selected).bind(record).bind(digest).execute(&mut *c).await?;
         sqlx::query("UPDATE gw_requests SET accounting_state='settled',cost_usd=($2::numeric),settlement_digest=$3,version=version+1 WHERE id=$1").bind(id).bind(cost.to_string()).bind(digest).execute(c).await?;

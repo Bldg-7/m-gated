@@ -601,14 +601,14 @@ impl Check {
     /// Provider가 알린 usage(입력, 출력)로 정산한 요청.
     async fn settled(&self, credential: Uuid, input: u64, output: u64) -> Uuid {
         let id = self.dispatched(credential, false).await;
-        let observation = FinalObservation::completed(FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: input,
-            output_tokens: output,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        });
+        let observation = FinalObservation::completed(FinalUsage::new(
+            "synthetic-text",
+            [
+                (m_gated::ledger::finance::UsageCategory::Input, input),
+                (m_gated::ledger::finance::UsageCategory::Output, output),
+            ],
+            None,
+        ));
         assert_eq!(
             self.ledger
                 .finalize_request(id, &observation)
@@ -620,7 +620,8 @@ impl Check {
     }
     /// 시작 event(입력 `input`) 뒤에 끊긴 스트림을 받은 출력 `received`로 정산한 요청(`received` 규칙).
     async fn cut_off(&self, credential: Uuid, input: u64, received: u64) -> Uuid {
-        self.cut_off_with(credential, [input, 0, 0], received).await
+        self.cut_off_with(credential, [input, 0, 0, 0], received)
+            .await
     }
     /// 송신한 요청을, 응답의 usage를 알 수 없어 미정산으로 마감한다.
     /// 이 뒤로는 같은 사용자가 유료 요청을 송신할 수 없으므로 필요한 요청을 모두 송신한 뒤에 부른다.
@@ -790,16 +791,23 @@ impl Check {
             .unwrap();
         id
     }
-    /// 시작 event가 알린 [입력, 캐시 읽기, 캐시 쓰기] 뒤에 끊긴 스트림을 받은 출력 `received`로 정산한 요청.
+    /// 시작 event가 알린 [입력, 캐시 읽기, 5분 캐시 쓰기, 1시간 캐시 쓰기] 뒤에 끊긴 스트림을 받은 출력
+    /// `received`로 정산한 요청.
     /// 받을 때 규칙이 `max_tokens`였으면 max_tokens(100)로 정산한다.
-    async fn cut_off_with(&self, credential: Uuid, start: [u64; 3], received: u64) -> Uuid {
+    async fn cut_off_with(&self, credential: Uuid, start: [u64; 4], received: u64) -> Uuid {
+        use m_gated::ledger::finance::UsageCategory::*;
         let id = self.dispatched(credential, true).await;
         let cutoff = NoUsage::Cutoff {
             start: StartUsage {
                 actual_model: "synthetic-text".into(),
-                input_tokens: start[0],
-                cache_read_tokens: start[1],
-                cache_write_tokens: start[2],
+                tokens: [
+                    (Input, start[0]),
+                    (CacheRead, start[1]),
+                    (CacheWrite5m, start[2]),
+                    (CacheWrite1h, start[3]),
+                ]
+                .into_iter()
+                .collect(),
             },
             received_output: Some(received),
             count_failure: None,
@@ -830,14 +838,14 @@ impl Check {
     /// 송신한 요청을, 응답이 알린 모델(`synthetic-other`)이 profile에 없어 금액을 정하지 못한 채 마감한다.
     /// 사용량 기록(final)은 있지만 미정산이다. 이 뒤로는 같은 사용자가 유료 요청을 송신할 수 없다.
     async fn unpriced(&self, id: Uuid) {
-        let observation = FinalObservation::completed(FinalUsage {
-            actual_model: "synthetic-other".into(),
-            input_tokens: 100,
-            output_tokens: 20,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        });
+        let observation = FinalObservation::completed(FinalUsage::new(
+            "synthetic-other",
+            [
+                (m_gated::ledger::finance::UsageCategory::Input, 100),
+                (m_gated::ledger::finance::UsageCategory::Output, 20),
+            ],
+            None,
+        ));
         assert_eq!(
             self.ledger
                 .finalize_request(id, &observation)
@@ -1684,11 +1692,11 @@ async fn correction_changes_cost_and_output_in_the_original_period_and_is_audite
             .unwrap();
     assert_eq!(
         normalized,
-        json!({"source":"provider_report","actual_model":"synthetic-text","input_tokens":"100","output_tokens":"40","cache_read_tokens":"0","cache_write_tokens":"0","reasoning_tokens":null,"counted_input_tokens":null,"cutoff_rule":"received","cutoff_fallback_reason":null,"previous_output_tokens":"5","previous_source":"cutoff_received"})
+        json!({"source":"provider_report","actual_model":"synthetic-text","input_tokens":"100","output_tokens":"40","cache_read_tokens":"0","cache_write_tokens":"0","cache_write_5m_tokens":"0","cache_write_1h_tokens":"0","reasoning_tokens":null,"counted_input_tokens":null,"cutoff_rule":"received","cutoff_fallback_reason":null,"previous_output_tokens":"5","previous_source":"cutoff_received"})
     );
     assert_eq!(
         evidence,
-        json!({"source":"anthropic_usage_report","bucket_width":"1m","minute":rfc3339(minute),"convention":"end","api_key_id":api_key,"model":"synthetic-text","report":{"uncached_input_tokens":100,"cache_read_tokens":0,"cache_write_tokens":0,"output_tokens":40},"other_requests":0})
+        json!({"source":"anthropic_usage_report","bucket_width":"1m","minute":rfc3339(minute),"convention":"end","api_key_id":api_key,"model":"synthetic-text","report":{"uncached_input_tokens":100,"cache_read_tokens":0,"cache_write_5m_tokens":0,"cache_write_1h_tokens":0,"output_tokens":40},"other_requests":0})
     );
     assert_eq!(
         resolution,
@@ -1774,21 +1782,26 @@ async fn correction_is_refused_when_unsafe() {
     let now = now_utc();
     let m = |ago: i64| minute_ago(now, ago);
     let cell = |ago: i64, n: [u64; 5]| h.admin_api.add_minute(m(ago), key, "synthetic-text", n);
-    // 고칠 수 있는 요청 둘(대조군). 캐시 토큰은 캐시 읽기와 캐시 쓰기(5분+1시간)가 모두 맞아야 한다.
+    // 고칠 수 있는 요청 둘(대조군). 캐시 토큰은 캐시 읽기, 5분 캐시 쓰기, 1시간 캐시 쓰기가 모두 맞아야 한다.
+    // 칸 값은 [입력, 5분 캐시 쓰기, 1시간 캐시 쓰기, 캐시 읽기, 출력]이다.
     let plain = h.cut_off(one, 100, 5).await;
     h.place(plain, m(25) + 10, m(25) + 30).await;
     cell(25, [100, 0, 0, 0, 50]);
-    let cached = h.cut_off_with(one, [100, 8, 10], 5).await;
+    let cached = h.cut_off_with(one, [100, 8, 4, 6], 5).await;
     h.place(cached, m(27) + 10, m(27) + 30).await;
     cell(27, [100, 4, 6, 8, 25]);
     // 입력이 맞지 않는다(보고서 입력 120).
     let input = h.cut_off(one, 100, 5).await;
     h.place(input, m(30) + 10, m(30) + 30).await;
     cell(30, [120, 0, 0, 0, 50]);
-    // 캐시 쓰기가 맞지 않는다(보고서 4+5, 요청 10).
-    let cache = h.cut_off_with(one, [100, 8, 10], 5).await;
+    // 캐시 쓰기가 맞지 않는다(보고서 4+5, 요청 4+6).
+    let cache = h.cut_off_with(one, [100, 8, 4, 6], 5).await;
     h.place(cache, m(32) + 10, m(32) + 30).await;
     cell(32, [100, 4, 5, 8, 25]);
+    // 캐시 쓰기 합계는 같지만 5분·1시간 몫이 다르다(보고서 6+4, 요청 4+6). 따로 비교한다(결정 0012).
+    let split = h.cut_off_with(one, [100, 8, 4, 6], 5).await;
+    h.place(split, m(33) + 10, m(33) + 30).await;
+    cell(33, [100, 6, 4, 8, 25]);
     // 같은 분에 끊긴 요청이 또 있으면 출력을 나눌 수 없다.
     let first = h.cut_off(one, 100, 5).await;
     let second = h.cut_off(one, 100, 7).await;
@@ -1813,17 +1826,19 @@ async fn correction_is_refused_when_unsafe() {
     h.poll().await.unwrap();
     assert!(h.admin_api.minute_calls().is_empty());
     assert!(h.corrections().await.is_empty());
-    // 켜면 대조군만 고친다. 캐시 요청: 입력 100×1 + 캐시 읽기 8×0.1 + 캐시 쓰기 10×1.25 + 출력 25×2.
+    // 켜면 대조군만 고친다. 캐시 요청: 입력 100×1 + 캐시 읽기 8×0.1 + 5분 캐시 쓰기 4×1.25
+    // + 1시간 캐시 쓰기 6×2 + 출력 25×2.
     h.set_rule("received", Some(true)).await;
     h.release_lease().await;
     h.poll().await.unwrap();
     let mut fixed = vec![(plain, "50".to_owned()), (cached, "25".to_owned())];
     fixed.sort();
     assert_eq!(h.corrections().await, fixed);
-    assert_eq!(h.cost(cached).await, "0.000163300000");
+    assert_eq!(h.cost(cached).await, "0.000167800000");
     for (id, cost) in [
         (input, "0.000110000000"),
-        (cache, "0.000123300000"),
+        (cache, "0.000127800000"),
+        (split, "0.000127800000"),
         (first, "0.000110000000"),
         (second, "0.000114000000"),
         (late, "0.000110000000"),

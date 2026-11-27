@@ -128,15 +128,19 @@ providers:
         # quoted string with exactly 12 decimal places.
         # Zero is syntactically valid, so leaving these values in place makes
         # every request settle at 0 USD and budgets never trigger.
-        # The cache feature requires cache_read plus exactly one of
-        # cache_write or cache_write_5m (only the 5 minute cache TTL is
-        # accepted in requests).
+        # Rates use the usage categories of the API (decision 0012). For
+        # messages they are input, output, cache_read, cache_write_5m and
+        # cache_write_1h. The cache feature requires cache_read and
+        # cache_write_5m. cache_write_1h is optional: without it, requests
+        # that ask for the one-hour cache (cache_control ttl "1h") are
+        # refused with 400 unsupported_option.
         # ------------------------------------------------------------------
         rates:
           input: '0.000000000000'
           output: '0.000000000000'
           cache_read: '0.000000000000'
           cache_write_5m: '0.000000000000'
+          # cache_write_1h: '0.000000000000'
 
   # Optional second provider. Remove this block if you do not use OpenAI;
   # otherwise register an OpenAI key in the dashboard.

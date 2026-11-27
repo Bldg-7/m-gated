@@ -237,6 +237,7 @@ impl NativeClient {
                             let size = event.wire_bytes;
                             let step = reader.accept(event)?;
                             progress.provider_error_observed = reader.provider_error();
+                            progress.unpriced |= reader.unpriced();
                             invalidated |= step.error;
                             if progress.start.is_none() {
                                 progress.start = reader.start();

@@ -8,14 +8,16 @@ fn profile() -> ModelProfile {
 #[test]
 fn deepseek_price_does_not_inherit_anthropic_cache_sum() {
     let price = PricingSnapshot::from_profile(ProviderId::Deepseek, &profile());
-    let usage = FinalUsage {
-        actual_model: "synthetic-deepseek".into(),
-        input_tokens: 100,
-        output_tokens: 20,
-        cache_read_tokens: 40,
-        cache_write_tokens: 0,
-        reasoning_tokens: Some(10),
-    };
+    let usage = FinalUsage::new(
+        "synthetic-deepseek",
+        [
+            // `input`은 캐시에 없던 입력(miss)이다(결정 0012).
+            (m_gated::ledger::finance::UsageCategory::Input, 60),
+            (m_gated::ledger::finance::UsageCategory::Output, 20),
+            (m_gated::ledger::finance::UsageCategory::CacheRead, 40),
+        ],
+        Some(10),
+    );
     assert_eq!(
         price.price(&usage, false).unwrap().to_string(),
         "0.000120000000"
@@ -134,14 +136,16 @@ fn deepseek_settles_at_the_catalog_price_with_a_cost_bound() {
     // 시간대별 가격 규칙이 없으므로 다른 Provider처럼 받을 때의 가격과 비용 상한이 있다.
     assert_eq!(spec.pricing.billing_time_rule, "fixed_admission_v1");
     assert!(spec.cost_bound.is_some());
-    let u = FinalUsage {
-        actual_model: p.model.clone(),
-        input_tokens: 100,
-        output_tokens: 20,
-        cache_read_tokens: 40,
-        cache_write_tokens: 0,
-        reasoning_tokens: Some(10),
-    };
+    let u = FinalUsage::new(
+        p.model.clone(),
+        [
+            // `input`은 캐시에 없던 입력(miss)이다(결정 0012).
+            (m_gated::ledger::finance::UsageCategory::Input, 60),
+            (m_gated::ledger::finance::UsageCategory::Output, 20),
+            (m_gated::ledger::finance::UsageCategory::CacheRead, 40),
+        ],
+        Some(10),
+    );
     assert!(spec.pricing.price(&u, false).is_ok());
     let mut wrong = spec.pricing.clone();
     wrong.provider = "openai".into();

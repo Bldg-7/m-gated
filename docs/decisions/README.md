@@ -20,7 +20,7 @@ status. A later decision that changes an earlier one gets a new file, and the ea
 | [0009](0009-deepseek-adapter-as-wasm-trial.md) | Run the DeepSeek adapter as a WASM component, as a trial | Implemented |
 | [0010](0010-management-api-uses-axum-routing.md) | Route the management API with axum's method routing and extractors | Implemented |
 | [0011](0011-password-sign-in.md) | Let each gateway choose e-mail and password sign-in or SSO | Implemented |
-| [0012](0012-usage-categories.md) | Report usage in the gateway's usage categories, with each API declaring the ones it uses | Accepted, not implemented |
+| [0012](0012-usage-categories.md) | Report usage in the gateway's usage categories, with each API declaring the ones it uses | Implemented |
 
 ## Format
 

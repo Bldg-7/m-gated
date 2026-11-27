@@ -89,6 +89,7 @@ fn facts_match_native_adapter() {
     assert_eq!(w.upstream_path(), n.upstream_path());
     assert_eq!(w.error_format(), n.error_format());
     assert_eq!(w.token_rule(&p), n.token_rule(&p));
+    assert_eq!(w.usage_categories(), n.usage_categories());
     assert_eq!(w.response_limit(&p), n.response_limit(&p));
     assert_eq!(wasm.check_profile(&p), native.check_profile(&p));
     let mut no_cache_price = p.clone();
@@ -315,6 +316,27 @@ fn files_with_wrong_hash_imports_or_exports_are_refused() {
         let file = dir.join(format!("{name}.wasm"));
         std::fs::write(&file, &bytes).unwrap();
         refused(file.to_str().unwrap(), Sha256::digest(&bytes).into());
+    }
+    // 인터페이스 0.2.0이 아닌 판으로 내보낸 컴포넌트는 받지 않는다(결정 0012). semver로 호환되는 0.2.1도
+    // 마찬가지다. 실제 컴포넌트에서 내보내는 이름의 판만 같은 길이의 다른 판으로 바꿔 만든다.
+    let bytes = std::fs::read(&path).unwrap();
+    let new = b"m-gated:adapter/provider@0.2.0".as_slice();
+    for (tag, old) in [
+        ("v010", b"m-gated:adapter/provider@0.1.0".as_slice()),
+        ("v021", b"m-gated:adapter/provider@0.2.1".as_slice()),
+    ] {
+        let mut renamed = bytes.clone();
+        let mut found = 0;
+        for i in 0..renamed.len().saturating_sub(new.len()) {
+            if &renamed[i..i + new.len()] == new {
+                renamed[i..i + new.len()].copy_from_slice(old);
+                found += 1;
+            }
+        }
+        assert!(found > 0, "컴포넌트가 0.2.0을 내보낸다");
+        let file = dir.join(format!("{tag}.wasm"));
+        std::fs::write(&file, &renamed).unwrap();
+        refused(file.to_str().unwrap(), Sha256::digest(&renamed).into());
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }

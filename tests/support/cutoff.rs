@@ -243,7 +243,7 @@ async fn received_rule_counts_received_output_and_does_not_block() {
             "client_cancelled".into(),
             Some("received".into()),
             Some("100".into()),
-            json!({"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0})
+            json!({"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}})
         )
     );
     // 정산한 token은 정산한 1분 칸과 예산 합계에 쌓이고 미정산은 없다.
@@ -884,9 +884,9 @@ async fn cutoff_rule_setting_is_versioned_replayed_audited_and_fixed_at_admissio
 fn start() -> StartUsage {
     StartUsage {
         actual_model: "synthetic-text".into(),
-        input_tokens: 100,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
+        tokens: [(m_gated::ledger::finance::UsageCategory::Input, 100)]
+            .into_iter()
+            .collect(),
     }
 }
 fn cutoff(received_output: Option<u64>, count_failure: Option<&'static str>) -> NoUsage {

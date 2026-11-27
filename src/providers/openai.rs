@@ -7,7 +7,7 @@ use super::{
 use crate::{
     config::{ApiKind, ModelProfile, NativeFeature, ProviderId, StartupError},
     json::{self, JsonError, Kind, TokioYield, Visitor},
-    ledger::finance::FinalUsage,
+    ledger::finance::{FinalUsage, UsageCategory},
     stream::{Event, JsonDecoder, Scalar, SseDecoder},
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -496,14 +496,16 @@ fn final_usage(v: &BTreeMap<String, Scalar>, p: &str) -> Option<FinalUsage> {
     if cached > input || reasoning.is_some_and(|n| n > output) {
         return None;
     }
-    Some(FinalUsage {
-        actual_model: model,
-        input_tokens: input,
-        output_tokens: output,
-        cache_read_tokens: cached,
-        cache_write_tokens: 0,
-        reasoning_tokens: reasoning,
-    })
+    // 입력 토큰에는 캐시에서 읽은 입력이 들어 있다. `input` 칸은 캐시가 아닌 입력이다(결정 0012).
+    Some(FinalUsage::new(
+        model,
+        [
+            (UsageCategory::Input, input - cached),
+            (UsageCategory::Output, output),
+            (UsageCategory::CacheRead, cached),
+        ],
+        reasoning,
+    ))
 }
 #[derive(Default)]
 pub struct ResponsesStream {
@@ -779,6 +781,13 @@ impl Api for Responses {
     fn token_rule(&self, _profile: &ModelProfile) -> &'static str {
         "openai_responses_input_includes_cache_output_includes_reasoning_v1"
     }
+    fn usage_categories(&self) -> &'static [UsageCategory] {
+        &[
+            UsageCategory::Input,
+            UsageCategory::Output,
+            UsageCategory::CacheRead,
+        ]
+    }
     fn catalog(&self) -> bool {
         true
     }
@@ -890,14 +899,15 @@ mod tests {
             let u = final_usage(&values, "");
             assert_eq!(u.is_some(), verified);
             if let Some(u) = u {
+                // 캐시에서 읽은 40은 `input` 칸에서 빠져 `cache_read` 칸에 들어간다.
                 assert_eq!(
                     (
-                        u.input_tokens,
-                        u.output_tokens,
-                        u.cache_read_tokens,
+                        u.get(UsageCategory::Input),
+                        u.get(UsageCategory::Output),
+                        u.get(UsageCategory::CacheRead),
                         u.reasoning_tokens
                     ),
-                    (100, 20, 40, Some(10))
+                    (60, 20, 40, Some(10))
                 );
                 let price = crate::ledger::finance::PricingSnapshot::from_profile(
                     crate::config::ProviderId::Openai,
@@ -927,14 +937,15 @@ mod tests {
             crate::config::ProviderId::Openai,
             &profile,
         );
-        let usage = FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: 100,
-            output_tokens: 20,
-            cache_read_tokens: 40,
-            cache_write_tokens: 0,
-            reasoning_tokens: Some(10),
-        };
+        let usage = FinalUsage::new(
+            "synthetic-text",
+            [
+                (UsageCategory::Input, 60),
+                (UsageCategory::Output, 20),
+                (UsageCategory::CacheRead, 40),
+            ],
+            Some(10),
+        );
         profile
             .rates
             .insert("input".into(), "3.000000000000".into());

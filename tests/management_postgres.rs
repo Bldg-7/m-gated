@@ -552,14 +552,14 @@ async fn manual_settlement_records_admin_entry_and_late_final_without_repricing(
     assert_eq!(usage["settled_usd"], "0.123456789012");
     assert_eq!(usage["buckets"]["items"][0]["tokens_complete"], false);
     assert_eq!(usage["buckets"]["items"][0]["input_tokens"], Value::Null);
-    let final_usage = m_gated::ledger::finance::FinalUsage {
-        actual_model: "synthetic-text".into(),
-        input_tokens: 10,
-        output_tokens: 2,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: None,
-    };
+    let final_usage = m_gated::ledger::finance::FinalUsage::new(
+        "synthetic-text",
+        [
+            (m_gated::ledger::finance::UsageCategory::Input, 10),
+            (m_gated::ledger::finance::UsageCategory::Output, 2),
+        ],
+        None,
+    );
     let late = ledger
         .finalize_request(id, &FinalObservation::completed(final_usage))
         .await;
@@ -2522,14 +2522,14 @@ async fn manual_and_late_final_races_preserve_money_and_separate_safety_cas() {
         let admin = bob(&db).await;
         let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
-        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: 5000,
-            output_tokens: 20,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        });
+        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage::new(
+            "synthetic-text",
+            [
+                (m_gated::ledger::finance::UsageCategory::Input, 5000),
+                (m_gated::ledger::finance::UsageCategory::Output, 20),
+            ],
+            None,
+        ));
         if late_first {
             ledger.finalize_request(id, &observation).await.unwrap();
         }
@@ -3204,14 +3204,14 @@ async fn new_late_cost_cause_and_safety_release_serialize_without_unpausing_new_
     let admin = bob(&db).await;
     let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let id = unknown(&db, &ledger, &cfg, actor).await;
-    let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
-        actual_model: "synthetic-text".into(),
-        input_tokens: 5000,
-        output_tokens: 20,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: None,
-    });
+    let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage::new(
+        "synthetic-text",
+        [
+            (m_gated::ledger::finance::UsageCategory::Input, 5000),
+            (m_gated::ledger::finance::UsageCategory::Output, 20),
+        ],
+        None,
+    ));
     let barrier = tokio::sync::Barrier::new(2);
     let (late, release) = tokio::join!(
         async {
@@ -3791,14 +3791,14 @@ async fn late_token_only_bound_violation_pauses_unknown_and_manual_without_repri
         .fetch_one(db.store.pool())
         .await
         .unwrap();
-        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: 10,
-            output_tokens: 17,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        });
+        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage::new(
+            "synthetic-text",
+            [
+                (m_gated::ledger::finance::UsageCategory::Input, 10),
+                (m_gated::ledger::finance::UsageCategory::Output, 17),
+            ],
+            None,
+        ));
         ledger.finalize_request(id, &observation).await.unwrap();
         let row = sqlx::query(
             "SELECT inference_safety_version,inference_pause_reason FROM gw_principals WHERE id=$1",
@@ -3901,14 +3901,14 @@ async fn settlement_root_uses_shared_ordinary_six_gate_and_preserves_finalizatio
         let final_result = ledger
             .finalize_request(
                 spec.id,
-                &FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
-                    actual_model: "synthetic-text".into(),
-                    input_tokens: 10,
-                    output_tokens: 2,
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0,
-                    reasoning_tokens: None,
-                }),
+                &FinalObservation::completed(m_gated::ledger::finance::FinalUsage::new(
+                    "synthetic-text",
+                    [
+                        (m_gated::ledger::finance::UsageCategory::Input, 10),
+                        (m_gated::ledger::finance::UsageCategory::Output, 2),
+                    ],
+                    None,
+                )),
             )
             .await;
         release.notify_waiters();
@@ -3964,14 +3964,14 @@ async fn late_token_only_violation_audit_failure_rolls_back_unknown_and_manual_o
         }
         let money:Value=sqlx::query_scalar("SELECT jsonb_build_object('request',(SELECT to_jsonb(r) FROM gw_requests r WHERE id=$1),'budgets',(SELECT jsonb_agg(to_jsonb(b) ORDER BY scope_id) FROM gw_request_budgets b WHERE request_id=$1),'totals',(SELECT jsonb_agg(to_jsonb(t) ORDER BY scope_id,period_start) FROM gw_usage_totals t),'rates',(SELECT jsonb_agg(to_jsonb(w) ORDER BY scope_id,lane,window_start) FROM gw_rate_windows w))").bind(id).fetch_one(db.store.pool()).await.unwrap();
         sqlx::raw_sql("CREATE FUNCTION gw_fail_late_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic_audit_failure'; END $$; CREATE TRIGGER gw_fail_late_audit BEFORE INSERT ON gw_audit_events FOR EACH ROW WHEN (NEW.actor_kind='system') EXECUTE FUNCTION gw_fail_late_audit()").execute(db.store.pool()).await.unwrap();
-        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: 10,
-            output_tokens: 17,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        });
+        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage::new(
+            "synthetic-text",
+            [
+                (m_gated::ledger::finance::UsageCategory::Input, 10),
+                (m_gated::ledger::finance::UsageCategory::Output, 17),
+            ],
+            None,
+        ));
         assert!(ledger.finalize_request(id, &observation).await.is_err());
         let after:Value=sqlx::query_scalar("SELECT jsonb_build_object('request',(SELECT to_jsonb(r) FROM gw_requests r WHERE id=$1),'budgets',(SELECT jsonb_agg(to_jsonb(b) ORDER BY scope_id) FROM gw_request_budgets b WHERE request_id=$1),'totals',(SELECT jsonb_agg(to_jsonb(t) ORDER BY scope_id,period_start) FROM gw_usage_totals t),'rates',(SELECT jsonb_agg(to_jsonb(w) ORDER BY scope_id,lane,window_start) FROM gw_rate_windows w))").bind(id).fetch_one(db.store.pool()).await.unwrap();
         assert_eq!(money, after);
@@ -4023,14 +4023,14 @@ async fn late_token_only_violation_and_release_serialize_for_unknown_and_manual(
                 .await
                 .unwrap();
         }
-        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: 10,
-            output_tokens: 17,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: None,
-        });
+        let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage::new(
+            "synthetic-text",
+            [
+                (m_gated::ledger::finance::UsageCategory::Input, 10),
+                (m_gated::ledger::finance::UsageCategory::Output, 17),
+            ],
+            None,
+        ));
         let barrier = tokio::sync::Barrier::new(2);
         let (late, release) = tokio::join!(
             async {
@@ -4095,14 +4095,15 @@ async fn late_final_pauses_only_over_original_cost_bound_or_overflow_not_input_t
         let actor = finance::human(db.store.pool()).await;
         let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
-        let usage = m_gated::ledger::finance::FinalUsage {
-            actual_model: "synthetic-text".into(),
-            input_tokens: input,
-            output_tokens: 0,
-            cache_read_tokens: read,
-            cache_write_tokens: write,
-            reasoning_tokens: None,
-        };
+        let usage = m_gated::ledger::finance::FinalUsage::new(
+            "synthetic-text",
+            [
+                (m_gated::ledger::finance::UsageCategory::Input, input),
+                (m_gated::ledger::finance::UsageCategory::CacheRead, read),
+                (m_gated::ledger::finance::UsageCategory::CacheWrite5m, write),
+            ],
+            None,
+        );
         ledger
             .finalize_request(id, &FinalObservation::completed(usage))
             .await

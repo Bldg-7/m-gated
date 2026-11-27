@@ -382,7 +382,8 @@ async fn responses_completed_and_output_limit_incomplete_settle_cost_and_tpm_tok
                 ])
             );
             let u: serde_json::Value = r.get("usage");
-            assert_eq!(u["input_tokens"], "100");
+            // 사용량 기록은 칸마다 남긴다(결정 0012). `input`은 캐시에서 읽지 않은 입력이다.
+            assert_eq!(u["input_tokens"], "60");
             assert_eq!(u["cache_read_tokens"], "40");
             assert_eq!(u["reasoning_tokens"], "10");
             let native: serde_json::Value = r.get("native");

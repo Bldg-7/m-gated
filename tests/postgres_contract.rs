@@ -173,14 +173,14 @@ async fn assert_first_usage_event_kind(pool: &sqlx::PgPool, id: uuid::Uuid, expe
     assert_eq!(kinds, vec![expected], "first observation kind for {id}");
 }
 fn observation() -> FinalObservation {
-    FinalObservation::completed(FinalUsage {
-        actual_model: "synthetic-text".into(),
-        input_tokens: 100,
-        output_tokens: 20,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: None,
-    })
+    FinalObservation::completed(FinalUsage::new(
+        "synthetic-text",
+        [
+            (m_gated::ledger::finance::UsageCategory::Input, 100),
+            (m_gated::ledger::finance::UsageCategory::Output, 20),
+        ],
+        None,
+    ))
 }
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
@@ -216,7 +216,13 @@ async fn allowed_anthropic_request_is_recorded_once() {
         Finalized::Noop
     );
     let mut conflicting = observation();
-    conflicting.usage.as_mut().unwrap().output_tokens += 1;
+    {
+        let u = conflicting.usage.as_mut().unwrap();
+        u.tokens.set(
+            m_gated::ledger::finance::UsageCategory::Output,
+            u.get(m_gated::ledger::finance::UsageCategory::Output) + 1,
+        );
+    }
     assert_eq!(
         ledger
             .finalize_request(spec.id, &conflicting)
@@ -624,7 +630,10 @@ async fn missing_usage_unknown_model_and_price_remain_native_but_block_paid_call
     for usage in [
         serde_json::Value::Null,
         serde_json::json!({"input_tokens":100}),
+        // 캐시 쓰기를 5분·1시간으로 나누지 않았다(결정 0012). 단가를 고를 수 없어 사용량을 쓰지 않는다.
         serde_json::json!({"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":2}),
+        // 나눴지만 profile에 5분 캐시 쓰기 단가가 없다.
+        serde_json::json!({"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":2,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":0}}),
         serde_json::json!({"input_tokens":100,"output_tokens":20,"new_unapproved_usage":1}),
     ] {
         let h = Harness::new().await;
@@ -654,7 +663,7 @@ async fn missing_usage_unknown_model_and_price_remain_native_but_block_paid_call
         let r = h.request("/v1/messages", BODY).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         assert_eq!(h.provider.calls.lock().await.len(), 1);
-        let expected_kind = if usage.get("cache_creation_input_tokens").is_some() {
+        let expected_kind = if usage.get("cache_creation").is_some() {
             "final"
         } else {
             "partial"
@@ -667,7 +676,7 @@ async fn missing_usage_unknown_model_and_price_remain_native_but_block_paid_call
                 2
             );
             assert_eq!(
-                event.get::<serde_json::Value, _>("normalized_usage")["cache_write_tokens"],
+                event.get::<serde_json::Value, _>("normalized_usage")["cache_write_5m_tokens"],
                 "2"
             );
             let resolution: serde_json::Value = event.get("pricing_resolution");
@@ -862,7 +871,13 @@ async fn two_finalizers_apply_one_cost_and_conflicting_final_rolls_back() {
     assert!(outcomes.contains(&Finalized::Settled));
     assert!(outcomes.contains(&Finalized::Noop));
     let mut conflict = observation();
-    conflict.usage.as_mut().unwrap().output_tokens += 1;
+    {
+        let u = conflict.usage.as_mut().unwrap();
+        u.tokens.set(
+            m_gated::ledger::finance::UsageCategory::Output,
+            u.get(m_gated::ledger::finance::UsageCategory::Output) + 1,
+        );
+    }
     assert_eq!(
         ledger
             .finalize_request(spec.id, &conflict)
@@ -944,8 +959,7 @@ fn system_block_configuration() -> config::ValidatedConfig {
         &finance_yaml()
             .replace("fixture_version: text-v1", "fixture_version: text-v1\n        features: [client_tools, inline_png, cache]")
             .replace("fixture_version: free-count-v1", "fixture_version: free-count-v1\n        features: [client_tools, inline_png, cache]")
-            .replace("output: '2.000000000000'", "output: '2.000000000000'\n          cache_read: '0.100000000000'\n          cache_write: '2.500000000000'")
-            .replace("input: '0.000000000000'", "input: '0.000000000000'\n          cache_read: '0.000000000000'\n          cache_write: '0.000000000000'"),
+            .replace("output: '2.000000000000'", "output: '2.000000000000'\n          cache_read: '0.100000000000'\n          cache_write_5m: '2.500000000000'"),
     )
 }
 
@@ -1162,7 +1176,7 @@ async fn system_text_and_message_tool_data_preserve_original_bytes_and_attributi
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn approved_native_features_preserve_text_image_tools_thinking_cache_and_schema() {
     let env = support::environment();
-    let yaml=support::YAML.replace("fixture_version: text-v1","fixture_version: native-v1\n        features: [client_tools, thinking, cache, json_schema, inline_png]\n        approved_beta: [synthetic-native-2026-01-01]").replace("max_output_tokens: 1024","max_output_tokens: 4096").replace("output: '2.000000000000'","output: '2.000000000000'\n          cache_read: '0.100000000000'\n          cache_write: '2.500000000000'");
+    let yaml=support::YAML.replace("fixture_version: text-v1","fixture_version: native-v1\n        features: [client_tools, thinking, cache, json_schema, inline_png]\n        approved_beta: [synthetic-native-2026-01-01]").replace("max_output_tokens: 1024","max_output_tokens: 4096").replace("output: '2.000000000000'","output: '2.000000000000'\n          cache_read: '0.100000000000'\n          cache_write_5m: '2.500000000000'");
     let cfg = config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
@@ -1270,17 +1284,31 @@ async fn model_price_overflow_and_totals_overflow_never_become_zero() {
         }
         let mut obs = observation();
         if variant == "cache_rate" {
-            obs.usage.as_mut().unwrap().cache_write_tokens = 2;
+            obs.usage
+                .as_mut()
+                .unwrap()
+                .tokens
+                .set(m_gated::ledger::finance::UsageCategory::CacheWrite5m, 2);
         }
         if variant == "alias" {
             obs.usage.as_mut().unwrap().actual_model = "unapproved-actual-model".into();
         }
         if variant == "price_overflow" {
-            obs.usage.as_mut().unwrap().input_tokens = i64::MAX as u64;
+            obs.usage.as_mut().unwrap().tokens.set(
+                m_gated::ledger::finance::UsageCategory::Input,
+                i64::MAX as u64,
+            );
         }
         if variant == "token_overflow" {
-            obs.usage.as_mut().unwrap().input_tokens = i64::MAX as u64;
-            obs.usage.as_mut().unwrap().output_tokens = 1;
+            obs.usage.as_mut().unwrap().tokens.set(
+                m_gated::ledger::finance::UsageCategory::Input,
+                i64::MAX as u64,
+            );
+            obs.usage
+                .as_mut()
+                .unwrap()
+                .tokens
+                .set(m_gated::ledger::finance::UsageCategory::Output, 1);
         }
 
         assert_eq!(
@@ -1329,11 +1357,18 @@ async fn model_price_overflow_and_totals_overflow_never_become_zero() {
         );
         assert_eq!(
             event.get::<serde_json::Value, _>("provider_usage")["output_tokens"],
-            obs.usage.as_ref().unwrap().output_tokens
+            obs.usage
+                .as_ref()
+                .unwrap()
+                .get(m_gated::ledger::finance::UsageCategory::Output)
         );
         assert_eq!(
-            event.get::<serde_json::Value, _>("normalized_usage")["cache_write_tokens"],
-            obs.usage.as_ref().unwrap().cache_write_tokens.to_string()
+            event.get::<serde_json::Value, _>("normalized_usage")["cache_write_5m_tokens"],
+            obs.usage
+                .as_ref()
+                .unwrap()
+                .get(m_gated::ledger::finance::UsageCategory::CacheWrite5m)
+                .to_string()
         );
         let resolution: serde_json::Value = event.get("pricing_resolution");
         assert!(resolution["cost_usd"].is_null());
@@ -1786,7 +1821,13 @@ async fn expired_first_final_is_final_observation_but_unknown_accounting() {
         Finalized::Noop
     );
     let mut conflicting = obs.clone();
-    conflicting.usage.as_mut().unwrap().output_tokens += 1;
+    {
+        let u = conflicting.usage.as_mut().unwrap();
+        u.tokens.set(
+            m_gated::ledger::finance::UsageCategory::Output,
+            u.get(m_gated::ledger::finance::UsageCategory::Output) + 1,
+        );
+    }
     assert_eq!(
         ledger
             .finalize_request(expired, &conflicting)
@@ -2922,7 +2963,13 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
         assert!(results.contains(&Finalized::Unknown));
         assert!(results.contains(&Finalized::Noop));
         let mut conflict = observation();
-        conflict.usage.as_mut().unwrap().output_tokens += 1;
+        {
+            let u = conflict.usage.as_mut().unwrap();
+            u.tokens.set(
+                m_gated::ledger::finance::UsageCategory::Output,
+                u.get(m_gated::ledger::finance::UsageCategory::Output) + 1,
+            );
+        }
         assert_eq!(
             ledger.finalize_request(id, &conflict).await,
             Err(LedgerError::Conflict)

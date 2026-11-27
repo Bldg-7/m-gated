@@ -1,4 +1,4 @@
-use m_gated::{config::ModelProfile, providers::openai};
+use m_gated::{config::ModelProfile, ledger::finance::UsageCategory, providers::openai};
 fn profile(api: &str) -> ModelProfile {
     serde_json::from_value(serde_json::json!({"model":"synthetic-text","api":api,"profile_version":"fixture-v1","pricing_version":"price-v1","fixture_version":"native-v1","actual_models":["synthetic-text"],"chat_output_limit_field":if api == "openai_chat" {Some("max_completion_tokens")} else {None},"embedding_dimensions":if api == "embeddings" {Some(serde_json::json!({"default":3,"max":4096}))} else {None},"embedding_encodings":if api == "embeddings" {vec!["float","base64"]} else {vec![]},"max_input_tokens":4096,"max_output_tokens":1024,"max_body_bytes":8388608,"max_response_bytes":16777216,"rates":{"input":"1.000000000000","output":"2.000000000000"}})).unwrap()
 }
@@ -52,12 +52,12 @@ async fn chat_usage_only_done_and_reasoning_are_independent() {
     let usage = reducer.finish().unwrap().unwrap();
     assert_eq!(
         (
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_read_tokens,
+            usage.get(UsageCategory::Input),
+            usage.get(UsageCategory::Output),
+            usage.get(UsageCategory::CacheRead),
             usage.reasoning_tokens
         ),
-        (100, 20, 40, Some(10))
+        (60, 20, 40, Some(10))
     );
     assert!(parser.retained_peak() <= 256 * 1024);
 }
@@ -161,14 +161,7 @@ fn embeddings_input_only_price_never_requires_or_invents_output_rate() {
     let mut p = profile("embeddings");
     p.rates.remove("output");
     let price = PricingSnapshot::from_profile(ProviderId::Openai, &p);
-    let u = FinalUsage {
-        actual_model: "synthetic-text".into(),
-        input_tokens: 100,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: None,
-    };
+    let u = FinalUsage::new("synthetic-text", [(UsageCategory::Input, 100)], None);
     assert_eq!(
         price.price(&u, false).map(|v| v.to_string()),
         Ok("0.000100000000".into()),
@@ -184,20 +177,13 @@ fn embeddings_price_rejects_missing_input_extra_rates_output_cache_reasoning_and
     let mut p = profile("embeddings");
     p.rates.remove("output");
     let price = PricingSnapshot::from_profile(ProviderId::Openai, &p);
-    let valid = FinalUsage {
-        actual_model: "synthetic-text".into(),
-        input_tokens: 100,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: None,
-    };
+    let valid = FinalUsage::new("synthetic-text", [(UsageCategory::Input, 100)], None);
     for field in ["output", "cache_read", "cache_write", "reasoning", "model"] {
         let mut u = valid.clone();
         match field {
-            "output" => u.output_tokens = 1,
-            "cache_read" => u.cache_read_tokens = 1,
-            "cache_write" => u.cache_write_tokens = 1,
+            "output" => u.tokens.set(UsageCategory::Output, 1),
+            "cache_read" => u.tokens.set(UsageCategory::CacheRead, 1),
+            "cache_write" => u.tokens.set(UsageCategory::CacheWrite, 1),
             "reasoning" => u.reasoning_tokens = Some(0),
             _ => u.actual_model = "unknown".into(),
         };

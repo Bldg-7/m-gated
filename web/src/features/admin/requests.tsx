@@ -5,8 +5,8 @@ import { msgid } from '../../lib/i18n';
 import { Link } from '../../lib/router';
 import type { KeyMetadata, Page } from '../../lib/types';
 import { Money, SearchSelect, Select, StatusBadge, TextArea, Time } from '../../ui/ui';
-import { directId, fields, PrincipalSelect, ReadState, RequestModelSelect, useAll, useCommand, useResource } from './shared';
-import type { RequestDetail, RequestSummary } from './types';
+import { directId, fields, PrincipalSelect, ReadState, RequestModelSelect, useAll, useCommand, usageCategoryNames, useResource } from './shared';
+import type { RequestDetail, RequestSummary, SelectedUsage } from './types';
 const providers = [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['deepseek', 'DeepSeek'], ['typesafe', 'TypeSafe']];
 const phases = [['admitted', msgid('입장')], ['dispatching', msgid('전송 중')], ['finished', msgid('종료')]];
 const outcomes = [['completed', msgid('완료')], ['rejected', msgid('거절')], ['failed', msgid('실패')], ['cancelled', msgid('취소됨')]];
@@ -107,6 +107,14 @@ function RequestEditor({ id, onChanged }: { id: string; onChanged: () => Promise
           <div className="actions"><button className="btn-primary">{t('수동 정산 확인')}</button></div></fieldset></form>}
       </div>
     </div>
-    <section aria-label={t('선택 usage')} className="card"><h3>{t('사용량 출처와 token')}</h3><dl className="kv">{(['partial', 'final', 'late_final', 'correction'] as const).map(kind => <Fragment key={kind}><dt className="mono">{kind}</dt><dd>{r.usage[kind] ? <div className="stack-sm"><span>{t('출처: {{source}} · 입력 {{input}} / 출력 {{output}}', { source: r.usage[kind]!.source, input: r.usage[kind]!.input_tokens ?? t('미확인'), output: r.usage[kind]!.output_tokens ?? t('미확인') })}</span><pre>{JSON.stringify(r.usage[kind], null, 2)}</pre></div> : <span className="meta">{t('기록 없음')}</span>}</dd></Fragment>)}</dl></section>
+    <section aria-label={t('선택 usage')} className="card"><h3>{t('사용량 출처와 token')}</h3><dl className="kv">{(['partial', 'final', 'late_final', 'correction'] as const).map(kind => <Fragment key={kind}><dt className="mono">{kind}</dt><dd>{r.usage[kind] ? <div className="stack-sm"><span>{t('출처: {{source}} · 입력 {{input}} / 출력 {{output}}', { source: r.usage[kind]!.source, input: r.usage[kind]!.input_tokens ?? t('미확인'), output: r.usage[kind]!.output_tokens ?? t('미확인') })}</span><UsageCategories usage={r.usage[kind]!} /><pre>{JSON.stringify(r.usage[kind], null, 2)}</pre></div> : <span className="meta">{t('기록 없음')}</span>}</dd></Fragment>)}</dl></section>
   </>}</section>;
+}
+
+/** 사용량 칸(결정 0012)마다 기록된 토큰 수. 0인 칸은 빼고, 토큰을 모르면 미확인으로 보인다. */
+function UsageCategories({ usage }: { usage: SelectedUsage }) {
+  const { t } = useTranslation();
+  const values = usageCategoryNames.map(([key, name]) => [name, (usage as Record<string, unknown>)[`${key}_tokens`]] as const).filter(([, n]) => n !== undefined && n !== '0');
+  const label = values.length === 0 ? t('없음') : values.every(([, n]) => typeof n !== 'string') ? t('미확인') : values.map(([name, n]) => `${t(name)} ${typeof n === 'string' ? n : t('미확인')}`).join(' · ');
+  return <span>{t('칸별 token')}: {label}</span>;
 }
