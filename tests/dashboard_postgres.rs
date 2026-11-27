@@ -12,7 +12,7 @@ use axum::{
     http::Request,
 };
 use m_gated::{
-    auth::{AccessSettings, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
     config::{self, ConfigInputs},
     http::{self, AppState},
     ledger::{
@@ -25,9 +25,10 @@ use m_gated::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
+/// 고정 관리자는 YAML의 admin@example.invalid다. alice는 일반 사용자로 접근 목록에 넣는다.
+const ACCESS: &[(&str, &str)] = &[("alice@example.test", "user")];
 fn config() -> config::ValidatedConfig {
-    let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    let env = support::environment();
     config::load(ConfigInputs {
         yaml: support::YAML,
         file_environment: None,
@@ -39,11 +40,12 @@ fn config() -> config::ValidatedConfig {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn current_scope_balances_are_not_filtered_usage() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let cfg = config();
     let grants =
         json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages"]}]);
-    let ledger = PgLedger::new(db.store.clone(), AccessSettings::from_config(&cfg), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let current = finance::current(db.store.pool(), id).await;
     let spec = RequestSpec::from_profile(
         config::ProviderId::Anthropic,
@@ -90,6 +92,7 @@ async fn current_scope_balances_are_not_filtered_usage() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn cookie_login_me_usage_and_current_server_access() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
@@ -233,11 +236,7 @@ async fn cookie_login_me_usage_and_current_server_access() {
 async fn settled_fixture(db: &postgres::TestDb) -> (uuid::Uuid, uuid::Uuid, Arc<PgLedger>) {
     let id = finance::human(db.store.pool()).await;
     let cfg = config();
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&cfg),
-        [7; 32],
-    ));
+    let ledger = Arc::new(PgLedger::new(db.store.clone(), [7; 32]));
     let human = finance::current(db.store.pool(), id).await;
     let spec = RequestSpec::from_profile(
         config::ProviderId::Anthropic,
@@ -266,6 +265,7 @@ async fn settled_fixture(db: &postgres::TestDb) -> (uuid::Uuid, uuid::Uuid, Arc<
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn bucket_cursor_uses_typed_group_keys_and_freezes_filters() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let (id, source, _) = settled_fixture(&db).await;
     let grants = json!([]);
     // 승인된 과거 alias의 합성 SQL 행들이다. 현행 profile 필터로 이력을 지우지 않는다.
@@ -413,6 +413,7 @@ async fn bucket_cursor_uses_typed_group_keys_and_freezes_filters() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn retained_month_total_does_not_fabricate_deleted_detail() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let (id, source, _) = settled_fixture(&db).await;
     let grants = json!([]);
     let initial = db
@@ -503,6 +504,7 @@ async fn retained_month_total_does_not_fabricate_deleted_detail() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn schema_health_checks_all_required_financial_tables() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     assert_eq!(db.store.health().await, (true, true));
     sqlx::query("DROP TABLE gw_usage_events")
         .execute(db.store.pool())
@@ -520,6 +522,7 @@ async fn schema_health_checks_all_required_financial_tables() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn selected_key_balance_and_null_tokens_are_independent_of_period_filters() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let (id, source, _) = settled_fixture(&db).await;
     let grants = json!([]);
     let key = uuid::Uuid::new_v4();
@@ -594,6 +597,7 @@ async fn selected_key_balance_and_null_tokens_are_independent_of_period_filters(
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn multimonth_usage_never_emits_an_out_of_range_amount() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let (id, source, _) = settled_fixture(&db).await;
     let clone = uuid::Uuid::new_v4();
     let max = "9999999999999999.999999999999";

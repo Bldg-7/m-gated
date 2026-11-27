@@ -115,7 +115,7 @@ async fn recovery_process_worker() {
     } else {
         s4::chargeable_configuration()
     };
-    let ledger = PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+    let ledger = PgLedger::new(store.clone(), [1; 32]);
     match job["action"].as_str().unwrap() {
         "prepare" => {
             let user = uuid::Uuid::parse_str(job["user"].as_str().unwrap()).unwrap();
@@ -185,6 +185,7 @@ async fn killed_admit_dispatch_and_free_paid_count_edges_recover_in_other_proces
         for offset in [-1i64, 0, 1] {
             for reaper_first in [false, true] {
                 let db = postgres::TestDb::new().await;
+                postgres::grant_access(&db.store, &configuration(), ACCESS).await;
                 let clock = db.clock_store(None).await;
                 let user = finance::human(clock.pool()).await;
                 sqlx::query("UPDATE gw_policies SET budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL").bind(user).execute(clock.pool()).await.unwrap();
@@ -230,6 +231,7 @@ async fn killed_admit_dispatch_and_free_paid_count_edges_recover_in_other_proces
     }
     // admitted barrier에서 실제 kill한 경우에는 승인 없이 자기 미송신0으로 복구한다.
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let clock = db.clock_store(None).await;
     let user = finance::human(clock.pool()).await;
     let mut writer = Worker::spawn(&db, json!({"action":"prepare","user":user,"free":false})).await;
@@ -249,6 +251,7 @@ async fn killed_admit_dispatch_and_free_paid_count_edges_recover_in_other_proces
 async fn free_paid_external_uncertain_dispatch_recovers_in_other_process() {
     for free in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let clock = db.clock_store(None).await;
         let user = finance::human(clock.pool()).await;
         sqlx::query(

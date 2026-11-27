@@ -3,13 +3,10 @@ use super::*;
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_expired_free_count_recovers_zero_without_stopping_or_resending() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let cfg = configuration();
     let spec =
         RequestSpec::from_profile(ProviderId::Anthropic, &cfg.providers()[0].profiles[1], None);
@@ -67,6 +64,7 @@ async fn key(
 async fn s4_key_budget_and_tpm_failures_roll_back_both_scopes() {
     for tpm in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         // 앞 요청의 정산과 다음 요청이 같은 1분 칸에 들도록 시각을 고정한다.
         let store = db.clock_store(None).await;
         let id = finance::human(store.pool()).await;
@@ -85,11 +83,7 @@ async fn s4_key_budget_and_tpm_failures_roll_back_both_scopes() {
             None,
         )
         .await;
-        let ledger = PgLedger::new(
-            store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        );
+        let ledger = PgLedger::new(store.clone(), [1; 32]);
         let first = specification();
         ledger
             .admit_scoped(&current, &first, Some(key), None)
@@ -146,14 +140,11 @@ async fn s4_key_budget_and_tpm_failures_roll_back_both_scopes() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_key_rpm_failure_rolls_back_principal_admission() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
     let key = key(db.store.pool(), id, None, None, Some(1)).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     ledger
         .admit_scoped(&current, &specification(), Some(key), None)
         .await
@@ -179,6 +170,7 @@ async fn s4_key_rpm_failure_rolls_back_principal_admission() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_tpm_counts_settled_tokens_in_the_settlement_minute() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let store = db.clock_store(None).await;
     set_clock(store.pool(), "2025-03-10T12:00:10Z").await;
     let id = finance::human(store.pool()).await;
@@ -188,11 +180,7 @@ async fn s4_tpm_counts_settled_tokens_in_the_settlement_minute() {
         .await
         .unwrap();
     let current = finance::current(store.pool(), id).await;
-    let ledger = PgLedger::new(
-        store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(store.clone(), [1; 32]);
     // 12:00에는 정산된 토큰이 없으므로 두 요청을 모두 보낸다. 실행 중인 요청은 토큰을 잡아 두지 않는다.
     let long = specification();
     let running = specification();
@@ -248,6 +236,7 @@ async fn s4_tpm_counts_settled_tokens_in_the_settlement_minute() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_current_ceiling_never_resets_scope() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     sqlx::query(
         "UPDATE gw_policies SET budget_limit_usd=('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL",
@@ -257,22 +246,13 @@ async fn s4_current_ceiling_never_resets_scope() {
     .await
     .unwrap();
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let a = specification();
     ledger.admit_request(&current, &a).await.unwrap();
     ledger.authorize_dispatch(a.id).await.unwrap();
     ledger.finalize_request(a.id, &observation()).await.unwrap();
     let ceiling = limits(budget("0.000100000000"));
-    let stricter = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    )
-    .with_ceiling(ceiling.clone());
+    let stricter = PgLedger::new(db.store.clone(), [1; 32]).with_ceiling(ceiling.clone());
     let b = specification();
     stricter.admit_request(&current, &b).await.unwrap();
     assert_eq!(
@@ -332,13 +312,10 @@ async fn s4_current_ceiling_never_resets_scope() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_policy_transition_keeps_stable_scope_and_cost() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     let mut tx = db.store.pool().begin().await.unwrap();
@@ -443,6 +420,7 @@ pub(super) fn count_observation(free: bool) -> FinalObservation {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_count_lease_edges_and_both_finalizer_recovery_orders_are_independent() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let store = db.clock_store(None).await;
     for free in [false, true] {
         for offset in [-1i64, 0, 1] {
@@ -458,8 +436,7 @@ async fn s4_count_lease_edges_and_both_finalizer_recovery_orders_are_independent
                 } else {
                     chargeable_configuration()
                 };
-                let ledger =
-                    PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+                let ledger = PgLedger::new(store.clone(), [1; 32]);
                 let spec = RequestSpec::from_profile(
                     ProviderId::Anthropic,
                     &cfg.providers()[0].profiles[1],
@@ -552,6 +529,7 @@ async fn s4_count_lease_edges_and_both_finalizer_recovery_orders_are_independent
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_key_current_revoke_policy_and_independent_balances_are_sql() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     sqlx::query(
         "UPDATE gw_policies SET budget_limit_usd=('2.000000000000') WHERE principal_id=$1 AND key_id IS NULL",
@@ -562,11 +540,7 @@ async fn s4_key_current_revoke_policy_and_independent_balances_are_sql() {
     .unwrap();
     let current = finance::current(db.store.pool(), id).await;
     let key = key(db.store.pool(), id, Some("1.000000000000"), None, None).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     ledger
         .admit_scoped(&current, &spec, Some(key), None)
@@ -636,12 +610,13 @@ async fn key_fixture(db: &postgres::TestDb, id: uuid::Uuid) -> KeyScope {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_unknown_and_expired_chargeable_block_new_keys_providers_and_calendar_month() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let store = db.clock_store(None).await;
     let id = finance::human(store.pool()).await;
     sqlx::query("UPDATE gw_policies SET budget_limit_usd=('9.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(store.pool()).await.unwrap();
     let current = finance::current(store.pool(), id).await;
     let cfg = chargeable_configuration();
-    let ledger = PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+    let ledger = PgLedger::new(store.clone(), [1; 32]);
     let paid =
         RequestSpec::from_profile(ProviderId::Anthropic, &cfg.providers()[0].profiles[1], None);
     ledger.admit_request(&current, &paid).await.unwrap();
@@ -695,12 +670,7 @@ async fn s4_unknown_and_expired_chargeable_block_new_keys_providers_and_calendar
         &freecfg.providers()[0].profiles[1],
         None,
     );
-    let zero = PgLedger::new(
-        store.clone(),
-        AccessSettings::from_config(&freecfg),
-        [1; 32],
-    )
-    .with_ceiling(limits(budget("0.000000000000")));
+    let zero = PgLedger::new(store.clone(), [1; 32]).with_ceiling(limits(budget("0.000000000000")));
     zero.admit_request(&current, &free).await.unwrap();
     assert!(zero.authorize_dispatch(free.id).await.is_ok());
     store.pool().close().await;
@@ -711,6 +681,7 @@ async fn s4_unknown_and_expired_chargeable_block_new_keys_providers_and_calendar
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_iana_dst_month_keeps_cost_in_admission_period_and_tokens_in_settlement_minute() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let store = db.clock_store(None).await;
     for (admit, finish, hours) in [
         ("2025-04-01T03:59:00Z", "2025-04-01T04:00:00Z", 743i64),
@@ -726,11 +697,7 @@ async fn s4_iana_dst_month_keeps_cost_in_admission_period_and_tokens_in_settleme
         .await
         .unwrap();
         let current = finance::current(store.pool(), id).await;
-        let ledger = PgLedger::new(
-            store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        );
+        let ledger = PgLedger::new(store.clone(), [1; 32]);
         let spec = specification();
         ledger.admit_request(&current, &spec).await.unwrap();
         ledger.authorize_dispatch(spec.id).await.unwrap();
@@ -764,6 +731,7 @@ async fn s4_free_and_paid_count_commit_ack_loss_recovery_never_reissues_permit()
     let server = provider.serve().await;
     for free in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let proxy = pg_proxy::CommitProxy::new().await;
         let faulty = db.clock_store(Some(proxy.port)).await;
         let healthy = db.clock_store(None).await;
@@ -775,7 +743,7 @@ async fn s4_free_and_paid_count_commit_ack_loss_recovery_never_reissues_permit()
         } else {
             chargeable_configuration()
         };
-        let ledger = PgLedger::new(faulty.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let ledger = PgLedger::new(faulty.clone(), [1; 32]);
         let spec =
             RequestSpec::from_profile(ProviderId::Anthropic, &cfg.providers()[0].profiles[1], None);
         ledger.admit_request(&current, &spec).await.unwrap();
@@ -807,7 +775,7 @@ async fn s4_free_and_paid_count_commit_ack_loss_recovery_never_reissues_permit()
             .await
             .unwrap();
         rollback_barrier.rollback().await.unwrap();
-        let recovery = PgLedger::new(healthy.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let recovery = PgLedger::new(healthy.clone(), [1; 32]);
         sqlx::query("UPDATE gw_fixture_clock SET observed=(SELECT lease_expires_at FROM gw_requests WHERE id=$1)").bind(spec.id).execute(healthy.pool()).await.unwrap();
         assert_eq!(
             recovery.recover_expired(spec.id).await.unwrap(),
@@ -839,13 +807,10 @@ async fn s4_free_and_paid_count_commit_ack_loss_recovery_never_reissues_permit()
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_recovery_principal_nowait_skips_whole_candidate_and_releases_partial_locks() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     let expired = finance::expired_copy(db.store.pool(), spec.id, "admitted").await;
@@ -876,12 +841,13 @@ async fn s4_recovery_principal_nowait_skips_whole_candidate_and_releases_partial
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn s4_count_bound_violation_and_system_audit_are_atomic_for_both_scopes() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     sqlx::query("UPDATE gw_policies SET budget_limit_usd=('1.000000000000') WHERE principal_id=$1 AND key_id IS NULL").bind(id).execute(db.store.pool()).await.unwrap();
     let current = finance::current(db.store.pool(), id).await;
     let key = key(db.store.pool(), id, Some("1.000000000000"), None, None).await;
     let cfg = chargeable_configuration();
-    let ledger = PgLedger::new(db.store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let a = RequestSpec::from_profile(ProviderId::Anthropic, &cfg.providers()[0].profiles[1], None);
     let b = RequestSpec::from_profile(ProviderId::Anthropic, &cfg.providers()[0].profiles[1], None);
     for spec in [&a, &b] {
@@ -966,6 +932,7 @@ async fn s4_fixed_sdk_paid_external_count_has_one_client_attempt() {
 async fn s4_paid_count_with_tpm_adds_no_tokens() {
     for lane in ["principal", "key", "ceiling"] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let id = finance::human(db.store.pool()).await;
         if lane == "principal" {
             sqlx::query(
@@ -984,12 +951,7 @@ async fn s4_paid_count_with_tpm_adds_no_tokens() {
         };
         let profile = chargeable_configuration().providers()[0].profiles[1].clone();
         let spec = RequestSpec::from_profile(ProviderId::Anthropic, &profile, None);
-        let ledger = PgLedger::new(
-            db.store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        )
-        .with_ceiling(PolicyLimits {
+        let ledger = PgLedger::new(db.store.clone(), [1; 32]).with_ceiling(PolicyLimits {
             tpm: if lane == "ceiling" { Some(1) } else { None },
             ..Default::default()
         });
@@ -1026,14 +988,13 @@ async fn s4_authorization_errors_keep_native_403() {
     let mut kinds = Vec::new();
     for paused in [false, true] {
         let cfg = configuration();
-        let access = AccessSettings::from_config(&cfg);
         let digest = m_gated::gateway::auth_config_digest(&cfg);
         let h = Harness::with_config(cfg).await;
         let mut trigger = None;
         if paused {
             // FK가 유효한 기존 미송신 행을 안전차단 원인으로 둔다. S5 해제 API의 대체가 아니다.
             let current = finance::current(h.db.store.pool(), h.principal).await;
-            let ledger = PgLedger::new(h.db.store.clone(), access, digest);
+            let ledger = PgLedger::new(h.db.store.clone(), digest);
             let spec = specification();
             ledger.admit_request(&current, &spec).await.unwrap();
             ledger
@@ -1119,6 +1080,7 @@ async fn s4_zero_budget_rejects_zero_rate_chargeable_count() {
     for scope in ["principal", "key", "ceiling"] {
         for free in [false, true] {
             let db = postgres::TestDb::new().await;
+            postgres::grant_access(&db.store, &configuration(), ACCESS).await;
             let id = finance::human(db.store.pool()).await;
             sqlx::query("UPDATE gw_policies SET budget_limit_usd=($2::numeric) WHERE principal_id=$1 AND key_id IS NULL")
                 .bind(id).bind(if scope == "principal" {"0.000000000000"} else {"1.000000000000"}).execute(db.store.pool()).await.unwrap();
@@ -1128,16 +1090,12 @@ async fn s4_zero_budget_rejects_zero_rate_chargeable_count() {
                 None
             };
             let current = finance::current(db.store.pool(), id).await;
-            let ledger = PgLedger::new(
-                db.store.clone(),
-                AccessSettings::from_config(&configuration()),
-                [1; 32],
-            )
-            .with_ceiling(if scope == "ceiling" {
-                limits(budget("0.000000000000"))
-            } else {
-                PolicyLimits::default()
-            });
+            let ledger =
+                PgLedger::new(db.store.clone(), [1; 32]).with_ceiling(if scope == "ceiling" {
+                    limits(budget("0.000000000000"))
+                } else {
+                    PolicyLimits::default()
+                });
             let cfg = zero_rate_count_configuration(free);
             let spec = RequestSpec::from_profile(
                 ProviderId::Anthropic,
@@ -1360,6 +1318,7 @@ async fn s4_budget_admits_while_settled_is_below_limit_in_every_scope() {
     const LIMIT: &str = "0.000280000000";
     for scope in ["principal", "key", "ceiling"] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let id = finance::human(db.store.pool()).await;
         sqlx::query("UPDATE gw_policies SET budget_limit_usd=($2::numeric) WHERE principal_id=$1 AND key_id IS NULL")
             .bind(id).bind(if scope == "principal" {LIMIT} else {"1.000000000000"}).execute(db.store.pool()).await.unwrap();
@@ -1369,12 +1328,7 @@ async fn s4_budget_admits_while_settled_is_below_limit_in_every_scope() {
             None
         };
         let current = finance::current(db.store.pool(), id).await;
-        let ledger = PgLedger::new(
-            db.store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        )
-        .with_ceiling(if scope == "ceiling" {
+        let ledger = PgLedger::new(db.store.clone(), [1; 32]).with_ceiling(if scope == "ceiling" {
             limits(budget(LIMIT))
         } else {
             PolicyLimits::default()

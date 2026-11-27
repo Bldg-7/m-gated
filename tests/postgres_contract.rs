@@ -6,6 +6,7 @@ use sqlx::{Row, ValueRef};
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn finance_schema_is_real_sql() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('gw_requests') IS NOT NULL")
         .fetch_one(db.store.pool())
         .await
@@ -23,6 +24,7 @@ mod finance;
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn request_check_rejects_finished_pending_and_null_bypasses() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let principal = finance::human(db.store.pool()).await;
     let mut accepted = 0;
     for phase in ["admitted", "dispatching", "finished"] {
@@ -139,11 +141,13 @@ fn configuration_from_yaml(yaml: &str) -> config::ValidatedConfig {
 fn admin_configuration() -> config::ValidatedConfig {
     configuration_with_admin(&finance_yaml(), true)
 }
+/// 접근 목록. alice는 일반 사용자다. 관리자 설정에서는 alice가 고정 관리자라 이 행은 무시된다.
+const ACCESS: &[(&str, &str)] = &[("alice@example.test", "user")];
+/// `admin`이 아니면 고정 관리자는 YAML의 admin@example.invalid다.
 fn configuration_with_admin(yaml: &str, admin: bool) -> config::ValidatedConfig {
     let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
     if admin {
-        env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+        env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     }
     config::load(ConfigInputs {
         yaml,
@@ -182,13 +186,10 @@ fn observation() -> FinalObservation {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn allowed_anthropic_request_is_recorded_once() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     assert_eq!(
         ledger.admit_request(&current, &spec).await.unwrap(),
@@ -291,6 +292,7 @@ impl Harness {
             runtime::Dependency,
         };
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, ACCESS).await;
         let database = if controlled_clock {
             db.clock_store(None).await
         } else {
@@ -307,22 +309,15 @@ impl Harness {
             .verify(&sso::credential(sso_token.clone()), 1900000000)
             .await
             .unwrap();
-        let current = database
-            .current_human(&identity, &AccessSettings::from_config(&cfg))
-            .await
-            .unwrap();
+        let current = database.current_human(&identity).await.unwrap();
         let principal = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).execute(database.pool()).await.unwrap();
         // 추론은 가상 키로만 받는다. 시험 요청은 이 키로 보낸다.
         let token = finance::virtual_key(&database, &cfg, principal).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
-            PgLedger::new(
-                database.clone(),
-                AccessSettings::from_config(&cfg),
-                m_gated::gateway::auth_config_digest(&cfg),
-            )
-            .with_ceiling(cfg.execution_ceiling().clone()),
+            PgLedger::new(database.clone(), m_gated::gateway::auth_config_digest(&cfg))
+                .with_ceiling(cfg.execution_ceiling().clone()),
         );
         let provider = provider::Provider::new();
         let provider_server = if reset {
@@ -341,7 +336,7 @@ impl Harness {
             ledger,
             client,
         ));
-        // 설정 화면의 관리 API도 같은 장부에 붙인다. 관리자는 설정의 ADMIN_EMAILS로 정한다.
+        // 설정 화면의 관리 API도 같은 장부에 붙인다. 관리자는 접근 목록(`gw_access`)의 역할로 정한다.
         let dashboard = Arc::new(m_gated::admin::DashboardApi::new(
             &cfg,
             auth.clone(),
@@ -778,13 +773,10 @@ async fn free_count_result_and_lost_result_are_not_paid_usage_or_missing_tokens(
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn fixed_price_and_no_dispatch_fact_do_not_rewrite_prior_usage() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     let _p = ledger.authorize_dispatch(spec.id).await.unwrap();
@@ -844,13 +836,10 @@ async fn fixed_price_and_no_dispatch_fact_do_not_rewrite_prior_usage() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn two_finalizers_apply_one_cost_and_conflicting_final_rolls_back() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    ));
+    let ledger = Arc::new(PgLedger::new(db.store.clone(), [1; 32]));
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     let _p = ledger.authorize_dispatch(spec.id).await.unwrap();
@@ -891,13 +880,10 @@ async fn two_finalizers_apply_one_cost_and_conflicting_final_rolls_back() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn safety_cost_audit_and_separate_version_are_atomic() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let mut spec = specification();
     spec.cost_bound = Some("0.000000000001".parse().unwrap());
     ledger.admit_request(&current, &spec).await.unwrap();
@@ -1175,8 +1161,7 @@ async fn system_text_and_message_tool_data_preserve_original_bytes_and_attributi
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn approved_native_features_preserve_text_image_tools_thinking_cache_and_schema() {
-    let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    let env = support::environment();
     let yaml=support::YAML.replace("fixture_version: text-v1","fixture_version: native-v1\n        features: [client_tools, thinking, cache, json_schema, inline_png]\n        approved_beta: [synthetic-native-2026-01-01]").replace("max_output_tokens: 1024","max_output_tokens: 4096").replace("output: '2.000000000000'","output: '2.000000000000'\n          cache_read: '0.100000000000'\n          cache_write: '2.500000000000'");
     let cfg = config::load(ConfigInputs {
         yaml: &yaml,
@@ -1263,13 +1248,10 @@ async fn model_price_overflow_and_totals_overflow_never_become_zero() {
         "token_overflow",
     ] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let id = finance::human(db.store.pool()).await;
         let current = finance::current(db.store.pool(), id).await;
-        let ledger = PgLedger::new(
-            db.store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        );
+        let ledger = PgLedger::new(db.store.clone(), [1; 32]);
         let mut spec = specification();
         if variant == "price_overflow" {
             for rate in &mut spec.pricing.rates {
@@ -1376,15 +1358,12 @@ async fn real_commit_ack_loss_never_reconstructs_a_send_permit() {
     use std::sync::atomic::Ordering;
     for free in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let principal = finance::human(db.store.pool()).await;
         let current = finance::current(db.store.pool(), principal).await;
         let proxy = pg_proxy::CommitProxy::new().await;
         let proxy_store = db.store_via_proxy(proxy.port).await;
-        let ledger = PgLedger::new(
-            proxy_store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        );
+        let ledger = PgLedger::new(proxy_store.clone(), [1; 32]);
         let cfg = configuration();
         let profiles = &cfg.providers()[0].profiles;
         let spec = RequestSpec::from_profile(
@@ -1440,11 +1419,7 @@ async fn real_commit_ack_loss_never_reconstructs_a_send_permit() {
             .await
             .unwrap();
         assert_eq!(state, "dispatching");
-        let second = PgLedger::new(
-            db.store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        );
+        let second = PgLedger::new(db.store.clone(), [1; 32]);
         assert!(matches!(
             second.authorize_dispatch(spec.id).await,
             Err(LedgerError::Conflict)
@@ -1692,13 +1667,10 @@ async fn expired_chargeable_and_free_dispatch_have_different_facts_and_one_effec
     use m_gated::ledger::finance::FinalOutcome;
     for free in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let principal = finance::human(db.store.pool()).await;
         let current = finance::current(db.store.pool(), principal).await;
-        let ledger = Arc::new(PgLedger::new(
-            db.store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        ));
+        let ledger = Arc::new(PgLedger::new(db.store.clone(), [1; 32]));
         let cfg = configuration();
         let spec = RequestSpec::from_profile(
             ProviderId::Anthropic,
@@ -1796,13 +1768,10 @@ async fn expired_chargeable_and_free_dispatch_have_different_facts_and_one_effec
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn expired_first_final_is_final_observation_but_unknown_accounting() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     let expired = finance::expired_copy(db.store.pool(), spec.id, "dispatching").await;
@@ -1877,14 +1846,11 @@ async fn previous_month_unknown_and_expired_dispatch_block_other_provider() {
     use m_gated::{config::ApiKind, ledger::finance::FinalOutcome};
     for finished_unknown in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let principal = finance::human(db.store.pool()).await;
         let current = finance::current(db.store.pool(), principal).await;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]},{"provider":"openai","model":"synthetic-text","capabilities":["responses"]}])).execute(db.store.pool()).await.unwrap();
-        let ledger = PgLedger::new(
-            db.store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        );
+        let ledger = PgLedger::new(db.store.clone(), [1; 32]);
         let prior = specification();
         ledger.admit_request(&current, &prior).await.unwrap();
         let expired = finance::expired_copy(db.store.pool(), prior.id, "dispatching").await;
@@ -1931,13 +1897,10 @@ async fn single_send_rechecks_deadline_and_shutdown_without_claiming_free_cost()
         runtime::Runtime,
     };
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let first = specification();
     let second = specification();
     ledger.admit_request(&current, &first).await.unwrap();
@@ -2013,13 +1976,10 @@ async fn single_send_rechecks_deadline_and_shutdown_without_claiming_free_cost()
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn request_not_null_facts_and_pause_owner_fk_are_real_sql() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let p = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), p).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     let _permit = ledger.authorize_dispatch(spec.id).await.unwrap();
@@ -2152,7 +2112,9 @@ async fn explicit_pg_suite_has_no_product_database_fallback() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn unclosed_test_fixture_cleans_only_its_owned_schema() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let other = postgres::TestDb::new().await;
+    postgres::grant_access(&other.store, &configuration(), ACCESS).await;
     let own = db.schema.clone();
     let pool = db.store.pool().clone();
     drop(db);
@@ -2174,6 +2136,7 @@ async fn unclosed_test_fixture_cleans_only_its_owned_schema() {
 async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_future() {
     for future in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         db.store.migrate().await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM gw_schema_migrations")
             .fetch_one(db.store.pool())
@@ -2201,13 +2164,10 @@ async fn unified_migrator_accepts_all_versions_but_rejects_changed_checksum_and_
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn budget_states_are_constrained_without_reservations() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     // 정산 상태는 적용 금액이 있어야 하고, 정산 전에는 적용 값이 없어야 한다. 예약 열 없이도 같다.
@@ -2309,13 +2269,10 @@ async fn free_count_ignores_generation_tpm_zero_budget_unknown_and_safety_only()
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn invalid_price_currency_or_pre_send_overflow_never_admits() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let mut euro = specification();
     euro.pricing.currency = "EUR".into();
     assert_eq!(
@@ -2374,8 +2331,7 @@ async fn native_actual_model_alias_is_explicit_not_a_provider_route() {
         "          - synthetic-text",
         "          - synthetic-text\n          - synthetic-versioned-model",
     );
-    let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    let env = support::environment();
     let cfg = config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
@@ -2666,15 +2622,12 @@ async fn accumulated_counter_boundary(field: &str, increment: i64) {
     for carried in [false, true] {
         for overflow in [false, true] {
             let db = postgres::TestDb::new().await;
+            postgres::grant_access(&db.store, &configuration(), ACCESS).await;
             // 분당 토큰은 정산한 1분 칸에 더한다. 고정 시계로 받은 칸과 정산 칸을 같게 둔다.
             let store = db.clock_store(None).await;
             let principal = finance::human(store.pool()).await;
             let current = finance::current(store.pool(), principal).await;
-            let ledger = PgLedger::new(
-                store.clone(),
-                AccessSettings::from_config(&configuration()),
-                [1; 32],
-            );
+            let ledger = PgLedger::new(store.clone(), [1; 32]);
             let spec = specification();
             ledger.admit_request(&current, &spec).await.unwrap();
             let _permit = ledger.authorize_dispatch(spec.id).await.unwrap();
@@ -2804,8 +2757,7 @@ async fn accumulated_settled_count_boundary_is_checked() {
 #[tokio::test]
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn huge_integer_tool_input_preserves_bytes_but_numeric_options_never_dispatch() {
-    let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    let env = support::environment();
     let yaml = support::YAML.replace(
         "fixture_version: text-v1",
         "fixture_version: native-v1\n        features: [client_tools]",
@@ -2891,15 +2843,12 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
         "settled_count",
     ] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         // 분당 토큰은 정산한 1분 칸에 더한다. 고정 시계로 받은 칸과 정산 칸을 같게 둔다.
         let store = db.clock_store(None).await;
         let principal = finance::human(store.pool()).await;
         let current = finance::current(store.pool(), principal).await;
-        let ledger = Arc::new(PgLedger::new(
-            store.clone(),
-            AccessSettings::from_config(&configuration()),
-            [1; 32],
-        ));
+        let ledger = Arc::new(PgLedger::new(store.clone(), [1; 32]));
         let spec = specification();
         ledger.admit_request(&current, &spec).await.unwrap();
         let _permit = ledger.authorize_dispatch(spec.id).await.unwrap();
@@ -3035,13 +2984,10 @@ async fn accumulated_overflow_finalizers_and_audit_are_atomic_across_scopes() {
 
 async fn unrepresentable_finalization_fallback(corrupt: &str) {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let spec = if corrupt == "free_count" {
         RequestSpec::from_profile(
             ProviderId::Anthropic,

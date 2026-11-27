@@ -104,7 +104,6 @@ pub(crate) async fn principal(
     id: Uuid,
     grants: &Value,
     digest: &str,
-    settings: &AccessSettings,
 ) -> Result<Value, ManagementError> {
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gw_principals WHERE id=$1)")
         .bind(id)
@@ -120,7 +119,10 @@ pub(crate) async fn principal(
     // 목록과 상세에서 owner를 이름으로 보여 주도록 owner 이름을 함께 싣는다.
     p["management_owner_name"] = Value::Null;
     let inactive = if p["kind"] == "human" {
-        p["email"].as_str().is_none_or(|e| !settings.allows(e))
+        match p["email"].as_str() {
+            Some(e) => management::access_role(&mut *c, e).await?.is_none(),
+            None => true,
+        }
     } else {
         let owner = sqlx::query("SELECT * FROM gw_principals WHERE id=$1")
             .bind(
@@ -131,7 +133,7 @@ pub(crate) async fn principal(
             .fetch_one(&mut *c)
             .await?;
         p["management_owner_name"] = json!(owner.get::<String, _>("display_name"));
-        !management::active_human(&owner, settings)
+        !management::active_human(&mut *c, &owner).await?
     };
     if inactive {
         let reason = if p["kind"] == "human" {
@@ -507,8 +509,7 @@ impl PgIdentityStore {
             let item = match resource {
                 "keys" => key_metadata(&mut tx, id).await?,
                 "principals" => {
-                    let mut p =
-                        principal(&mut tx, id, ctx.grants, ctx.digest, ctx.settings).await?;
+                    let mut p = principal(&mut tx, id, ctx.grants, ctx.digest).await?;
                     let policy = p
                         .as_object_mut()
                         .ok_or(ManagementError::Invariant)?
@@ -578,7 +579,7 @@ impl PgIdentityStore {
                 .await?;
             management::check_actor(&mut tx, ctx.actor, ctx.settings, true).await?;
             let value = if resource == "principals" {
-                let mut p = principal(&mut tx, id, ctx.grants, ctx.digest, ctx.settings).await?;
+                let mut p = principal(&mut tx, id, ctx.grants, ctx.digest).await?;
                 // 이 사용자가 쓸 수 있는 회사 키(인가). 인가가 없는 Provider는 그 Provider의 기본 키를 쓴다.
                 p["provider_credentials"] =
                     super::credentials::principal_authorization(&mut tx, id).await?;

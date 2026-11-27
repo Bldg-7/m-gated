@@ -430,8 +430,8 @@ impl PgIdentityStore {
                 now.clone(),
             )
         };
-        if let (Some(ctx), Some(id)) = (admin_context, id) {
-            p = super::management_query::principal(&mut tx, id, grants, digest, ctx.settings)
+        if let (Some(_), Some(id)) = (admin_context, id) {
+            p = super::management_query::principal(&mut tx, id, grants, digest)
                 .await
                 .map_err(|e| match e {
                     super::management::ManagementError::NotFound => QueryError::NotFound,

@@ -127,11 +127,8 @@ pub async fn virtual_key(
         })
         .collect();
     let settings = m_gated::auth::AccessSettings::from_config(cfg);
-    let ledger = m_gated::ledger::PgLedger::new(
-        store.clone(),
-        settings.clone(),
-        m_gated::gateway::auth_config_digest(cfg),
-    );
+    let ledger =
+        m_gated::ledger::PgLedger::new(store.clone(), m_gated::gateway::auth_config_digest(cfg));
     let ctx = CommandContext {
         actor: principal,
         command_id: Uuid::new_v4(),

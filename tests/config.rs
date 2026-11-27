@@ -415,8 +415,7 @@ fn injected_environment_wins_without_database_url_or_proxy_fallback() {
         "https://override.example.test".into(),
     );
     env.insert("DB_PORT".into(), "65432".into());
-    env.insert("ALLOWED_EMAILS".into(), "Upper@Example.Invalid".into());
-    env.insert("ADMIN_EMAILS".into(), "Admin2@Example.Invalid".into());
+    env.insert("ADMIN_EMAIL".into(), "Admin2@Example.Invalid".into());
     env.insert(
         "DATABASE_URL".into(),
         "postgres://do-not-use.invalid/prod".into(),
@@ -434,9 +433,8 @@ fn injected_environment_wins_without_database_url_or_proxy_fallback() {
     );
     assert_eq!(config.database().port, 65432);
     assert_eq!(config.database().host, "127.0.0.1");
-    assert!(config.allowed_emails().contains("upper@example.invalid"));
-    assert!(config.allowed_emails().contains("admin2@example.invalid"));
-    assert!(!config.allowed_emails().contains("user@example.invalid"));
+    // 환경 변수의 고정 관리자가 파일 값(admin@example.invalid)을 이기고, 소문자로 바뀐다.
+    assert_eq!(config.admin_email(), "admin2@example.invalid");
     assert_eq!(
         config.providers()[0].base_url.as_str(),
         "https://api.anthropic.com/"
@@ -694,10 +692,10 @@ fn database_and_email_inputs_are_not_connection_strings_or_wildcards() {
         "*@example.invalid",
         "@example.invalid",
         "user@",
-        "user@example.invalid,other@example.invalid",
+        "admin@example.invalid,other@example.invalid",
     ] {
         reject(
-            &support::YAML.replace("user@example.invalid", &format!("'{value}'")),
+            &support::YAML.replace("admin@example.invalid", &format!("'{value}'")),
             StartupError::InvalidIdentity,
         );
     }

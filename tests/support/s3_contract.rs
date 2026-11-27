@@ -801,13 +801,10 @@ async fn http1_client_drop_cancels_idle_upstream_and_joins_before_stopped() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn admit_lock_wait_does_not_extend_original_transport_or_execution_deadline() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    ));
+    let ledger = Arc::new(PgLedger::new(db.store.clone(), [1; 32]));
     let mut lock = db.store.pool().begin().await.unwrap();
     let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *lock)
@@ -864,13 +861,10 @@ async fn admit_lock_wait_does_not_extend_original_transport_or_execution_deadlin
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn consumed_admit_deadline_rolls_back_rate_totals_and_start_row() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let id = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), id).await;
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    ));
+    let ledger = Arc::new(PgLedger::new(db.store.clone(), [1; 32]));
     let mut lock = db.store.pool().begin().await.unwrap();
     let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *lock)
@@ -1075,11 +1069,8 @@ async fn stream_and_nonstream_share_bounded_response_header_allowlist() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL; waits for actual DB minute boundary"]
 async fn saturated_previous_minute_retries_after_authoritative_anchor_for_both_lanes() {
     let db = postgres::TestDb::new().await;
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    ));
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
+    let ledger = Arc::new(PgLedger::new(db.store.clone(), [1; 32]));
     let mut cases = Vec::new();
     for free in [false, true] {
         let id = finance::human(db.store.pool()).await;

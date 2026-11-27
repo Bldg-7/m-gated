@@ -25,21 +25,10 @@ use m_gated::{
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
-fn config(demoted: bool) -> config::ValidatedConfig {
+/// bob이 고정 관리자다. alice(관리자)와 carol(일반 사용자)은 `ACCESS`로 접근 목록에 넣는다.
+fn config() -> config::ValidatedConfig {
     let mut env = support::environment();
-    env.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,bob@example.test,carol@example.test".into(),
-    );
-    env.insert(
-        "ADMIN_EMAILS".into(),
-        if demoted {
-            "bob@example.test"
-        } else {
-            "alice@example.test,bob@example.test"
-        }
-        .into(),
-    );
+    env.insert("ADMIN_EMAIL".into(), "bob@example.test".into());
     config::load(ConfigInputs {
         yaml: support::YAML,
         file_environment: None,
@@ -47,13 +36,12 @@ fn config(demoted: bool) -> config::ValidatedConfig {
     })
     .unwrap()
 }
-async fn app(
-    db: &postgres::TestDb,
-    uri: &url::Url,
-    upstream: &url::Url,
-    demoted: bool,
-) -> Arc<RunningApp> {
-    let cfg = config(demoted);
+const ACCESS: &[(&str, &str)] = &[
+    ("alice@example.test", "admin"),
+    ("carol@example.test", "user"),
+];
+async fn app(db: &postgres::TestDb, uri: &url::Url, upstream: &url::Url) -> Arc<RunningApp> {
+    let cfg = config();
     let auth = Arc::new(SsoAuthenticator::new(
         &cfg,
         SsoVerifier::new(
@@ -69,7 +57,6 @@ async fn app(
     ));
     let ledger = Arc::new(PgLedger::new(
         db.store.clone(),
-        AccessSettings::from_config(&cfg),
         m_gated::gateway::auth_config_digest(&cfg),
     ));
     let client = m_gated::providers::anthropic::AnthropicClient::loopback_for_test(
@@ -143,7 +130,8 @@ async fn serve(
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL, pinned Node22 and Playwright"]
 async fn administrator_browser_commands_queries_and_current_authority() {
     let db = postgres::TestDb::new().await;
-    let cfg = config(false);
+    let cfg = config();
+    postgres::grant_access(&db.store, &cfg, ACCESS).await;
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks = fake.serve().await;
     let verifier = SsoVerifier::new(
@@ -166,12 +154,7 @@ async fn administrator_browser_commands_queries_and_current_authority() {
             .verify(&sso::credential(token.clone()), 1900000000)
             .await
             .unwrap();
-        humans.push(
-            db.store
-                .current_human(&identity, &AccessSettings::from_config(&cfg))
-                .await
-                .unwrap(),
-        );
+        humans.push(db.store.current_human(&identity).await.unwrap());
         tokens.push(token);
     }
     let service = Uuid::new_v4();
@@ -183,11 +166,7 @@ async fn administrator_browser_commands_queries_and_current_authority() {
         finance::allow(db.store.pool(), principal).await;
     }
     let current = finance::current(db.store.pool(), service).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&cfg),
-        m_gated::gateway::auth_config_digest(&cfg),
-    );
+    let ledger = PgLedger::new(db.store.clone(), m_gated::gateway::auth_config_digest(&cfg));
     let mut requests = Vec::new();
     for _ in 0..6 {
         let spec = RequestSpec::from_profile(
@@ -238,9 +217,8 @@ async fn administrator_browser_commands_queries_and_current_authority() {
         .unwrap();
     let provider = provider::Provider::new();
     let upstream = provider.serve().await;
-    let app = app(&db, &jwks.uri, &upstream.base, false).await;
-    let peer = self::app(&db, &jwks.uri, &upstream.base, false).await;
-    let demoted = self::app(&db, &jwks.uri, &upstream.base, true).await;
+    let app = app(&db, &jwks.uri, &upstream.base).await;
+    let peer = self::app(&db, &jwks.uri, &upstream.base).await;
     // 실제 runtime request registry가 알려진 sender 실행 중임을 관리 handler에 전달한다.
     let (active, registration) = app
         .runtime()
@@ -248,7 +226,7 @@ async fn administrator_browser_commands_queries_and_current_authority() {
     active.set_phase(m_gated::runtime::request::RequestPhase::Relaying);
     let (base, stop, server) = serve(app).await;
     let (peer_base, stop_peer, peer_server) = serve(peer).await;
-    let (demoted_base, stop_demoted, demoted_server) = serve(demoted).await;
+    let role_store = db.store.clone();
     let stale_store = db.store.clone();
     let retention_database = db.clock_store(None).await;
     let retention_store = retention_database.clone();
@@ -259,11 +237,13 @@ async fn administrator_browser_commands_queries_and_current_authority() {
     let control = axum::Router::new()
         .route("/new-safety-cause", axum::routing::post(move || { let ledger=late_ledger.clone(); async move { ledger.finalize_request(late_request, &FinalObservation::completed(FinalUsage {actual_model:"synthetic-text".into(),input_tokens:5000,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,reasoning_tokens:None})).await.unwrap(); axum::http::StatusCode::NO_CONTENT } }))
         .route("/stale-policy", axum::routing::post(move || { let store=stale_store.clone(); async move { sqlx::query("UPDATE gw_policies SET version=version+1 WHERE id=$1").bind(policy).execute(store.pool()).await.unwrap(); axum::http::StatusCode::NO_CONTENT } }))
+        // 관리자 권한은 요청마다 접근 목록에서 읽는다. 브라우저 시험이 alice를 강등했다가 되돌린다.
+        .route("/role/{role}", axum::routing::post(move |axum::extract::Path(role): axum::extract::Path<String>| { let store=role_store.clone(); async move { sqlx::query("UPDATE gw_access SET role=$1 WHERE email='alice@example.test'").bind(role).execute(store.pool()).await.unwrap(); axum::http::StatusCode::NO_CONTENT } }))
         .route("/retention", axum::routing::post(move || { let store=retention_store.clone(); async move {
             use m_gated::{config::{DurationPreset,Retention},ledger::{commands::CommandContext,retention::RetentionDelete}};
             sqlx::query("UPDATE gw_fixture_clock SET observed=(SELECT GREATEST(r.finished_at,(SELECT max(e.observed_at) FROM gw_usage_events e WHERE e.request_id=r.id))+interval '3 months' FROM gw_requests r WHERE r.id=$1)").bind(retention_request).execute(store.pool()).await.unwrap();
-            let cfg=config(false);let settings=AccessSettings::from_config(&cfg);let grants=json!([]);
-            let ledger=PgLedger::new(store.clone(),settings.clone(),m_gated::gateway::auth_config_digest(&cfg));
+            let cfg=config();let settings=AccessSettings::from_config(&cfg);let grants=json!([]);
+            let ledger=PgLedger::new(store.clone(),m_gated::gateway::auth_config_digest(&cfg));
             let ctx=CommandContext{actor:retention_actor,command_id:Uuid::new_v4(),method:"MAINTENANCE",path:"retention",settings:&settings,grants:&grants,digest:[1;32],ceiling:cfg.execution_ceiling(),execution_running:false};
             let result=ledger.retention_delete(&ctx,&Retention{ledger:Some(DurationPreset::ThreeMonths),audit:None,commands:None},&RetentionDelete{after:None,limit:50,deletion_approved:true,approval_ref:"synthetic-browser-local-D7".into(),reason:"실제 삭제 후 UI 캐시 제거".into()}).await.unwrap();
             let deleted=result["result"]["deleted_requests"].as_u64().unwrap();
@@ -293,7 +273,6 @@ async fn administrator_browser_commands_queries_and_current_authority() {
         )
         .env("DO_NOT_TRACK", "1")
         .env("E2E_BASE_URL", base)
-        .env("E2E_DEMOTED_URL", demoted_base)
         .env("E2E_PEER_URL", peer_base)
         .env("E2E_CONTROL_URL", control_url)
         .env("E2E_TOKEN", &tokens[0])
@@ -322,10 +301,8 @@ async fn administrator_browser_commands_queries_and_current_authority() {
     drop(registration);
     drop(active);
     let _ = stop.send(());
-    let _ = stop_demoted.send(());
     let _ = stop_peer.send(());
     server.await.unwrap();
-    demoted_server.await.unwrap();
     peer_server.await.unwrap();
     control_task.abort();
     std::fs::remove_dir_all(home).unwrap();

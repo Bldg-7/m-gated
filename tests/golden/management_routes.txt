@@ -4623,6 +4623,561 @@ OPTIONS /api/admin/provider-credentials/nope/not-a-uuid admin-bearer plain => 40
 OPTIONS /api/admin/provider-credentials/nope/not-a-uuid user-bearer plain => 405 method_not_allowed allow=POST, PUT, PATCH, DELETE location=- type=application/json error=method_not_allowed retry=-
 OPTIONS /api/admin/provider-credentials/nope/not-a-uuid admin-cookie plain => 405 method_not_allowed allow=POST, PUT, PATCH, DELETE location=- type=application/json error=method_not_allowed retry=-
 OPTIONS /api/admin/provider-credentials/nope/not-a-uuid admin-cookie-csrf plain => 405 method_not_allowed allow=POST, PUT, PATCH, DELETE location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access none plain => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+GET /api/admin/access none unknown-query => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+GET /api/admin/access admin-bearer plain => 200 - allow=- location=- type=application/json error=- retry=-
+GET /api/admin/access admin-bearer unknown-query => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+GET /api/admin/access user-bearer plain => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+GET /api/admin/access user-bearer unknown-query => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+GET /api/admin/access admin-cookie plain => 200 - allow=- location=- type=application/json error=- retry=-
+GET /api/admin/access admin-cookie unknown-query => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+GET /api/admin/access admin-cookie-csrf plain => 200 - allow=- location=- type=application/json error=- retry=-
+GET /api/admin/access admin-cookie-csrf unknown-query => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+HEAD /api/admin/access none plain => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access none unknown-query => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access admin-bearer plain => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access admin-bearer unknown-query => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access user-bearer plain => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access user-bearer unknown-query => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access admin-cookie plain => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access admin-cookie unknown-query => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access admin-cookie-csrf plain => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access admin-cookie-csrf unknown-query => 405 - allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access none plain => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access none command-only => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access none broken-json => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access none json-array => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access none text-body => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access none large-length => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access none gzip => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access none bad-command-id => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+POST /api/admin/access admin-bearer plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-bearer command-only => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+POST /api/admin/access admin-bearer broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-bearer json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-bearer text-body => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+POST /api/admin/access admin-bearer large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-bearer gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+POST /api/admin/access admin-bearer bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access user-bearer plain => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access user-bearer command-only => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access user-bearer broken-json => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access user-bearer json-array => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access user-bearer text-body => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access user-bearer large-length => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access user-bearer gzip => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access user-bearer bad-command-id => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+POST /api/admin/access admin-cookie plain => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie command-only => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie broken-json => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie json-array => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie text-body => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie large-length => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie gzip => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie bad-command-id => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+POST /api/admin/access admin-cookie-csrf plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-cookie-csrf command-only => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+POST /api/admin/access admin-cookie-csrf broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-cookie-csrf json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-cookie-csrf text-body => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+POST /api/admin/access admin-cookie-csrf large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+POST /api/admin/access admin-cookie-csrf gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+POST /api/admin/access admin-cookie-csrf bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PUT /api/admin/access none plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access none command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access none broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access none json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access none text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access none large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access none gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access none bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-bearer bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access user-bearer bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access admin-cookie-csrf bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access none bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-bearer bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access user-bearer bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access admin-cookie-csrf bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access none bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-bearer bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access user-bearer bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf command-only => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf broken-json => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf json-array => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf text-body => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf large-length => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf gzip => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+DELETE /api/admin/access admin-cookie-csrf bad-command-id => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access none plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access admin-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access user-bearer plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access admin-cookie plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access admin-cookie-csrf plain => 405 method_not_allowed allow=GET, POST location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 none unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 none plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 none unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 none bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 none bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none plain => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none command-only => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none broken-json => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none json-array => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none text-body => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none large-length => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none gzip => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 none bad-command-id => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer command-only => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer text-body => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer plain => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer command-only => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer broken-json => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer json-array => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer text-body => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer large-length => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer gzip => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer bad-command-id => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie plain => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie command-only => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie broken-json => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie json-array => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie text-body => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie large-length => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie gzip => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie bad-command-id => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf command-only => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf text-body => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none plain => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none command-only => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none broken-json => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none json-array => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none text-body => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none large-length => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none gzip => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 none bad-command-id => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer command-only => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer text-body => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer plain => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer command-only => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer broken-json => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer json-array => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer text-body => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer large-length => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer gzip => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer bad-command-id => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie plain => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie command-only => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie broken-json => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie json-array => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie text-body => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie large-length => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie gzip => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie bad-command-id => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf command-only => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf text-body => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+DELETE /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+OPTIONS /api/admin/access/00000000-0000-4000-8000-000000000001 none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/00000000-0000-4000-8000-000000000001 admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/00000000-0000-4000-8000-000000000001 user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/00000000-0000-4000-8000-000000000001 admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid none unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid admin-bearer unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid user-bearer unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid admin-cookie unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+GET /api/admin/access/not-a-uuid admin-cookie-csrf unknown-query => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid none plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid none unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid admin-bearer plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid admin-bearer unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid user-bearer plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid user-bearer unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid admin-cookie plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid admin-cookie unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid admin-cookie-csrf plain => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+HEAD /api/admin/access/not-a-uuid admin-cookie-csrf unknown-query => 405 - allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid none bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid user-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+POST /api/admin/access/not-a-uuid admin-cookie-csrf bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid none bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid user-bearer bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf command-only => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf broken-json => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf json-array => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf text-body => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf large-length => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf gzip => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PUT /api/admin/access/not-a-uuid admin-cookie-csrf bad-command-id => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+PATCH /api/admin/access/not-a-uuid none plain => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid none command-only => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid none broken-json => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid none json-array => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid none text-body => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid none large-length => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid none gzip => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid none bad-command-id => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer command-only => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer text-body => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/not-a-uuid admin-bearer bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer plain => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer command-only => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer broken-json => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer json-array => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer text-body => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer large-length => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer gzip => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid user-bearer bad-command-id => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie plain => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie command-only => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie broken-json => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie json-array => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie text-body => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie large-length => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie gzip => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie bad-command-id => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf command-only => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf text-body => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+PATCH /api/admin/access/not-a-uuid admin-cookie-csrf bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid none plain => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid none command-only => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid none broken-json => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid none json-array => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid none text-body => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid none large-length => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid none gzip => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid none bad-command-id => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer command-only => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer text-body => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+DELETE /api/admin/access/not-a-uuid admin-bearer bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer plain => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer command-only => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer broken-json => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer json-array => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer text-body => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer large-length => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer gzip => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid user-bearer bad-command-id => 403 access_denied allow=- location=- type=application/json error=access_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie plain => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie command-only => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie broken-json => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie json-array => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie text-body => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie large-length => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie gzip => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie bad-command-id => 403 origin_denied allow=- location=- type=application/json error=origin_denied retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf plain => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf command-only => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf broken-json => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf json-array => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf text-body => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf large-length => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf gzip => 415 unsupported_media_type allow=- location=- type=application/json error=unsupported_media_type retry=-
+DELETE /api/admin/access/not-a-uuid admin-cookie-csrf bad-command-id => 400 invalid_request allow=- location=- type=application/json error=invalid_request retry=-
+OPTIONS /api/admin/access/not-a-uuid none plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/not-a-uuid admin-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/not-a-uuid user-bearer plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/not-a-uuid admin-cookie plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
+OPTIONS /api/admin/access/not-a-uuid admin-cookie-csrf plain => 405 method_not_allowed allow=DELETE, PATCH location=- type=application/json error=method_not_allowed retry=-
 GET /api/admin/settings none plain => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
 GET /api/admin/settings none unknown-query => 401 invalid_credentials allow=- location=- type=application/json error=invalid_credentials retry=-
 GET /api/admin/settings admin-bearer plain => 200 - allow=- location=- type=application/json error=- retry=-

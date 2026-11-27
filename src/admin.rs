@@ -93,7 +93,6 @@ impl DashboardApi {
             ledger: Arc::new(
                 crate::ledger::PgLedger::new(
                     store.clone(),
-                    auth.settings().clone(),
                     crate::gateway::auth_config_digest(config),
                 )
                 .with_ceiling(config.execution_ceiling().clone()),
@@ -230,6 +229,24 @@ impl DashboardApi {
                         .put(m::credential_item)
                         .patch(m::credential_item)
                         .delete(m::credential_item),
+                ),
+            )
+            .route(
+                "/api/admin/access",
+                route(
+                    &s,
+                    admin,
+                    "GET, POST",
+                    get(m::access_list).post(m::add_access),
+                ),
+            )
+            .route(
+                "/api/admin/access/{id}",
+                route(
+                    &s,
+                    admin,
+                    "DELETE, PATCH",
+                    delete(m::remove_access).patch(m::update_access),
                 ),
             )
             .route(

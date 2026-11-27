@@ -11,7 +11,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use m_gated::{
-    auth::AccessSettings,
     config::{self, ConfigInputs},
     ledger::PgLedger,
 };
@@ -39,8 +38,8 @@ fn configuration_options(output: &str, options: &str) -> config::ValidatedConfig
     yaml.push_str(&profile);
     yaml.push_str(options);
     let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+    // alice가 고정 관리자다. 시험은 store를 직접 만들므로 `postgres::grant_access`로 넣는다.
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
@@ -79,6 +78,7 @@ impl Harness {
             runtime::Dependency,
         };
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, &[]).await;
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
         let verifier = SsoVerifier::new(
@@ -90,22 +90,14 @@ impl Harness {
             .verify(&sso::credential(token.clone()), 1900000000)
             .await
             .unwrap();
-        let current = db
-            .store
-            .current_human(&identity, &AccessSettings::from_config(&cfg))
-            .await
-            .unwrap();
+        let current = db.store.current_human(&identity).await.unwrap();
         let principal = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"openai","model":"synthetic-text","capabilities":["chat_completions","embeddings"]}])).execute(db.store.pool()).await.unwrap();
         let key = finance::virtual_key(&db.store, &cfg, principal).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
         let ledger = Arc::new(
-            PgLedger::new(
-                db.store.clone(),
-                AccessSettings::from_config(&cfg),
-                m_gated::gateway::auth_config_digest(&cfg),
-            )
-            .with_ceiling(cfg.execution_ceiling().clone()),
+            PgLedger::new(db.store.clone(), m_gated::gateway::auth_config_digest(&cfg))
+                .with_ceiling(cfg.execution_ceiling().clone()),
         );
         let provider = provider::Provider::new();
         let provider_server = if reset {
@@ -1445,6 +1437,7 @@ async fn chat_embeddings_uncertain_dispatch_original_id_expires_unknown_without_
     use std::sync::atomic::Ordering;
     for api in [ApiKind::OpenaiChat, ApiKind::Embeddings] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), &[]).await;
         let principal = finance::human(db.store.pool()).await;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=1,tpm_limit=NULL WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
         let current = finance::current(db.store.pool(), principal).await;
@@ -1456,7 +1449,7 @@ async fn chat_embeddings_uncertain_dispatch_original_id_expires_unknown_without_
             .iter()
             .find(|p| p.api == api)
             .unwrap();
-        let ledger = PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let ledger = PgLedger::new(store.clone(), [1; 32]);
         let spec = RequestSpec::from_profile(
             ProviderId::Openai,
             profile,
@@ -1511,7 +1504,7 @@ async fn chat_embeddings_uncertain_dispatch_original_id_expires_unknown_without_
         .await
         .unwrap();
         let healthy = db.clock_store(None).await;
-        let second = PgLedger::new(healthy.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let second = PgLedger::new(healthy.clone(), [1; 32]);
         assert!(matches!(
             second.authorize_dispatch(spec.id).await,
             Err(LedgerError::Conflict)

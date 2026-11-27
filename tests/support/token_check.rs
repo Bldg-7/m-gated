@@ -89,11 +89,8 @@ fn token_check_configuration(admin_key: bool) -> config::ValidatedConfig {
         ),
     );
     let mut env = support::environment();
-    env.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+    // alice가 고정 관리자다. bob은 일반 사용자로 접근 목록에 넣는다(`Check::new`).
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     if admin_key {
         env.insert("ANTHROPIC_ADMIN_API_KEY".into(), ADMIN_KEY.into());
     }
@@ -362,6 +359,7 @@ impl Check {
         };
         let cfg = token_check_configuration(admin_key);
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, &[("bob@example.test", "user")]).await;
         let jwks = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()])
             .serve()
             .await;
@@ -378,12 +376,7 @@ impl Check {
             .verify(&sso::credential(alice.clone()), 1900000000)
             .await
             .unwrap();
-        let principal = db
-            .store
-            .current_human(&identity, &AccessSettings::from_config(&cfg))
-            .await
-            .unwrap()
-            .id;
+        let principal = db.store.current_human(&identity).await.unwrap().id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE principal_id=$1")
             .bind(principal)
             .bind(json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}]))
@@ -407,12 +400,8 @@ impl Check {
             ],
         );
         let ledger = Arc::new(
-            PgLedger::new(
-                db.store.clone(),
-                AccessSettings::from_config(&cfg),
-                m_gated::gateway::auth_config_digest(&cfg),
-            )
-            .with_ceiling(cfg.execution_ceiling().clone()),
+            PgLedger::new(db.store.clone(), m_gated::gateway::auth_config_digest(&cfg))
+                .with_ceiling(cfg.execution_ceiling().clone()),
         );
         let check = TokenCheck::new(&cfg, ledger.clone(), service.clone());
         // 추론은 가상 키에 연결된 Provider 키를 캐시에서 고정해 합성 Provider로 보낸다.
@@ -685,7 +674,6 @@ impl Check {
         service.refresh().await.unwrap();
         let ledger = Arc::new(PgLedger::new(
             self.db.store.clone(),
-            AccessSettings::from_config(&cfg),
             m_gated::gateway::auth_config_digest(&cfg),
         ));
         TokenCheck::new(&cfg, ledger, service).unwrap()

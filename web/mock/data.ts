@@ -23,6 +23,8 @@ export type MockState = {
   /** 끊긴 요청의 정산 규칙(Anthropic). */
   cutoffRule: { cutoff_rule: 'received' | 'max_tokens'; correction: boolean; version: number };
   authorizationVersion: number;
+  /** 접근 목록(결정 0001). 고정 관리자는 admin@example.test 다. */
+  access: { id: string; email: string; role: 'user' | 'admin'; added_by_email: string | null; added_at: string; version: number }[];
 };
 
 const DAY = 86400000;
@@ -200,5 +202,9 @@ export function createState(): MockState {
     request({ n: 21, principal: P.backend, key: K.backend, provider: 'anthropic', model: OPUS, api: 'messages', minutes: 95, phase: 'finished', outcome: 'cancelled', accounting: 'settled', tokens: [31000, 640], reason: 'client_cancelled', settledBy: 'cutoff_received', corrected: 2210 }),
   ];
 
-  return { principals, credentials, authorizations, keys, requests, usage, catalog: { version: 4, approved_at: ago(12), approved_by_email: 'admin@example.test', entries: approved.map(e => ({ ...e })) }, proposals: new Map(), timezone: { timezone: 'Asia/Seoul', pending: null, version: 3 }, cutoffRule: { cutoff_rule: 'received', correction: false, version: 1 }, authorizationVersion: 20 };
+  return { principals, credentials, authorizations, keys, requests, usage, catalog: { version: 4, approved_at: ago(12), approved_by_email: 'admin@example.test', entries: approved.map(e => ({ ...e })) }, proposals: new Map(), timezone: { timezone: 'Asia/Seoul', pending: null, version: 3 }, cutoffRule: { cutoff_rule: 'received', correction: false, version: 1 }, authorizationVersion: 20,
+    access: [
+      ...principals.filter(p => p.kind === 'human' && p.email).map((p, i) => ({ id: `acc-${i + 1}`, email: p.email!, role: (p.email === 'admin@example.test' ? 'admin' : 'user') as 'user' | 'admin', added_by_email: p.email === 'admin@example.test' ? null : 'admin@example.test', added_at: ago(30), version: 1 })),
+      { id: 'acc-new', email: 'new-hire@example.test', role: 'user' as const, added_by_email: 'admin@example.test', added_at: ago(1), version: 1 },
+    ] };
 }

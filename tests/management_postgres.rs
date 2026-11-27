@@ -29,22 +29,27 @@ use sqlx::Row;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
+/// bob이 고정 관리자다. alice는 관리자로 접근 목록에 넣는다(`ACCESS`). 그래서 시험이 alice를
+/// 강등할 수 있다.
 fn config() -> config::ValidatedConfig {
     let mut e = support::environment();
-    e.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
-    e.insert(
-        "ADMIN_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
+    e.insert("ADMIN_EMAIL".into(), "bob@example.test".into());
     config::load(ConfigInputs {
         yaml: &format!("{}{}",support::YAML,"      - model: synthetic-text\n        api: count_tokens\n        profile_version: count-v1\n        pricing_version: count-price-v1\n        fixture_version: count-v1\n        billing_class: guaranteed_free\n        actual_models: [synthetic-text]\n        max_input_tokens: 4096\n        max_body_bytes: 8388608\n        max_response_bytes: 262144\n        rates:\n          input: '0.000000000000'\n"),
         file_environment: None,
         environment: &e,
     })
     .unwrap()
+}
+const ACCESS: &[(&str, &str)] = &[("alice@example.test", "admin")];
+/// alice를 접근 목록에서 일반 사용자로 바꾼다. 관리자 여부는 요청마다 이 목록에서 다시 읽는다.
+async fn demote_alice(db: &postgres::TestDb) {
+    sqlx::query(
+        "UPDATE gw_access SET role='user',version=version+1 WHERE email='alice@example.test'",
+    )
+    .execute(db.store.pool())
+    .await
+    .unwrap();
 }
 fn grants() -> Value {
     json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}])
@@ -101,12 +106,13 @@ async fn bob(db: &postgres::TestDb) -> Uuid {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn lost_key_issue_response_has_one_effect_and_no_secret_replay() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let command = Uuid::new_v4();
     let c = ctx(actor, command, &settings, &g, &ceiling, "POST", "/api/keys");
     let first = ledger.management_command(&c, issue()).await.unwrap();
@@ -155,7 +161,7 @@ async fn lost_key_issue_response_has_one_effect_and_no_secret_replay() {
         .unwrap();
     assert!(!audit.to_string().contains(raw));
     assert!(!commands.to_string().contains(raw));
-    let p = db.store.authenticate_key(raw, &settings).await.unwrap();
+    let p = db.store.authenticate_key(raw).await.unwrap();
     assert_eq!(p.current.id, actor);
     assert_eq!(p.key.unwrap().id, id);
     let current = finance::current(db.store.pool(), actor).await;
@@ -243,7 +249,7 @@ async fn lost_key_issue_response_has_one_effect_and_no_secret_replay() {
         204
     );
     assert!(matches!(
-        db.store.authenticate_key(raw, &settings).await,
+        db.store.authenticate_key(raw).await,
         Err(m_gated::auth::AuthError::InvalidCredentials)
     ));
     assert_eq!(
@@ -261,12 +267,13 @@ async fn lost_key_issue_response_has_one_effect_and_no_secret_replay() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn command_cas_and_audit_are_atomic() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let c = ctx(
         actor,
         Uuid::new_v4(),
@@ -326,13 +333,14 @@ async fn command_cas_and_audit_are_atomic() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn principal_summary_and_resource_cursors_are_distinct() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
     let other = bob(&db).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     for _ in 0..2 {
         let c = ctx(
             actor,
@@ -459,13 +467,14 @@ fn settlement(id: Uuid, expected: &str, reason: &str, confirmed: bool) -> Comman
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn manual_settlement_records_admin_entry_and_late_final_without_repricing() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
     let admin = bob(&db).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let id = unknown(&db, &ledger, &cfg, actor).await;
     let c = ctx(
         admin,
@@ -599,6 +608,7 @@ impl Harness {
     }
     async fn with_config(clock: bool, cfg: config::ValidatedConfig) -> Self {
         let mut db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, ACCESS).await;
         if clock {
             let store = db.clock_store(None).await;
             let old = std::mem::replace(&mut db.store, store);
@@ -615,11 +625,7 @@ impl Harness {
             .verify(&sso::credential(token.clone()), 1900000000)
             .await
             .unwrap();
-        let current = db
-            .store
-            .current_human(&identity, &AccessSettings::from_config(&cfg))
-            .await
-            .unwrap();
+        let current = db.store.current_human(&identity).await.unwrap();
         let actor = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1")
             .bind(current.policy_id)
@@ -653,7 +659,6 @@ impl Harness {
         .unwrap();
         let ledger = Arc::new(PgLedger::new(
             db.store.clone(),
-            AccessSettings::from_config(&cfg),
             m_gated::gateway::auth_config_digest(&cfg),
         ));
         let gateway = Arc::new(m_gated::gateway::InferenceGateway::assemble(
@@ -881,13 +886,14 @@ fn policy(id: Uuid, expected: &str, disabled: bool, reason: &str) -> Command {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_transfers() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
     let other = bob(&db).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let c = ctx(
         actor,
         Uuid::new_v4(),
@@ -968,7 +974,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         .body
         .unwrap();
     let raw = body["key"].as_str().unwrap();
-    let auth = db.store.authenticate_key(raw, &settings).await.unwrap();
+    let auth = db.store.authenticate_key(raw).await.unwrap();
     assert_eq!(auth.current.id, service);
     let spec = RequestSpec::from_profile(
         config::ProviderId::Anthropic,
@@ -1022,7 +1028,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
     // owner의 회계 unknown/자동pause는 서비스의 별도 장부에 전파하지 않는다.
     let owner_unknown = unknown(&db, &ledger, &cfg, other).await;
     sqlx::query("UPDATE gw_principals SET inference_paused_at=clock_timestamp(),inference_pause_reason='cost_bound_violation',inference_pause_request_id=$2,inference_safety_version=inference_safety_version+1 WHERE id=$1").bind(other).bind(owner_unknown).execute(db.store.pool()).await.unwrap();
-    let auth = db.store.authenticate_key(raw, &settings).await.unwrap();
+    let auth = db.store.authenticate_key(raw).await.unwrap();
     let spec = RequestSpec::from_profile(
         config::ProviderId::Anthropic,
         &cfg.providers()[0].profiles[0],
@@ -1034,7 +1040,7 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
         .unwrap();
     let _p = ledger.authorize_dispatch(spec.id).await.unwrap();
     sqlx::query("UPDATE gw_principals SET disabled_at=clock_timestamp(),disabled_reason='test',version=version+1 WHERE id=$1").bind(other).execute(db.store.pool()).await.unwrap();
-    assert!(db.store.authenticate_key(raw, &settings).await.is_err());
+    assert!(db.store.authenticate_key(raw).await.is_err());
     let detail = db
         .store
         .management_detail(
@@ -1057,13 +1063,14 @@ async fn service_owner_and_policy_versions_are_dispatch_dependencies_not_ledger_
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let alice = finance::human(db.store.pool()).await;
     let bob = bob(&db).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let c = ctx(
         alice,
         Uuid::new_v4(),
@@ -1226,12 +1233,13 @@ async fn fence_and_separate_safety_cas_preserve_current_admin_and_unknown() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn key_quota_validity_and_month_end_use_first_database_creation_time() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     for preset in ["3_months", "6_months", "1_year", "3_years", "unlimited"] {
         let mut input = issue();
         if let Command::Issue(v) = &mut input {
@@ -1540,9 +1548,9 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
         )
         .await;
     assert_eq!(s, 200);
-    // 현재 설정에서 admin만 제거한 두 번째 서버는 동일 JWT로 관리자 경로를 거부한다.
-    let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    // 접근 목록에서 alice의 관리자 역할만 빼면, 두 번째 서버도 동일 JWT로 관리자 경로를 거부한다.
+    demote_alice(&h.db).await;
+    let env = support::environment();
     let user_cfg = config::load(ConfigInputs {
         yaml: support::YAML,
         file_environment: None,
@@ -1604,13 +1612,14 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn admin_usage_cursor_is_actor_and_scope_bound_and_all_filters_are_bounded() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
     let other = bob(&db).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let id = unknown(&db, &ledger, &cfg, actor).await;
     let q = qctx(other, &settings, &g, true);
     let list = db
@@ -1726,7 +1735,7 @@ async fn virtual_owner_inactive_has_specific_wire_code_and_blocks_current_balanc
     let settings = AccessSettings::from_config(&h.cfg);
     let g = grants();
     let ceiling = Default::default();
-    let ledger = PgLedger::new(h.db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(h.db.store.clone(), [7; 32]);
     let c = ctx(
         h.actor,
         Uuid::new_v4(),
@@ -1816,6 +1825,7 @@ async fn virtual_owner_inactive_has_specific_wire_code_and_blocks_current_balanc
 async fn validity_presets_clamp_calendar_month_end_in_utc() {
     use m_gated::ledger::management::Validity;
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let mut c = db.store.pool().acquire().await.unwrap();
     for (preset, input, expected) in [
         (
@@ -1859,13 +1869,14 @@ async fn validity_presets_clamp_calendar_month_end_in_utc() {
 async fn audit_failure_rolls_back_every_management_effect_and_financial_settlement() {
     for op in ["create", "update", "policy", "release", "settle"] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
         let settings = AccessSettings::from_config(&cfg);
         let g = grants();
         let ceiling = Default::default();
         let actor = finance::human(db.store.pool()).await;
         let target = bob(&db).await;
-        let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let create = || {
             Command::Create(
                 serde_json::from_value(
@@ -1939,13 +1950,14 @@ async fn audit_failure_rolls_back_every_management_effect_and_financial_settleme
 async fn manual_settlement_runtime_stop_known_running_and_two_admin_races() {
     for same in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
         let settings = AccessSettings::from_config(&cfg);
         let g = grants();
         let ceiling = Default::default();
         let actor = finance::human(db.store.pool()).await;
         let admin = bob(&db).await;
-        let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
         let mut c = ctx(
             admin,
@@ -2040,12 +2052,13 @@ mod pg_proxy;
 async fn command_commit_ack_loss_never_reissues_secret_or_settlement_cost() {
     for operation in ["issue", "settlement"] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
         let settings = AccessSettings::from_config(&cfg);
         let g = grants();
         let ceiling = Default::default();
         let actor = finance::human(db.store.pool()).await;
-        let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = if operation == "settlement" {
             Some(unknown(&db, &ledger, &cfg, actor).await)
         } else {
@@ -2053,7 +2066,7 @@ async fn command_commit_ack_loss_never_reissues_secret_or_settlement_cost() {
         };
         let proxy = pg_proxy::CommitProxy::new().await;
         let store = db.store_via_proxy(proxy.port).await;
-        let faulty = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
+        let faulty = PgLedger::new(store.clone(), [7; 32]);
         let c = ctx(
             actor,
             Uuid::new_v4(),
@@ -2273,7 +2286,7 @@ async fn foreign_key_ownership_precedes_new_command_schema_and_replay() {
     let settings = AccessSettings::from_config(&h.cfg);
     let g = grants();
     let ceiling = Default::default();
-    let ledger = PgLedger::new(h.db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(h.db.store.clone(), [7; 32]);
     let key = ledger
         .management_command(
             &ctx(
@@ -2294,12 +2307,9 @@ async fn foreign_key_ownership_precedes_new_command_schema_and_replay() {
         .as_str()
         .unwrap()
         .to_owned();
-    // 이 별도 서버에서 Alice는 user다. 소유 아닌 key의 malformed query도 존재를 노출하지 않는다.
-    let mut e = support::environment();
-    e.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
+    // 이제 Alice는 user다. 소유 아닌 key의 malformed query도 존재를 노출하지 않는다.
+    demote_alice(&h.db).await;
+    let e = support::environment();
     let cfg = config::load(ConfigInputs {
         yaml: support::YAML,
         file_environment: None,
@@ -2349,13 +2359,14 @@ async fn foreign_key_ownership_precedes_new_command_schema_and_replay() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
     let admin = bob(&db).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let original = Uuid::new_v4();
     for i in 0..31 {
         ledger
@@ -2502,13 +2513,14 @@ async fn quota_last_slot_and_policy_cas_races_have_one_effect() {
 async fn manual_and_late_final_races_preserve_money_and_separate_safety_cas() {
     for late_first in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
         let settings = AccessSettings::from_config(&cfg);
         let g = grants();
         let ceiling = Default::default();
         let actor = finance::human(db.store.pool()).await;
         let admin = bob(&db).await;
-        let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
         let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
             actual_model: "synthetic-text".into(),
@@ -2619,7 +2631,6 @@ async fn known_live_native_sender_cannot_be_settled_by_admin_confirmation() {
     sqlx::query("UPDATE gw_fixture_clock SET observed=(SELECT lease_expires_at FROM gw_requests WHERE id=$1)").bind(id).execute(h.db.store.pool()).await.unwrap();
     let ledger = PgLedger::new(
         h.db.store.clone(),
-        AccessSettings::from_config(&h.cfg),
         m_gated::gateway::auth_config_digest(&h.cfg),
     );
     assert_eq!(
@@ -2681,6 +2692,7 @@ async fn known_live_native_sender_cannot_be_settled_by_admin_confirmation() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn metadata_pages_stop_at_bytes_before_row_limit_and_keep_resource_membership() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let actor = finance::human(db.store.pool()).await;
@@ -2733,6 +2745,7 @@ async fn metadata_pages_stop_at_bytes_before_row_limit_and_keep_resource_members
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn manual_settlement_keeps_original_period_other_unknown_and_adds_no_tokens() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let store = db.clock_store(None).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
@@ -2740,7 +2753,7 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_adds_no_token
     let ceiling = Default::default();
     let actor = finance::human(store.pool()).await;
     sqlx::query("UPDATE gw_policies SET budget_limit_usd=('1.000000000000'),tpm_limit=10000 WHERE principal_id=$1 AND key_id IS NULL").bind(actor).execute(store.pool()).await.unwrap();
-    let ledger = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(store.clone(), [7; 32]);
     let mut input = issue();
     if let Command::Issue(v) = &mut input {
         v.limits=serde_json::from_value(json!({"budget":{"limit_usd":"1.000000000000","period":{"kind":"calendar_month"}},"tpm":10000})).unwrap();
@@ -2763,7 +2776,7 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_adds_no_token
         .body
         .unwrap();
     let auth = store
-        .authenticate_key(key["key"].as_str().unwrap(), &settings)
+        .authenticate_key(key["key"].as_str().unwrap())
         .await
         .unwrap();
     let profile = cfg.providers()[0].profiles[0].clone();
@@ -2860,12 +2873,9 @@ async fn manual_settlement_keeps_original_period_other_unknown_and_adds_no_token
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn old_and_new_configuration_servers_keep_fence_until_explicit_stop_confirmation() {
     let h = Harness::new().await;
+    // 새 설정 서버. 접근 목록은 DB에 하나뿐이라 두 서버가 함께 쓴다. bob은 관리자, alice는 fence로 막힌다.
     let mut e = support::environment();
-    e.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
-    e.insert("ADMIN_EMAILS".into(), "bob@example.test".into());
+    e.insert("ADMIN_EMAIL".into(), "bob@example.test".into());
     let cfg = config::load(ConfigInputs {
         yaml: support::YAML,
         file_environment: None,
@@ -3098,12 +3108,13 @@ async fn issued_grants_do_not_expand_with_principal_policy_and_expired_key_is_40
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn requests_and_principals_pages_enforce_100_and_resource_cursor_expiry() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let store = db.clock_store(None).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let actor = finance::human(store.pool()).await;
-    let ledger = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(store.clone(), [7; 32]);
     let current = finance::current(store.pool(), actor).await;
     let spec = RequestSpec::from_profile(
         config::ProviderId::Anthropic,
@@ -3184,13 +3195,14 @@ async fn requests_and_principals_pages_enforce_100_and_resource_cursor_expiry() 
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn new_late_cost_cause_and_safety_release_serialize_without_unpausing_new_cause() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
     let admin = bob(&db).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let id = unknown(&db, &ledger, &cfg, actor).await;
     let observation = FinalObservation::completed(m_gated::ledger::finance::FinalUsage {
         actual_model: "synthetic-text".into(),
@@ -3257,12 +3269,13 @@ async fn new_late_cost_cause_and_safety_release_serialize_without_unpausing_new_
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_back() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let id = unknown(&db, &ledger, &cfg, actor).await;
     let scope = finance::current(db.store.pool(), actor).await.policy_id;
     // 예산에는 방식이 없으므로 미정산 요청이 있어도 한도는 바꾸고 scope는 그대로 둔다.
@@ -3386,12 +3399,13 @@ async fn policy_command_preserves_scope_period_and_audit_failed_revoke_rolls_bac
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn command_lock_wait_is_bounded_without_pending_command_or_effect() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let ceiling = Default::default();
     let actor = finance::human(db.store.pool()).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let mut holder = db.store.pool().begin().await.unwrap();
     sqlx::query("SELECT id FROM gw_principals WHERE id=$1 FOR UPDATE")
         .bind(actor)
@@ -3448,11 +3462,7 @@ async fn same_email_new_sso_subject_never_inherits_issued_keys_or_usage_scope() 
         .await;
     assert_eq!(s, 200);
     assert_eq!(keys["items"], json!([]));
-    let original =
-        h.db.store
-            .authenticate_key(raw, &AccessSettings::from_config(&h.cfg))
-            .await
-            .unwrap();
+    let original = h.db.store.authenticate_key(raw).await.unwrap();
     assert_eq!(original.current.id, h.actor);
     let(s,_,_)=h.request("POST","/anthropic/v1/messages",Some(&token),false,Some(json!({"model":"synthetic-text","max_tokens":16,"messages":[{"role":"user","content":"synthetic-only"}]})),None,&[("anthropic-version","2023-06-01")]).await;
     let calls = h.provider.calls.lock().await.len();
@@ -3562,53 +3572,14 @@ async fn admin_usage_missing_principal_is_404_not_self_access_denied() {
     let mut claims = sso::claims();
     claims["sub"] = json!("ordinary-user");
     claims["email"] = json!("user@example.invalid");
-    // 허용된 일반 사용자는 ADMIN_EMAILS에 없고 관리자 대상 존재성을 볼 수 없다.
+    // 접근 목록의 일반 사용자는 관리자가 아니어서 관리자 대상 존재성을 볼 수 없다.
     let token = sso::Signer::shared().sign(&claims, "key1");
-    // 현재 fixture 설정의 일반 허용 이메일을 DB에 주입하는 대신 별도 검증 설정으로 조립한다.
-    let mut env = support::environment();
-    env.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,user@example.invalid".into(),
-    );
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
-    let cfg = config::load(ConfigInputs {
-        yaml: support::YAML,
-        file_environment: None,
-        environment: &env,
-    })
-    .unwrap();
-    let auth = Arc::new(SsoAuthenticator::new(
-        &cfg,
-        SsoVerifier::new(
-            cfg.auth(),
-            Arc::new(JwksCache::loopback_for_test(h._jwks.uri.clone()).unwrap()),
-        ),
-        h.db.store.clone(),
-    ));
-    let api = Arc::new(m_gated::admin::DashboardApi::new(
-        &cfg,
-        auth,
-        h.db.store.clone(),
-    ));
-    let router = http::router_with_components(
-        AppState {
-            runtime: h.runtime.clone(),
-        },
-        None,
-        api.routes(h.runtime.clone()),
-    );
-    let r = router
-        .oneshot(
-            Request::builder()
-                .uri(&missing)
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+    postgres::grant_access(&h.db.store, &h.cfg, &[("user@example.invalid", "user")]).await;
+    let status = h
+        .request("GET", &missing, Some(&token), false, None, None, &[])
         .await
-        .unwrap();
-    assert_eq!(r.status(), 403);
-    drop(to_bytes(r.into_body(), 1024 * 1024).await.unwrap());
+        .0;
+    assert_eq!(status, 403);
     h.close().await;
     assert_eq!(missing_status, 404);
 }
@@ -3617,12 +3588,13 @@ async fn admin_usage_missing_principal_is_404_not_self_access_denied() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn resource_cursor_compares_typed_normalized_filters() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let store = db.clock_store(None).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let actor = finance::human(store.pool()).await;
-    let ledger = PgLedger::new(store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(store.clone(), [7; 32]);
     let current = finance::current(store.pool(), actor).await;
     for _ in 0..3 {
         let spec = RequestSpec::from_profile(
@@ -3701,14 +3673,7 @@ async fn resource_cursor_compares_typed_normalized_filters() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn management_budget_mode_and_timezone_are_400_without_retry_or_mutation() {
     let mut env = support::environment();
-    env.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
-    env.insert(
-        "ADMIN_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
+    env.insert("ADMIN_EMAIL".into(), "bob@example.test".into());
     let yaml = format!(
         "{}execution_ceiling: {{budget: {{limit_usd: '1.000000000000', period: {{kind: calendar_month}}}}}}\n",
         support::YAML
@@ -3793,13 +3758,14 @@ async fn management_budget_mode_and_timezone_are_400_without_retry_or_mutation()
 async fn late_token_only_bound_violation_pauses_unknown_and_manual_without_repricing() {
     for manual in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
         let settings = AccessSettings::from_config(&cfg);
         let g = grants();
         let ceiling = Default::default();
         let actor = finance::human(db.store.pool()).await;
         let admin = bob(&db).await;
-        let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
         if manual {
             ledger
@@ -3876,11 +3842,12 @@ async fn late_token_only_bound_violation_pauses_unknown_and_manual_without_repri
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn settlement_root_uses_shared_ordinary_six_gate_and_preserves_finalization_two() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), ACCESS).await;
     let cfg = config();
     let settings = AccessSettings::from_config(&cfg);
     let g = grants();
     let actor = finance::human(db.store.pool()).await;
-    let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+    let ledger = PgLedger::new(db.store.clone(), [7; 32]);
     let spec = RequestSpec::from_profile(
         config::ProviderId::Anthropic,
         &cfg.providers()[0].profiles[0],
@@ -3969,13 +3936,14 @@ async fn settlement_root_uses_shared_ordinary_six_gate_and_preserves_finalizatio
 async fn late_token_only_violation_audit_failure_rolls_back_unknown_and_manual_observation() {
     for manual in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
         let settings = AccessSettings::from_config(&cfg);
         let g = grants();
         let ceiling = Default::default();
         let actor = finance::human(db.store.pool()).await;
         let admin = bob(&db).await;
-        let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
         if manual {
             ledger
@@ -4029,13 +3997,14 @@ async fn late_token_only_violation_audit_failure_rolls_back_unknown_and_manual_o
 async fn late_token_only_violation_and_release_serialize_for_unknown_and_manual() {
     for manual in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
         let settings = AccessSettings::from_config(&cfg);
         let g = grants();
         let ceiling = Default::default();
         let actor = finance::human(db.store.pool()).await;
         let admin = bob(&db).await;
-        let ledger = PgLedger::new(db.store.clone(), settings.clone(), [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
         if manual {
             ledger
@@ -4121,10 +4090,10 @@ async fn late_final_pauses_only_over_original_cost_bound_or_overflow_not_input_t
         (i64::MAX as u64, 1, 0, Some("amount_overflow")),
     ] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &config(), ACCESS).await;
         let cfg = config();
-        let settings = AccessSettings::from_config(&cfg);
         let actor = finance::human(db.store.pool()).await;
-        let ledger = PgLedger::new(db.store.clone(), settings, [7; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [7; 32]);
         let id = unknown(&db, &ledger, &cfg, actor).await;
         let usage = m_gated::ledger::finance::FinalUsage {
             actual_model: "synthetic-text".into(),
@@ -4459,8 +4428,7 @@ async fn s9_caught_request_body_panic_is_internal500_not_upstream_timeout() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn management_body_limit_applies_to_content_length_and_chunked_wire_at_boundary() {
     let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     let cfg = config::load(ConfigInputs {
         yaml: &format!(
             "{}\nlimits:\n  management_body_bytes: 1024\n",

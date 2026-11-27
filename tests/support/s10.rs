@@ -11,14 +11,11 @@ async fn running_app_reaps_expiry_and_confirms_family_latch_without_claiming_sto
         runtime::Lifecycle,
     };
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let cfg = configuration();
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&cfg),
-        [1; 32],
-    ));
+    let ledger = Arc::new(PgLedger::new(db.store.clone(), [1; 32]));
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
     let admitted = finance::expired_copy(db.store.pool(), spec.id, "admitted").await;
@@ -134,12 +131,18 @@ async fn retention_carries_atomic_month_totals_keeps_unknown_and_replays_once() 
         ledger::{commands::CommandContext, retention::RetentionDelete},
     };
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(
+        &db.store,
+        &configuration_from_yaml(&configuration_yaml_for_s10()),
+        ACCESS,
+    )
+    .await;
     let database = db.clock_store(None).await;
     let cfg = configuration_from_yaml(&configuration_yaml_for_s10());
     let settings = AccessSettings::from_config(&cfg);
     let principal = finance::human(database.pool()).await;
     let current = finance::current(database.pool(), principal).await;
-    let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
+    let ledger = PgLedger::new(database.clone(), [1; 32]);
     let mut requests = Vec::new();
     for resolved in [false, true, true] {
         let spec = specification();
@@ -379,16 +382,13 @@ fn configuration_yaml_for_s10() -> String {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn owner_before_service_nowait_skip_rolls_back_all_candidate_locks() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let owner = uuid::Uuid::from_u128(1);
     let service = uuid::Uuid::from_u128(2);
     sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example','owner','alice@example.test','Owner')").bind(owner).execute(db.store.pool()).await.unwrap();
     sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','Service',$2)").bind(service).bind(owner).execute(db.store.pool()).await.unwrap();
     sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'calendar_month','UTC',$4)").bind(uuid::Uuid::new_v4()).bind(service).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).bind(owner).execute(db.store.pool()).await.unwrap();
-    let ledger = Arc::new(PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    ));
+    let ledger = Arc::new(PgLedger::new(db.store.clone(), [1; 32]));
     let current = finance::current(db.store.pool(), service).await;
     let spec = specification();
     ledger.admit_request(&current, &spec).await.unwrap();
@@ -447,12 +447,18 @@ async fn retention_preserves_manual_null_tokens_in_both_scopes_and_latest_event_
         },
     };
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(
+        &db.store,
+        &configuration_from_yaml(&configuration_yaml_for_s10()),
+        ACCESS,
+    )
+    .await;
     let database = db.clock_store(None).await;
     let cfg = configuration_from_yaml(&configuration_yaml_for_s10());
     let settings = AccessSettings::from_config(&cfg);
     let principal = finance::human(database.pool()).await;
     let current = finance::current(database.pool(), principal).await;
-    let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
+    let ledger = PgLedger::new(database.clone(), [1; 32]);
     let grants = serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["count_tokens","messages"]}]);
     let ctx = CommandContext {
         actor: principal,
@@ -629,12 +635,18 @@ async fn retention_protects_entire_safety_family_then_deletes_child_before_root(
         },
     };
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(
+        &db.store,
+        &configuration_from_yaml(&configuration_yaml_for_s10()),
+        ACCESS,
+    )
+    .await;
     let database = db.clock_store(None).await;
     let cfg = configuration_from_yaml(&configuration_yaml_for_s10());
     let settings = AccessSettings::from_config(&cfg);
     let principal = finance::human(database.pool()).await;
     let current = finance::current(database.pool(), principal).await;
-    let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
+    let ledger = PgLedger::new(database.clone(), [1; 32]);
     let root = specification();
     ledger.admit_request(&current, &root).await.unwrap();
     let count_cfg = configuration();
@@ -903,11 +915,7 @@ async fn telemetry_actual_sql_jwks_provider_success_unknown_and_company_key_are_
     let unreadable_status = unreadable.status();
     let _ = unreadable.bytes().await.unwrap();
     h.runtime.wait_requests().await;
-    let ledger = PgLedger::new(
-        h.database.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(h.database.clone(), [1; 32]);
     ledger.recovery_tick(&h.runtime).await.unwrap();
     let unknown = telemetry::get(Metric::Unknown);
     let blocked = telemetry::get(Metric::BlockedPrincipals);
@@ -946,6 +954,7 @@ async fn telemetry_actual_sql_jwks_provider_success_unknown_and_company_key_are_
 async fn telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_duplicate() {
     use m_gated::telemetry::{self, Metric};
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let user = finance::human(db.store.pool()).await;
     sqlx::query(
         "UPDATE gw_policies SET budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL",
@@ -955,11 +964,7 @@ async fn telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_dupli
     .await
     .unwrap();
     let current = finance::current(db.store.pool(), user).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     // 비용 상한은 입력 상한 계약 없이도 profile의 최대 입력과 요청의 max_tokens로 계산한다.
     let request = specification();
     ledger.admit_request(&current, &request).await.unwrap();
@@ -988,6 +993,7 @@ async fn telemetry_pricing_alarm_follows_durable_pause_and_replay_does_not_dupli
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL; holds the database-wide migration lock for actual30s and120s timeout boundaries"]
 async fn two_migrators_serialize_and_actual_advisory30s_total120s_fail_closed() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let mut holder = db.store.pool().begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(7234638650625911)")
         .execute(&mut *holder)
@@ -1049,13 +1055,14 @@ async fn owner_before_service_two_reapers_and_real_dispatch_cross_without_revers
     };
     for phase in ["admitted", "dispatching"] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let owner = uuid::Uuid::from_u128(1);
         let service = uuid::Uuid::from_u128(2);
         sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human','https://issuer.example','owner','alice@example.test','Owner')").bind(owner).execute(db.store.pool()).await.unwrap();
         sqlx::query("INSERT INTO gw_principals(id,kind,display_name,owner_principal_id) VALUES($1,'service','Service',$2)").bind(service).bind(owner).execute(db.store.pool()).await.unwrap();
         sqlx::query("INSERT INTO gw_policies(id,principal_id,allow_rules,period_kind,period_timezone,updated_by) VALUES($1,$2,$3,'calendar_month','UTC',$4)").bind(uuid::Uuid::new_v4()).bind(service).bind(serde_json::json!([{"provider":"anthropic","model":"synthetic-text","capabilities":["messages","count_tokens"]}])).bind(owner).execute(db.store.pool()).await.unwrap();
         let cfg = configuration();
-        let ledger = PgLedger::new(db.store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let ledger = PgLedger::new(db.store.clone(), [1; 32]);
         let current = finance::current(db.store.pool(), service).await;
         let r2 = specification();
         ledger.admit_request(&current, &r2).await.unwrap();
@@ -1213,6 +1220,12 @@ async fn retention_all_finite_presets_expire_at_utc_calendar_month_end_including
         ),
     ] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(
+            &db.store,
+            &configuration_from_yaml(&configuration_yaml_for_s10()),
+            ACCESS,
+        )
+        .await;
         let database = db.clock_store(None).await;
         sqlx::query("UPDATE gw_fixture_clock SET observed=$1::timestamptz")
             .bind(created)
@@ -1223,7 +1236,7 @@ async fn retention_all_finite_presets_expire_at_utc_calendar_month_end_including
         let settings = AccessSettings::from_config(&cfg);
         let actor = finance::human(database.pool()).await;
         let current = finance::current(database.pool(), actor).await;
-        let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
+        let ledger = PgLedger::new(database.clone(), [1; 32]);
         let request = specification();
         ledger.admit_request(&current, &request).await.unwrap();
         ledger
@@ -1316,6 +1329,12 @@ async fn retention_page_preserves_totals_and_remaining_references() {
         ledger::{commands::CommandContext, retention::RetentionDelete},
     };
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(
+        &db.store,
+        &configuration_from_yaml(&configuration_yaml_for_s10()),
+        ACCESS,
+    )
+    .await;
     let database = db.clock_store(None).await;
     sqlx::query("UPDATE gw_fixture_clock SET observed='2025-01-31T12:00:00Z'")
         .execute(database.pool())
@@ -1325,7 +1344,7 @@ async fn retention_page_preserves_totals_and_remaining_references() {
     let settings = AccessSettings::from_config(&cfg);
     let actor = finance::human(database.pool()).await;
     let current = finance::current(database.pool(), actor).await;
-    let ledger = PgLedger::new(database.clone(), settings.clone(), [1; 32]);
+    let ledger = PgLedger::new(database.clone(), [1; 32]);
     for _ in 0..51 {
         let root = specification();
         ledger.admit_request(&current, &root).await.unwrap();
@@ -1427,11 +1446,12 @@ async fn existing_permit_before_unknown_is_not_revoked_but_unknown_before_permit
     };
     for permit_first in [true, false] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let database = db.clock_store(None).await;
         let user = finance::human(database.pool()).await;
         let current = finance::current(database.pool(), user).await;
         let cfg = configuration();
-        let ledger = PgLedger::new(database.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let ledger = PgLedger::new(database.clone(), [1; 32]);
         let mut first = specification();
         let now = tokio::time::Instant::now();
         first.deadline =
@@ -1522,6 +1542,7 @@ async fn telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_rea
     };
     for bound in [false, true] {
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &configuration(), ACCESS).await;
         let user = finance::human(db.store.pool()).await;
         sqlx::query(
             "UPDATE gw_policies SET budget_limit_usd=1 WHERE principal_id=$1 AND key_id IS NULL",
@@ -1532,13 +1553,13 @@ async fn telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_rea
         .unwrap();
         let current = finance::current(db.store.pool(), user).await;
         let cfg = configuration();
-        let healthy = PgLedger::new(db.store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let healthy = PgLedger::new(db.store.clone(), [1; 32]);
         let request = specification();
         healthy.admit_request(&current, &request).await.unwrap();
         healthy.authorize_dispatch(request.id).await.unwrap();
         let proxy = pg_proxy::CommitProxy::new().await;
         let faulty = db.store_via_proxy(proxy.port).await;
-        let ledger = PgLedger::new(faulty.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+        let ledger = PgLedger::new(faulty.clone(), [1; 32]);
         let mut final_usage = observation();
         if bound {
             final_usage.usage.as_mut().unwrap().input_tokens = 5000;
@@ -1583,11 +1604,7 @@ async fn telemetry_final_commit_ack_loss_reobserves_durable_alarm_once_after_rea
         drop(proxy);
         // 같은 DB의 새 ledger와 replay/reaper는 송신권한 없이 durable 사실만 관찰한다.
         let reconnected = db.store_via_proxy(64603).await;
-        let rebuilt = PgLedger::new(
-            reconnected.clone(),
-            AccessSettings::from_config(&cfg),
-            [1; 32],
-        );
+        let rebuilt = PgLedger::new(reconnected.clone(), [1; 32]);
         let replay = rebuilt.finalize_request(request.id, &final_usage).await;
         let runtime = m_gated::runtime::Runtime::new(cfg.limits().clone()).unwrap();
         rebuilt.recovery_tick(&runtime).await.unwrap();

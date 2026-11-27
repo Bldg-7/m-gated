@@ -83,18 +83,19 @@ async fn fake_models() -> FakeModels {
     }
 }
 
-fn settings() -> AccessSettings {
+/// alice가 고정 관리자다. 다른 사람은 접근 목록에 없다.
+fn config() -> config::ValidatedConfig {
     let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
-    AccessSettings::from_config(
-        &config::load(ConfigInputs {
-            yaml: support::YAML,
-            file_environment: None,
-            environment: &env,
-        })
-        .unwrap(),
-    )
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
+    config::load(ConfigInputs {
+        yaml: support::YAML,
+        file_environment: None,
+        environment: &env,
+    })
+    .unwrap()
+}
+fn settings() -> AccessSettings {
+    AccessSettings::from_config(&config())
 }
 fn service(root: &[u8; 32], db: &postgres::TestDb, fake: &FakeModels) -> Arc<CredentialService> {
     let cache = Arc::new(m_gated::credentials::CredentialCache::default());
@@ -130,6 +131,7 @@ fn retire(id: Uuid, expected: i64) -> CredentialCommand {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn provider_credentials_rotate_replay_shred_and_refresh_across_instances() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &config(), &[]).await;
     let fake = fake_models().await;
     let actor = finance::human(db.store.pool()).await;
     // 이 시험은 Provider 키가 하나도 없는 상태에서 시작한다(finance::human 이 만든 시험 고정 키를 지운다).
@@ -412,19 +414,9 @@ impl Http {
             ledger::PgLedger,
             runtime::{Dependency, Runtime},
         };
-        let mut env = support::environment();
-        env.insert(
-            "ALLOWED_EMAILS".into(),
-            "alice@example.test,bob@example.test".into(),
-        );
-        env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
-        let cfg = config::load(ConfigInputs {
-            yaml: support::YAML,
-            file_environment: None,
-            environment: &env,
-        })
-        .unwrap();
+        let cfg = config();
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, &[("bob@example.test", "user")]).await;
         let jwks = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()])
             .serve()
             .await;
@@ -464,7 +456,6 @@ impl Http {
         .unwrap();
         let ledger = Arc::new(PgLedger::new(
             db.store.clone(),
-            AccessSettings::from_config(&cfg),
             m_gated::gateway::auth_config_digest(&cfg),
         ));
         let gateway = Arc::new(m_gated::gateway::InferenceGateway::assemble(

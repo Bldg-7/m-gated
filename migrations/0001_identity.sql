@@ -26,6 +26,16 @@ CREATE TABLE gw_principals (
 CREATE UNIQUE INDEX gw_human_identity ON gw_principals(issuer,subject) WHERE kind='human';
 CREATE INDEX gw_principals_created ON gw_principals(created_at,id);
 CREATE INDEX gw_service_owner ON gw_principals(owner_principal_id,id) WHERE kind='service';
+-- 접근 목록(결정 0001). 이메일로 찾는다. 처음 로그인하기 전에도 목록에 있을 수 있다.
+-- added_by가 없는 행은 시작할 때 설정의 admin_email로 넣은 행이다.
+CREATE TABLE gw_access (
+ id uuid PRIMARY KEY,
+ email text NOT NULL UNIQUE CHECK(octet_length(email) BETWEEN 3 AND 320 AND email=lower(email) AND email !~ '[[:cntrl:][:space:]]'),
+ role text NOT NULL CHECK(role IN ('user','admin')),
+ added_by uuid REFERENCES gw_principals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+ added_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ version bigint NOT NULL DEFAULT 1 CHECK(version>0)
+);
 CREATE FUNCTION gw_check_principal() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF TG_OP='UPDATE' AND (NEW.kind IS DISTINCT FROM OLD.kind OR NEW.issuer IS DISTINCT FROM OLD.issuer OR NEW.subject IS DISTINCT FROM OLD.subject) THEN

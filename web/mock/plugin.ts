@@ -403,6 +403,39 @@ function api(state: MockState) {
     return { status: 200, body: ack(commandId, 'set_budget_timezone', 'settings', '00000000-0000-0000-0000-000000000000', state.timezone.version, changed, { budget_timezone: timezoneView() }) };
   };
 
+  // ── 접근 목록 ──
+  const FIXED = 'admin@example.test';
+  const accessView = (a: MockState['access'][number]) => {
+    const p = state.principals.find(x => x.kind === 'human' && x.email === a.email);
+    return { ...a, version: String(a.version), fixed: a.email === FIXED, principal: p ? { id: p.id, disabled: Boolean(p.policy.disabled) } : null };
+  };
+  const accessEntry = (id: string) => state.access.find(a => a.id === id) ?? fail(404, 'resource_not_found');
+  const changeable = (id: string, expected: unknown) => {
+    const a = accessEntry(id);
+    if (a.email === FIXED) fail(409, 'access_protected');
+    expect(expected, a.version);
+    return a;
+  };
+  const addAccess = (body: Json, commandId: string): Reply => {
+    const email = text(body.email).trim().toLowerCase(), role = text(body.role);
+    if (!email.includes('@') || (role !== 'user' && role !== 'admin')) fail(400, 'invalid_request');
+    if (state.access.some(a => a.email === email)) fail(409, 'access_exists');
+    const a = { id: `acc-${Date.now()}`, email, role: role as 'user' | 'admin', added_by_email: FIXED, added_at: now(), version: 1 };
+    state.access.push(a); state.access.sort((x, y) => x.email.localeCompare(y.email));
+    return { status: 201, body: ack(commandId, 'add_access', 'access', a.id, 1, true, { access: accessView(a) }) };
+  };
+  const updateAccess = (id: string, body: Json, commandId: string): Reply => {
+    const a = changeable(id, body.expected_version), role = text(body.role);
+    if (role !== 'user' && role !== 'admin') fail(400, 'invalid_request');
+    Object.assign(a, { role, version: a.version + 1 });
+    return { status: 200, body: ack(commandId, 'update_access', 'access', a.id, a.version, true, { access: accessView(a) }) };
+  };
+  const removeAccess = (id: string, query: URLSearchParams, commandId: string): Reply => {
+    const a = changeable(id, query.get('expected_version'));
+    state.access = state.access.filter(x => x.id !== a.id);
+    return { status: 200, body: ack(commandId, 'remove_access', 'access', a.id, null) };
+  };
+
   /** 경로와 메서드로 처리기를 고른다. 모르는 경로는 404 resource_not_found. */
   return (method: string, path: string, query: URLSearchParams, body: Json, commandId: string): Reply => {
     const s = path.split('/').filter(Boolean).map(decodeURIComponent), ok = (value: unknown): Reply => ({ status: 200, body: value }), at = `${method} /${s.slice(0, 3).join('/')}`;
@@ -435,6 +468,10 @@ function api(state: MockState) {
       case 'PUT /api/admin/requests': if (s[4] === 'settlement') return settle(s[3], body, commandId); break;
       case 'GET /api/admin/model-catalog': if (s.length === 3) return ok(catalogView()); break;
       case 'POST /api/admin/model-catalog': if (s[3] === 'sync') return syncCatalog(commandId); if (s[3] === 'approve') return approveCatalog(body, commandId); break;
+      case 'GET /api/admin/access': if (s.length === 3) return ok({ items: state.access.map(accessView) }); break;
+      case 'POST /api/admin/access': if (s.length === 3) return addAccess(body, commandId); break;
+      case 'PATCH /api/admin/access': if (s.length === 4) return updateAccess(s[3], body, commandId); break;
+      case 'DELETE /api/admin/access': if (s.length === 4) return removeAccess(s[3], query, commandId); break;
       case 'GET /api/admin/settings': if (s.length === 3) return ok({ budget_timezone: timezoneView(), cutoff_rule: cutoffRuleView() }); break;
       case 'GET /api/admin/token-check': if (s.length === 3) return ok(tokenCheck(query)); break;
       case 'PUT /api/admin/settings': if (s[3] === 'budget-timezone') return setTimezone(body, commandId); if (s[3] === 'cutoff-rule') return setCutoffRule(body, commandId); break;

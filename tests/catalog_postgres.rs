@@ -15,7 +15,7 @@ use axum::{
     http::Request,
 };
 use m_gated::{
-    auth::{AccessSettings, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
     catalog::CatalogService,
     config::{self, ConfigInputs},
     http::{self, AppState},
@@ -35,15 +35,13 @@ const CATALOG_YAML: &str = "    catalog:
       max_response_bytes: 16777216
       model_prefixes: [synthetic-]
 ";
+const ACCESS: &[(&str, &str)] = &[("bob@example.test", "user")];
 fn config() -> config::ValidatedConfig {
     let start = support::YAML.find("    profiles:").unwrap();
     let yaml = format!("{}{}", &support::YAML[..start], CATALOG_YAML);
     let mut env = support::environment();
-    env.insert(
-        "ALLOWED_EMAILS".into(),
-        "alice@example.test,bob@example.test".into(),
-    );
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+    // alice가 고정 관리자다. bob은 일반 사용자로 접근 목록에 넣는다(`ACCESS`).
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
@@ -97,6 +95,7 @@ impl Harness {
     async fn new() -> Self {
         let cfg = config();
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, ACCESS).await;
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
         let verifier = SsoVerifier::new(
@@ -137,7 +136,6 @@ impl Harness {
         .unwrap();
         let ledger = Arc::new(PgLedger::new(
             db.store.clone(),
-            AccessSettings::from_config(&cfg),
             m_gated::gateway::auth_config_digest(&cfg),
         ));
         let gateway = Arc::new(

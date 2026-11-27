@@ -75,6 +75,10 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
         .migrate()
         .await
         .map_err(|_| StartupError::SchemaUnavailable)?;
+    database
+        .ensure_fixed_admin(&AccessSettings::from_config(config))
+        .await
+        .map_err(|_| StartupError::SchemaUnavailable)?;
     let auth = SsoAuthenticator::from_config(config, database.clone())
         .map_err(|_| StartupError::AuthenticationUnavailable)?;
     let mut headers = axum::http::HeaderMap::new();
@@ -96,11 +100,7 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
         return Err(StartupError::AuthenticationUnavailable);
     }
     let settings = AccessSettings::from_config(config);
-    let ledger = PgLedger::new(
-        database,
-        settings.clone(),
-        crate::gateway::auth_config_digest(config),
-    );
+    let ledger = PgLedger::new(database, crate::gateway::auth_config_digest(config));
     // 정책에 줄 수 있는 목록은 설정 파일 profile 과 승인된 카탈로그를 합친 것이다(서버와 같은 규칙).
     let catalog = crate::catalog::CatalogService::new(config, ledger.database().clone())?;
     catalog

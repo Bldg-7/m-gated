@@ -13,7 +13,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use m_gated::{
-    auth::AccessSettings,
     config::{self, ConfigInputs},
     ledger::PgLedger,
 };
@@ -34,8 +33,8 @@ fn configuration() -> config::ValidatedConfig {
         .replace("input: '1.000000000000'", "input: '0.042000000000'")
         .replace("output: '2.000000000000'", "output: '0.000000000000'");
     let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+    // alice가 고정 관리자다. 시험은 store를 직접 만들므로 `postgres::grant_access`로 넣는다.
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     config::load(ConfigInputs {
         yaml: &yaml,
         file_environment: None,
@@ -66,6 +65,7 @@ impl Harness {
         };
         let cfg = configuration();
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, &[]).await;
         let database = db.store.clone();
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
@@ -78,10 +78,7 @@ impl Harness {
             .verify(&sso::credential(token), 1900000000)
             .await
             .unwrap();
-        let current = database
-            .current_human(&identity, &AccessSettings::from_config(&cfg))
-            .await
-            .unwrap();
+        let current = database.current_human(&identity).await.unwrap();
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1")
             .bind(current.policy_id)
             .bind(serde_json::json!([{"provider":"typesafe","model":"jev-latest","capabilities":["systemone"]}]))
@@ -91,12 +88,8 @@ impl Harness {
         let key = finance::virtual_key(&db.store, &cfg, current.id).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
-            PgLedger::new(
-                database.clone(),
-                AccessSettings::from_config(&cfg),
-                m_gated::gateway::auth_config_digest(&cfg),
-            )
-            .with_ceiling(cfg.execution_ceiling().clone()),
+            PgLedger::new(database.clone(), m_gated::gateway::auth_config_digest(&cfg))
+                .with_ceiling(cfg.execution_ceiling().clone()),
         );
         let provider = provider::Provider::new();
         let provider_server = provider.serve().await;

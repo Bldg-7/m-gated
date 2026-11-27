@@ -13,7 +13,7 @@ mod provider;
 mod sso;
 mod support;
 use m_gated::{
-    auth::{AccessSettings, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
     bootstrap::{self, Dependencies},
     config::{self, ConfigInputs},
     ledger::{
@@ -28,8 +28,7 @@ use std::{sync::Arc, time::Duration};
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL, Node22 and pinned Playwright Chromium"]
 async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
     let db = postgres::TestDb::new().await;
-    let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    let env = support::environment();
     let yaml = support::YAML.replace("'1.000000000000'", "'0.000001000000'");
     let cfg = config::load(ConfigInputs {
         yaml: &yaml,
@@ -37,6 +36,7 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
         environment: &env,
     })
     .unwrap();
+    postgres::grant_access(&db.store, &cfg, &[("alice@example.test", "user")]).await;
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks = fake.serve().await;
     let verifier = SsoVerifier::new(
@@ -54,11 +54,7 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
         .verify(&sso::credential(token.clone()), 1900000000)
         .await
         .unwrap();
-    let human = db
-        .store
-        .current_human(&identity, &AccessSettings::from_config(&cfg))
-        .await
-        .unwrap();
+    let human = db.store.current_human(&identity).await.unwrap();
     sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=(100) WHERE id=$1")
         .bind(human.policy_id)
         .bind(
@@ -71,7 +67,6 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
     finance::allow(db.store.pool(), human.id).await;
     let ledger = Arc::new(PgLedger::new(
         db.store.clone(),
-        AccessSettings::from_config(&cfg),
         m_gated::gateway::auth_config_digest(&cfg),
     ));
     let spec = RequestSpec::from_profile(

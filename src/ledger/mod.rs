@@ -1,3 +1,4 @@
+pub mod access;
 pub mod amount;
 pub mod finance;
 pub mod policy;
@@ -193,42 +194,58 @@ impl PgIdentityStore {
             let schema = async {
                 let rows=sqlx::query("SELECT version,checksum FROM gw_schema_migrations ORDER BY version LIMIT 19").fetch_all(&mut *connection).await?;
                 let versions=rows.len()==MIGRATIONS.len() && rows.iter().zip(MIGRATIONS).all(|(r,(version,sql))|r.get::<i64,_>("version")==*version&&r.get::<Vec<u8>,_>("checksum")==Sha256::digest(sql.as_bytes()).to_vec());
-                let tables:bool=sqlx::query_scalar("SELECT count(*)=24 FROM unnest(ARRAY['gw_principals','gw_virtual_keys','gw_policies','gw_requests','gw_request_budgets','gw_usage_events','gw_usage_totals','gw_rate_windows','gw_commands','gw_audit_events','gw_alarm_totals','gw_provider_credentials','gw_model_catalog_proposals','gw_model_catalog_versions','gw_virtual_key_credentials','gw_principal_credentials','gw_budget_timezones','gw_settlement_rules','gw_provider_key_ids','gw_token_check_keys','gw_provider_usage','gw_gateway_usage','gw_gateway_activity','gw_token_check_state']::text[]) AS names(name) WHERE to_regclass(name) IS NOT NULL").fetch_one(&mut *connection).await?;
+                let tables:bool=sqlx::query_scalar("SELECT count(*)=25 FROM unnest(ARRAY['gw_principals','gw_access','gw_virtual_keys','gw_policies','gw_requests','gw_request_budgets','gw_usage_events','gw_usage_totals','gw_rate_windows','gw_commands','gw_audit_events','gw_alarm_totals','gw_provider_credentials','gw_model_catalog_proposals','gw_model_catalog_versions','gw_virtual_key_credentials','gw_principal_credentials','gw_budget_timezones','gw_settlement_rules','gw_provider_key_ids','gw_token_check_keys','gw_provider_usage','gw_gateway_usage','gw_gateway_activity','gw_token_check_state']::text[]) AS names(name) WHERE to_regclass(name) IS NOT NULL").fetch_one(&mut *connection).await?;
                 Ok::<_,sqlx::Error>(versions && tables)
             }.await.unwrap_or(false);
             Ok::<_,sqlx::Error>((true,schema))
         }).await;
         result.ok().and_then(Result::ok).unwrap_or((false, false))
     }
+    /// 설정의 고정 관리자를 접근 목록에 관리자로 넣는다(결정 0001). 시작할 때마다 부른다.
+    /// 이미 있으면 역할만 관리자로 맞춘다.
+    pub async fn ensure_fixed_admin(&self, settings: &AccessSettings) -> Result<(), AuthError> {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            sqlx::query("INSERT INTO gw_access(id,email,role) VALUES($1,$2,'admin') ON CONFLICT(email) DO UPDATE SET role='admin',version=gw_access.version+1 WHERE gw_access.role<>'admin'")
+                .bind(Uuid::new_v4())
+                .bind(settings.fixed_admin())
+                .execute(&self.pool),
+        )
+        .await
+        .map_err(|_| AuthError::DatabaseUnavailable)?
+        .map_err(|_| AuthError::DatabaseUnavailable)?;
+        Ok(())
+    }
     pub async fn current_human(
         &self,
         identity: &VerifiedIdentity,
-        settings: &AccessSettings,
     ) -> Result<CurrentHuman, AuthError> {
-        if !settings.allows(identity.email()) {
-            return Err(AuthError::AccessDenied);
-        }
         let _gate = self
             .gate
             .clone()
             .try_acquire_owned()
             .map_err(|_| AuthError::DatabaseUnavailable)?;
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            self.upsert_human(identity, settings),
-        )
-        .await
-        .map_err(|_| AuthError::DatabaseUnavailable)?
-        .map_err(|_| AuthError::DatabaseUnavailable)?
-        .ok_or(AuthError::AccessDenied)
+        tokio::time::timeout(Duration::from_secs(3), self.upsert_human(identity))
+            .await
+            .map_err(|_| AuthError::DatabaseUnavailable)?
+            .map_err(|_| AuthError::DatabaseUnavailable)?
+            .ok_or(AuthError::AccessDenied)
     }
 
     async fn upsert_human(
         &self,
         identity: &VerifiedIdentity,
-        settings: &AccessSettings,
     ) -> Result<Option<CurrentHuman>, sqlx::Error> {
         let mut tx = self.begin_transaction().await?;
+        // 접근 목록에 없는 사람은 계정을 만들지 않는다.
+        let role: Option<String> = sqlx::query_scalar("SELECT role FROM gw_access WHERE email=$1")
+            .bind(identity.email())
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(role) = role else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
         // identity만 conflict key다. 같은 email의 다른 sub를 조회하거나 갱신하지 않는다.
         sqlx::query("INSERT INTO gw_principals(id,kind,issuer,subject,email,display_name) VALUES($1,'human',$2,$3,$4,$5) ON CONFLICT(issuer,subject) WHERE kind='human' DO NOTHING")
                 .bind(Uuid::new_v4()).bind(identity.issuer()).bind(identity.subject()).bind(identity.email()).bind(identity.display_name()).execute(&mut *tx).await?;
@@ -259,7 +276,7 @@ impl PgIdentityStore {
             version,
             policy_id: policy.get("id"),
             policy_version: policy.get("version"),
-            admin: settings.is_admin(identity.email()),
+            admin: role == "admin",
         };
         tx.commit().await?;
         Ok(Some(human))

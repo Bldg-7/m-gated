@@ -1,8 +1,5 @@
 use super::{CurrentHuman, PgIdentityStore, amount::Amount};
-use crate::{
-    auth::AccessSettings,
-    config::{ApiKind, BillingClass, ModelProfile, ProviderId},
-};
+use crate::config::{ApiKind, BillingClass, ModelProfile, ProviderId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -597,21 +594,15 @@ pub enum Finalized {
 
 pub struct PgLedger {
     database: Arc<PgIdentityStore>,
-    settings: AccessSettings,
     executor_id: Uuid,
     auth_digest: [u8; 32],
     ceiling: super::policy::PolicyLimits,
 }
 impl PgLedger {
     /// identity와 금융이 같은 pool8/ordinary6을 공유해 마감용 연결 두 개를 남긴다.
-    pub fn new(
-        database: Arc<PgIdentityStore>,
-        settings: AccessSettings,
-        auth_digest: [u8; 32],
-    ) -> Self {
+    pub fn new(database: Arc<PgIdentityStore>, auth_digest: [u8; 32]) -> Self {
         Self {
             database,
-            settings,
             executor_id: Uuid::new_v4(),
             auth_digest,
             ceiling: Default::default(),
@@ -933,7 +924,7 @@ impl PgLedger {
             return Err(LedgerError::AccessDenied);
         }
         if p.get::<String, _>("kind") == "human" {
-            if !super::management::active_human(p, &self.settings) {
+            if !super::management::active_human(tx, p).await? {
                 return Err(LedgerError::AccessDenied);
             }
         } else {
@@ -941,7 +932,7 @@ impl PgLedger {
                 .bind(p.get::<Option<Uuid>, _>("owner_principal_id"))
                 .fetch_one(&mut **tx)
                 .await?;
-            if !super::management::active_human(&owner, &self.settings) {
+            if !super::management::active_human(tx, &owner).await? {
                 return Err(LedgerError::OwnerInactive);
             }
         }

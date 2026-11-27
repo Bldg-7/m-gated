@@ -50,6 +50,8 @@ const PATHS: &[&str] = &[
     "/api/admin/provider-credentials",
     "/api/admin/provider-credentials/{provider}",
     "/api/admin/provider-credentials/{provider}/{id}",
+    "/api/admin/access",
+    "/api/admin/access/{id}",
     "/api/admin/settings",
     "/api/admin/settings/budget-timezone",
     "/api/admin/settings/cutoff-rule",
@@ -160,11 +162,7 @@ struct Harness {
 impl Harness {
     async fn new() -> Self {
         let mut env = support::environment();
-        env.insert(
-            "ALLOWED_EMAILS".into(),
-            "alice@example.test,bob@example.test".into(),
-        );
-        env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+        env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
         let cfg = config::load(ConfigInputs {
             yaml: support::YAML,
             file_environment: None,
@@ -172,6 +170,16 @@ impl Harness {
         })
         .unwrap();
         let db = postgres::TestDb::new().await;
+        // alice는 설정의 고정 관리자, bob은 접근 목록의 일반 사용자다.
+        db.store
+            .ensure_fixed_admin(&m_gated::auth::AccessSettings::from_config(&cfg))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO gw_access(id,email,role) VALUES($1,'bob@example.test','user')")
+            .bind(uuid::Uuid::new_v4())
+            .execute(db.store.pool())
+            .await
+            .unwrap();
         let jwks = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()])
             .serve()
             .await;

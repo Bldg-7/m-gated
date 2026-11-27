@@ -1031,7 +1031,7 @@ pub fn auth_config_digest(config: &ValidatedConfig) -> [u8; 32] {
         let projection=serde_json::json!({"provider":crate::ledger::finance::provider_name(provider.provider),"api":crate::ledger::finance::api_name(p.api),"model":p.model,"profile_version":p.profile_version,"actual_models":p.actual_models.iter().collect::<BTreeSet<_>>(),"features":p.features.iter().collect::<BTreeSet<_>>(),"approved_beta":p.approved_beta.iter().collect::<BTreeSet<_>>(),"count_billing":p.count_billing,"max_input_tokens":p.max_input_tokens,"max_output_tokens":p.max_output_tokens,"max_body_bytes":p.max_body_bytes,"max_response_bytes":p.max_response_bytes});
         serde_json::to_string(&projection).expect("비밀 없는 유한 profile projection")
     })).collect::<BTreeSet<_>>();
-    let projection = serde_json::json!({"issuer":config.auth().issuer_literal,"audience":config.auth().audience_literal,"allowed":config.allowed_emails(),"admins":config.admin_emails(),"profiles":profiles,"execution_ceiling":config.execution_ceiling()});
+    let projection = serde_json::json!({"issuer":config.auth().issuer_literal,"audience":config.auth().audience_literal,"admin":config.admin_email(),"profiles":profiles,"execution_ceiling":config.execution_ceiling()});
     Sha256::digest(serde_json::to_vec(&projection).expect("비밀 없는 유한 접근 설정 projection"))
         .into()
 }

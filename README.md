@@ -162,8 +162,9 @@ pass `--config <path>`.
 
 ### 5. First use
 
-1. An admin (listed in `admin_emails`) opens `https://<gateway>/dashboard/` and signs in through the SSO.
-   Under *Admin → Provider keys* (`/dashboard/admin/credentials`), the admin registers a provider key
+1. The fixed admin (the person named by `admin_email`) opens `https://<gateway>/dashboard/` and
+   signs in through the SSO. Under *Admin → Access list*, the admin adds the people who may use the
+   gateway, and chooses who else is an admin (see [Access list](#access-list)). Under *Admin → Provider keys* (`/dashboard/admin/credentials`), the admin registers a provider key
    for each configured provider. Without one, `/readyz` still returns 200 so the admin can reach the
    dashboard, but no request can go out to that provider.
 2. New principals start **deny-all**. Under *Admin → Principals*, the admin sets a policy for each
@@ -215,8 +216,7 @@ tags and merge keys. [`config.example.yaml`](config.example.yaml) is an annotate
 |---|---|---|
 | `public_origin` | yes | HTTPS origin of the gateway (no path or port). Cookie-authenticated writes must send exactly this `Origin`. |
 | `auth` | yes | SSO settings, see below. |
-| `allowed_emails` | – | Exact e-mail allow-list (lowercased; wildcards are rejected). |
-| `admin_emails` | – | Admins. Admins are always allowed. |
+| `admin_email` | yes | The fixed admin: one e-mail address. The gateway lowercases it. At each start, the gateway adds it to the [access list](#access-list) as an admin. |
 | `database` | yes | `host`, `port`, `name`, `user`, and optional `ssl_mode` (`verify-full` by default, or `require`). The password comes from `DB_PASSWORD`. |
 | `providers` | yes | 1–4 entries, at most one per provider. |
 | `limits` | – | Process-wide concurrency, size and timeout limits. |
@@ -355,7 +355,7 @@ The gateway reads only the variables in this table.
 | `AUTH_ISSUER`, `AUTH_JWKS_URI`, `SSO_AUDIENCE`, `SSO_ACCESS_COOKIE_NAME` | `auth.issuer`, `auth.jwks_uri`, `auth.audience`, `auth.access_cookie_name` | |
 | `SSO_LOGIN_URL`, `SSO_REFRESH_URL`, `SSO_LOGOUT_URL` | `auth.login_url`, `auth.refresh_url`, `auth.logout_url` | |
 | `SSO_RETURN_PARAM` | `auth.return_param` | |
-| `ALLOWED_EMAILS`, `ADMIN_EMAILS` | `allowed_emails`, `admin_emails` | Comma-separated. An empty value means an empty list. |
+| `ADMIN_EMAIL` | `admin_email` | |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_SSL_MODE` | `database.*` | `DB_SSL_MODE` accepts only `verify-full` or `require`. |
 | `TLS_CA_FILE` | – | Path to an extra PEM trust anchor (≤ 64 KiB) for Postgres, the JWKS and provider connections. |
 | `DB_PASSWORD` | – | **Secret, environment only.** |
@@ -450,11 +450,11 @@ starts again from 0.
 - `iss` and `aud` match the config exactly.
 - `exp` is set, and `exp` and `nbf` hold with 30 s of leeway.
 - `sub` is a non-empty string.
-- `email_verified` is `true`, and `email`, lowercased, is in the allow-list.
+- `email_verified` is `true`, and `email`, lowercased, is on the [access list](#access-list).
 - An optional `name` is used as the display name.
 
-A person is identified by the pair (`iss`, `sub`). The e-mail address is used only for the
-allow-list and the admin check. The gateway never issues or refreshes tokens and never stores
+A person is identified by the pair (`iss`, `sub`). The e-mail address is used only to look up the
+access list. The gateway never issues or refreshes tokens and never stores
 refresh tokens.
 
 | Credential | Inference | Own data and keys (`/api/*`) | Admin (`/api/admin/*`) |
@@ -511,6 +511,39 @@ human owner, and issue keys for them.
 Every management write (`POST`, `PUT`, `PATCH`, `DELETE`) requires an `X-Gateway-Command-ID`
 header containing a UUID. Repeating a command with the same ID and the same input replays the
 original result, so retrying is safe.
+
+### Access list
+
+The access list in the database decides who can use the gateway and who is an admin. Each entry of
+the list is an e-mail address and a role (`user` or `admin`). Because the list is keyed by e-mail
+address, an admin can add a person before that person signs in for the first time. The person's
+principal is made at the first sign-in.
+
+- The config names one **fixed admin** (`admin_email`). At each start, the gateway adds this address
+  to the list as an admin. If the address is already on the list as a user, its role becomes
+  `admin`. The fixed admin's entry cannot be changed or removed on the dashboard.
+- Admins add, change and remove other people under *Admin → Access list*
+  (`/dashboard/admin/members`). An admin cannot change or remove their own entry.
+- A change applies to the next request. A person who is removed can no longer sign in. Their virtual
+  keys stop working (`403 access_denied`), and so do the keys of the service principals that they
+  own (`403 owner_inactive`). Their principal, virtual keys and usage stay in the database.
+- Removing a person ends their access for good, until an admin adds them again. To block a person
+  for a while and keep their entry, suspend their principal instead (see **Suspending an account**
+  under [Operations](#operations)).
+- Every change is written to the audit log.
+- If no admin can sign in, change `admin_email` to a person who can sign in through the SSO, and
+  restart. That person
+  becomes the fixed admin. The earlier fixed admin stays on the list as a normal admin and can then
+  be removed on the dashboard.
+
+API (admin only; writes need `X-Gateway-Command-ID`, and cookie writes need `Origin` and `X-CSRF-Token`):
+
+| Method and path | Body / query | Result |
+|---|---|---|
+| `GET /api/admin/access` | – | `items`, sorted by e-mail address. Each entry has `id`, `email`, `role` (`user` or `admin`), `fixed` (the fixed admin), `added_by_email` (`null` for the fixed admin), `added_at`, `version`, and `principal`: once the person has signed in, the principal's `id` and `disabled` (`true` while the principal is suspended), else `null` |
+| `POST /api/admin/access` | `{"email": "...", "role": "user" \| "admin"}` | `201`; `409 access_exists` if the address is already on the list |
+| `PATCH /api/admin/access/{id}` | `{"role": "user" \| "admin", "expected_version": "<n>"}` | `200`; `409 version_conflict` if the entry changed since you read `version`; `409 access_protected` for the fixed admin's entry or your own entry |
+| `DELETE /api/admin/access/{id}` | `?expected_version=<n>` | `200`; the same conflicts as `PATCH` |
 
 ## Cost ledger
 
@@ -680,6 +713,7 @@ It has no inline scripts and loads nothing from external CDNs.
 | My usage and budget balances | `/dashboard/` | users |
 | My virtual keys (list, edit and revoke) | `/dashboard/keys` | users |
 | Issue a virtual key | `/dashboard/keys/new` | users |
+| Access list (who may sign in, who is an admin) | `/dashboard/admin/members` | admins |
 | Principals, policies, service principals, safety-pause release | `/dashboard/admin/principals` | admins |
 | Issue a virtual key for a service principal | `/dashboard/admin/principals/key?principal_id=<id>` | admins |
 | All virtual keys: list them, edit them or revoke them | `/dashboard/admin/keys` | admins |
@@ -705,10 +739,8 @@ routes). It is same-origin only, with no CORS. The UI is in Korean by default; a
   counters and gauges to it (`{"telemetry": {...}}`). Metrics never include user strings, request
   bodies, tokens or secrets.
 - **Migrations:** automatic at startup, as described in [Quick start](#1-prerequisites).
-- **Changing access:** changes to policies and keys in the database take effect on the next
-  request. Removing someone from `allowed_emails`/`admin_emails` takes effect only when every
-  instance has restarted with the new config. If you need the change to apply at once, also
-  suspend the account.
+- **Changing access:** changes to the access list, policies and keys take effect on the next
+  request. No restart is necessary.
 - **Suspending an account:** an admin suspends a principal with the **Suspend account** button on
   its page under *Admin → Principals*. The API call is `PUT /api/admin/principals/{id}/policy` with
   the current grants and limits, `disabled: true` and a `reason`. No restart is necessary.

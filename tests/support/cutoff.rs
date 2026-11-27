@@ -927,13 +927,10 @@ async fn dispatched(
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn ledger_replays_the_same_settlement_as_noop_and_rejects_a_different_one() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let cancelled = ended(FinalOutcome::Cancelled, "client_cancelled", None);
     // 시작 event 뒤에 끊긴 스트림: 같은 관측·같은 정산은 noop, 정산이 다르면 충돌이다.
     let id = dispatched(&ledger, &current, true).await;
@@ -1027,13 +1024,10 @@ async fn ledger_replays_the_same_settlement_as_noop_and_rejects_a_different_one(
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn ledger_settles_cut_offs_by_the_rule_recorded_at_admission() {
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), ACCESS).await;
     let principal = finance::human(db.store.pool()).await;
     let current = finance::current(db.store.pool(), principal).await;
-    let ledger = PgLedger::new(
-        db.store.clone(),
-        AccessSettings::from_config(&configuration()),
-        [1; 32],
-    );
+    let ledger = PgLedger::new(db.store.clone(), [1; 32]);
     let cancelled = ended(FinalOutcome::Cancelled, "client_cancelled", None);
     let pool = db.store.pool();
     let settle = |id, settlement| {

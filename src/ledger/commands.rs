@@ -120,16 +120,10 @@ impl PgLedger {
         }
         principals.sort();
         principals.dedup();
-        let admin_emails = ctx
-            .settings
-            .admin_emails()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        // 관련 행과 현재 설정 admin을 한 UUID 순서로 잠그되 DB identity 수만큼 ID를 축적하지 않는다.
+        // 관련 행과 접근 목록의 관리자 계정을 한 UUID 순서로 잠그되 DB identity 수만큼 ID를 축적하지 않는다.
         {
             use futures_util::TryStreamExt;
-            let rows=sqlx::query("SELECT id FROM gw_principals WHERE id=ANY($1) OR ($2 AND kind='human' AND email=ANY($3)) ORDER BY id FOR UPDATE").bind(&principals).bind(matches!(command,Command::Policy(..))).bind(&admin_emails).fetch(&mut *tx);
+            let rows=sqlx::query("SELECT id FROM gw_principals WHERE id=ANY($1) OR ($2 AND kind='human' AND email IN (SELECT email FROM gw_access WHERE role='admin')) ORDER BY id FOR UPDATE").bind(&principals).bind(matches!(command,Command::Policy(..))).fetch(&mut *tx);
             let mut rows = std::pin::pin!(rows);
             let mut related = 0;
             while let Some(row) = rows.try_next().await? {
@@ -453,10 +447,14 @@ impl PgLedger {
                     if *id == ctx.actor {
                         return Err(ManagementError::SecurityFence);
                     }
-                    if p.get::<Option<String>, _>("email")
-                        .is_some_and(|e| ctx.settings.is_admin(&e))
-                    {
-                        let remains:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gw_principals WHERE kind='human' AND id<>$1 AND disabled_at IS NULL AND security_fence_ref IS NULL AND email=ANY($2))").bind(id).bind(&admin_emails).fetch_one(&mut *tx).await?;
+                    let admin = match p.get::<Option<String>, _>("email") {
+                        Some(e) => {
+                            management::access_role(&mut tx, &e).await?.as_deref() == Some("admin")
+                        }
+                        None => false,
+                    };
+                    if admin {
+                        let remains:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gw_principals WHERE kind='human' AND id<>$1 AND disabled_at IS NULL AND security_fence_ref IS NULL AND email IN (SELECT email FROM gw_access WHERE role='admin'))").bind(id).fetch_one(&mut *tx).await?;
                         if !remains {
                             return Err(ManagementError::SecurityFence);
                         }

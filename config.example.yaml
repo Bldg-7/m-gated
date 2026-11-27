@@ -43,17 +43,11 @@ auth:
   # and logout. Without it, the SSO decides where users land after login.
   # return_param: return_to
 
-# Exact, case-insensitive e-mail allow-list (no wildcards). Only users whose
-# verified "email" claim is listed can use the gateway.
-# Env override: ALLOWED_EMAILS (comma separated)
-allowed_emails:
-  - alice@example.com
-  - bob@example.com
-
-# Administrators. Admins are automatically allowed.
-# Env override: ADMIN_EMAILS (comma separated)
-admin_emails:
-  - admin@example.com
+# The fixed admin. At each start the gateway adds this address to the access
+# list as an admin. Admins add other people on the dashboard
+# (Admin -> Access list).
+# Env override: ADMIN_EMAIL
+admin_email: admin@example.com
 
 # PostgreSQL. Connections always use TLS with full certificate verification;
 # set TLS_CA_FILE to a PEM file if the server certificate is not signed by a

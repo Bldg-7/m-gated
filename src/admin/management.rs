@@ -53,6 +53,8 @@ pub(super) fn error(e: ManagementError) -> Response {
         PolicyPeriod => (409, "policy_period_conflict"),
         ConfigurationConflict => (409, "configuration_conflict"),
         SecurityFence => (409, "security_fence_conflict"),
+        AccessDuplicate => (409, "access_exists"),
+        AccessProtected => (409, "access_protected"),
         SettlementConflict => (409, "settlement_conflict"),
         ExecutionNotFinal => (409, "execution_not_final"),
         Version(v) => {
@@ -1064,6 +1066,168 @@ setting_handler!(
     /// `PUT /api/admin/settings/cutoff-rule`.
     set_cutoff_rule,
     Setting::CutoffRule
+);
+
+// ---- 접근 목록(결정 0001) ----
+
+#[derive(Clone, Copy, PartialEq)]
+enum Access {
+    List,
+    Add,
+    Update,
+    Remove,
+}
+
+async fn access(
+    state: &ApiState,
+    actor: &Actor,
+    params: &Params,
+    CommandId(command_id): CommandId,
+    request: Request,
+    route: Access,
+) -> Response {
+    let (head, body) = request.into_parts();
+    let id = params.uuid("id");
+    let grants = state.api.grants();
+    // 명령 기록의 경로는 등록한 경로 모양과 표준 UUID로 만든다(결정 0010 규칙 5).
+    let path = match (route, id) {
+        (Access::Update | Access::Remove, Some(id)) => format!("/api/admin/access/{id}"),
+        _ => head.uri.path().to_owned(),
+    };
+    let ctx = command_context(
+        state,
+        actor.human.current.id,
+        command_id.unwrap_or_else(Uuid::nil),
+        &head.method,
+        &path,
+        &grants,
+        false,
+    );
+    if route == Access::List {
+        if head.uri.query().is_some() {
+            return error(ManagementError::Invalid);
+        }
+        return match state.api.store.access_list(&ctx).await {
+            Ok(v) => success(v),
+            Err(e) => error(e),
+        };
+    }
+    let Some(command_id) = command_id else {
+        return error(ManagementError::Invalid);
+    };
+    if !identity_encoding(&head.headers) {
+        return unsupported_media_type();
+    }
+    let bytes = match read_body(state, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Add {
+        email: String,
+        role: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Update {
+        role: String,
+        expected_version: String,
+    }
+    use crate::ledger::access::Role;
+    let result = match route {
+        Access::Remove => {
+            if !bytes.is_empty() {
+                return error(ManagementError::Invalid);
+            }
+            let mut fields = match management_query::fields(head.uri.query()) {
+                Ok(f) => f,
+                Err(e) => return error(e),
+            };
+            let Some(expected) = fields
+                .remove("expected_version")
+                .and_then(|s| s.parse::<i64>().ok())
+            else {
+                return error(ManagementError::Invalid);
+            };
+            let Some(id) = id.filter(|_| fields.is_empty()) else {
+                return error(ManagementError::Invalid);
+            };
+            state.api.store.remove_access(&ctx, id, expected).await
+        }
+        _ => {
+            if head.uri.query().is_some() {
+                return error(ManagementError::Invalid);
+            }
+            if !crate::http::json_content_type(&head.headers) {
+                return unsupported_media_type();
+            }
+            if route == Access::Add {
+                let Ok(input) = serde_json::from_slice::<Add>(&bytes) else {
+                    return error(ManagementError::Invalid);
+                };
+                let Some(role) = Role::parse(&input.role) else {
+                    return error(ManagementError::Invalid);
+                };
+                state.api.store.add_access(&ctx, &input.email, role).await
+            } else {
+                let Ok(input) = serde_json::from_slice::<Update>(&bytes) else {
+                    return error(ManagementError::Invalid);
+                };
+                let (Some(role), Ok(expected), Some(id)) = (
+                    Role::parse(&input.role),
+                    input.expected_version.parse::<i64>(),
+                    id,
+                ) else {
+                    return error(ManagementError::Invalid);
+                };
+                state
+                    .api
+                    .store
+                    .update_access(&ctx, id, role, expected)
+                    .await
+            }
+        }
+    };
+    match result {
+        Ok(result) => acknowledged(result, command_id),
+        Err(e) => error(e),
+    }
+}
+
+macro_rules! access_handler {
+    ($(#[$doc:meta])* $name:ident, $route:expr) => {
+        $(#[$doc])*
+        pub(super) async fn $name(
+            State(state): State<ApiState>,
+            actor: Actor,
+            params: Params,
+            command_id: CommandId,
+            request: Request,
+        ) -> Response {
+            access(&state, &actor, &params, command_id, request, $route).await
+        }
+    };
+}
+access_handler!(
+    /// `GET /api/admin/access`.
+    access_list,
+    Access::List
+);
+access_handler!(
+    /// `POST /api/admin/access`.
+    add_access,
+    Access::Add
+);
+access_handler!(
+    /// `PATCH /api/admin/access/{id}`.
+    update_access,
+    Access::Update
+);
+access_handler!(
+    /// `DELETE /api/admin/access/{id}`.
+    remove_access,
+    Access::Remove
 );
 
 // ---- 모델·가격 카탈로그 ----

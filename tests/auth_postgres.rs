@@ -11,7 +11,7 @@ use axum::{
     routing::any,
 };
 use m_gated::{
-    auth::{AccessSettings, AuthError, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{AuthError, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
     config::{self, ConfigInputs},
     http::{self, AppState},
     runtime::{Dependency, Runtime},
@@ -19,18 +19,10 @@ use m_gated::{
 use serde_json::json;
 use sqlx::Row;
 use std::sync::Arc;
-fn config(admin: bool) -> config::ValidatedConfig {
+/// alice가 고정 관리자다. 시험은 store를 직접 만들므로 `postgres::grant_access`로 접근 목록을 채운다.
+fn config() -> config::ValidatedConfig {
     let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
-    env.insert(
-        "ADMIN_EMAILS".into(),
-        if admin {
-            "alice@example.test"
-        } else {
-            "other@example.test"
-        }
-        .into(),
-    );
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     config::load(ConfigInputs {
         yaml: support::YAML,
         file_environment: None,
@@ -57,10 +49,10 @@ async fn identity_and_admin_are_not_email_inheritance() {
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
     let verifier = SsoVerifier::new(
-        config(true).auth(),
+        config().auth(),
         Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
     );
-    let settings = AccessSettings::from_config(&config(true));
+    postgres::grant_access(&db.store, &config(), &[]).await;
     let token = sso::credential(sso::Signer::shared().sign(&sso::claims(), "key1"));
     let raw = serde_json::to_string(&sso::claims())
         .unwrap()
@@ -80,10 +72,10 @@ async fn identity_and_admin_are_not_email_inheritance() {
         .unwrap();
     assert_eq!(before, 0);
     let identity = verifier.verify(&token, 1900000000).await.unwrap();
-    let first = db.store.current_human(&identity, &settings).await.unwrap();
+    let first = db.store.current_human(&identity).await.unwrap();
     assert!(first.admin);
     assert_eq!(first.version, 1);
-    let again = db.store.current_human(&identity, &settings).await.unwrap();
+    let again = db.store.current_human(&identity).await.unwrap();
     assert_eq!(again.id, first.id);
     assert_eq!(again.version, 1);
     assert_eq!(again.policy_id, first.policy_id);
@@ -103,33 +95,28 @@ async fn identity_and_admin_are_not_email_inheritance() {
         )
         .await
         .unwrap();
-    let new = db.store.current_human(&other, &settings).await.unwrap();
+    let new = db.store.current_human(&other).await.unwrap();
     assert_ne!(new.id, first.id);
     assert_ne!(new.policy_id, first.policy_id);
     assert!(new.admin);
-    assert!(
-        !db.store
-            .current_human(&identity, &AccessSettings::from_config(&config(false)))
-            .await
-            .unwrap()
-            .admin
-    );
+    // 관리자 여부는 계정에 남지 않고, 요청마다 접근 목록의 역할로 정한다.
+    sqlx::query("UPDATE gw_access SET role='user' WHERE email='alice@example.test'")
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    assert!(!db.store.current_human(&identity).await.unwrap().admin);
     let gate = Arc::new(tokio::sync::Barrier::new(3));
     let mut jobs = Vec::new();
     for _ in 0..2 {
         let store = db.store.clone();
         let gate = gate.clone();
-        let config = config(true);
+        let config = config();
         let verifier = SsoVerifier::new(config.auth(), verifier.jwks.clone());
         let token = sso::credential(sso::Signer::shared().sign(&claims, "key1"));
         jobs.push(tokio::spawn(async move {
             let identity = verifier.verify(&token, 1900000000).await.unwrap();
             gate.wait().await;
-            store
-                .current_human(&identity, &AccessSettings::from_config(&config))
-                .await
-                .unwrap()
-                .id
+            store.current_human(&identity).await.unwrap().id
         }));
     }
     gate.wait().await;
@@ -151,13 +138,13 @@ async fn identity_and_admin_are_not_email_inheritance() {
         )
         .await
         .unwrap();
-    let changed = db.store.current_human(&changed, &settings).await.unwrap();
+    let changed = db.store.current_human(&changed).await.unwrap();
     assert_eq!(changed.id, first.id);
     assert_eq!(changed.version, 2);
     assert_eq!(changed.policy_version, 1);
     sqlx::query("UPDATE gw_principals SET disabled_at=clock_timestamp(),disabled_reason='security_config_fence',security_fence_ref='synthetic-ref' WHERE id=$1").bind(first.id).execute(db.store.pool()).await.unwrap();
     assert!(matches!(
-        db.store.current_human(&identity, &settings).await,
+        db.store.current_human(&identity).await,
         Err(AuthError::AccessDenied)
     ));
     let row = sqlx::query(
@@ -176,7 +163,8 @@ async fn identity_and_admin_are_not_email_inheritance() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn same_authentication_service_observes_wire_and_current_access() {
     let db = postgres::TestDb::new().await;
-    let cfg = config(true);
+    let cfg = config();
+    postgres::grant_access(&db.store, &cfg, &[]).await;
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks_server = fake.serve().await;
     let cache = Arc::new(JwksCache::loopback_for_test(jwks_server.uri.clone()).unwrap());
@@ -556,7 +544,8 @@ async fn authentication_waiters_are_bounded_and_release_their_slots() {
     use m_gated::auth::{AuthRoute, AuthenticatedHuman};
     use std::{future::Future, pin::Pin, task::Poll};
     let db = postgres::TestDb::new().await;
-    let cfg = config(true);
+    let cfg = config();
+    postgres::grant_access(&db.store, &cfg, &[]).await;
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     fake.hold.store(true, std::sync::atomic::Ordering::SeqCst);
     let server = fake.serve().await;
@@ -612,8 +601,7 @@ async fn authentication_waiters_are_bounded_and_release_their_slots() {
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn configured_token_limit_rejects_before_jwks_or_identity_persistence() {
     let db = postgres::TestDb::new().await;
-    let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
+    let env = support::environment();
     let yaml = format!("{}\nlimits:\n  token_bytes: 16\n", support::YAML);
     let cfg = config::load(ConfigInputs {
         yaml: &yaml,
@@ -621,6 +609,7 @@ async fn configured_token_limit_rejects_before_jwks_or_identity_persistence() {
         environment: &env,
     })
     .unwrap();
+    postgres::grant_access(&db.store, &cfg, &[("alice@example.test", "user")]).await;
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
     let verifier = SsoVerifier::new(

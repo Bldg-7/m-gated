@@ -114,7 +114,7 @@ try{
   if(hostProvider&&req.method==='GET'&&req.url==={anthropic:'/v1/models?limit=1',openai:'/v1/models',deepseek:'/models'}[hostProvider]){modelChecks++;const sent=hostProvider==='anthropic'?req.headers['x-api-key']:(req.headers.authorization??'').replace(/^Bearer /,'');if(hostProvider==='anthropic')assert.equal(req.headers['anthropic-version'],'2023-06-01');else assert.equal(req.headers['x-api-key'],undefined);res.writeHead(sent===companyKeys[hostProvider]?200:401,{'content-type':'application/json'});res.end('{"data":[]}');return;}
   if(req.headers.host==='api.deepseek.com'){deepseekProvider(req,res).catch(()=>res.destroy());return;}if(req.headers.host==='api.anthropic.com'){provider(req,res).catch(()=>res.destroy());return;}if(req.headers.host==='api.openai.com'){(req.url==='/v1/responses'?responsesProvider:chatEmbeddingsProvider)(req,res).catch(()=>res.destroy());return;}if(req.url==='/.well-known/jwks.json'){calls++;if(failJwks){res.writeHead(503);res.end();}else{res.setHeader('content-type','application/json');res.end(JSON.stringify({keys:[jwk]}));}readyResolve();}else{res.writeHead(404);res.end();}});
  await new Promise(r=>sso.listen(443,'127.0.0.1',r));
- let config=readFileSync('/fixture/synthetic-config.yaml','utf8').replace('host: 127.0.0.1','host: localhost').replace('user@example.invalid','alice@example.test').replace('admin@example.invalid','alice@example.test');writeFileSync(join(directory,'config.yaml'),config);
+ let config=readFileSync('/fixture/synthetic-config.yaml','utf8').replace('host: 127.0.0.1','host: localhost').replace('admin@example.invalid','alice@example.test');writeFileSync(join(directory,'config.yaml'),config);
  // 잘못된 CA와 hostname은 인증을 우회하지 않고 실제 main의 migration 전에 실패한다.
  app=start({TLS_CA_FILE:join(directory,'missing.pem')});let result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/config_secret_invalid/);app=null;
  app=start({TLS_CA_FILE:join(directory,'wrong-ca.pem')});result=await app.exit;assert.equal(result.code,1);assert.match(result.err,/schema_unavailable/);app=null;
@@ -433,7 +433,9 @@ execution_ceiling:
  if(loadCase){
   loadActive=true;
   const allowed=Array.from({length:16},(_,i)=>`load${i}@example.test`);
-  const loadConfig=s8Config.split('execution_ceiling:')[0].replace('  - alice@example.test\nadmin_emails:',allowed.map(e=>'  - '+e).join('\n')+'\n  - alice@example.test\nadmin_emails:').replaceAll('max_input_tokens: 4096','max_input_tokens: 8388608')+'execution_ceiling:\n  budget: null\n  rpm: null\n  tpm: null\n  count_rpm: null\n';
+  // 고정 관리자(alice)는 서버가 시작할 때 넣는다. 부하 사용자는 일반 사용자로 접근 목록(gw_access)에 넣는다.
+  await db.query(`INSERT INTO ${schema}.gw_access(id,email,role) SELECT gen_random_uuid(),e,'user' FROM unnest($1::text[]) AS e ON CONFLICT(email) DO NOTHING`,[allowed]);
+  const loadConfig=s8Config.split('execution_ceiling:')[0].replaceAll('max_input_tokens: 4096','max_input_tokens: 8388608')+'execution_ceiling:\n  budget: null\n  rpm: null\n  tpm: null\n  count_rpm: null\n';
   writeFileSync(join(directory,'config.yaml'),loadConfig);providerMode='load';app=start();await waitStatus('/readyz',200);
   function loadToken(i){const claims={iss:'https://auth.example.test',aud:'https://example.test',sub:i===-1?'main-human':`load-human-${i}`,email:i===-1?'alice@example.test':allowed[i],email_verified:true,exp:Math.floor(Date.now()/1000)+7200,name:'Synthetic load'};const part=`${header}.${Buffer.from(JSON.stringify(claims)).toString('base64url')}`;return `${part}.${createSign('RSA-SHA256').update(part).sign(keys.privateKey).toString('base64url')}`;}
   const ids=[];

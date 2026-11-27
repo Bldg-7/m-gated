@@ -29,6 +29,10 @@ pub enum ManagementError {
     PolicyPeriod,
     ConfigurationConflict,
     SecurityFence,
+    /// 이 이메일은 이미 접근 목록에 있다.
+    AccessDuplicate,
+    /// 고정 관리자의 항목이나 자기 자신의 항목은 바꾸거나 지울 수 없다.
+    AccessProtected,
     SettlementConflict,
     ExecutionNotFinal,
     Query(super::dashboard::QueryError),
@@ -401,35 +405,55 @@ pub(crate) fn cas(expected: &str, current: i64) -> Result<(), ManagementError> {
         Ok(())
     }
 }
-pub(crate) fn active_human(p: &PgRow, settings: &AccessSettings) -> bool {
-    p.get::<String, _>("kind") == "human"
-        && p.get::<Option<String>, _>("disabled_reason").is_none()
-        && p.get::<Option<String>, _>("security_fence_ref").is_none()
-        && p.get::<Option<String>, _>("email")
-            .is_some_and(|e| settings.allows(&e))
+/// 접근 목록에서 이 이메일의 역할(`user`, `admin`)을 찾는다. 목록에 없으면 `None`이다.
+pub(crate) async fn access_role(
+    c: &mut PgConnection,
+    email: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT role FROM gw_access WHERE email=$1")
+        .bind(email)
+        .fetch_optional(c)
+        .await
+}
+/// 쓸 수 있는 사람의 계정인지. 사람 계정이고, 정지되지 않았고, 접근 목록에 있어야 한다.
+pub(crate) async fn active_human(c: &mut PgConnection, p: &PgRow) -> Result<bool, sqlx::Error> {
+    if p.get::<String, _>("kind") != "human"
+        || p.get::<Option<String>, _>("disabled_reason").is_some()
+        || p.get::<Option<String>, _>("security_fence_ref").is_some()
+    {
+        return Ok(false);
+    }
+    let Some(email) = p.get::<Option<String>, _>("email") else {
+        return Ok(false);
+    };
+    Ok(access_role(c, &email).await?.is_some())
 }
 pub(crate) async fn check_actor(
     c: &mut PgConnection,
     id: Uuid,
-    settings: &AccessSettings,
+    _settings: &AccessSettings,
     admin: bool,
 ) -> Result<(), ManagementError> {
     let p = sqlx::query("SELECT * FROM gw_principals WHERE id=$1")
         .bind(id)
-        .fetch_optional(c)
+        .fetch_optional(&mut *c)
         .await?
         .ok_or(ManagementError::Forbidden)?;
-    if !active_human(&p, settings) || (admin && !settings.is_admin(&p.get::<String, _>("email"))) {
+    if !active_human(&mut *c, &p).await? {
+        return Err(ManagementError::Forbidden);
+    }
+    if admin
+        && access_role(&mut *c, &p.get::<String, _>("email"))
+            .await?
+            .as_deref()
+            != Some("admin")
+    {
         return Err(ManagementError::Forbidden);
     }
     Ok(())
 }
 impl PgIdentityStore {
-    pub async fn authenticate_key(
-        &self,
-        raw: &str,
-        settings: &AccessSettings,
-    ) -> Result<AuthenticatedInference, AuthError> {
+    pub async fn authenticate_key(&self, raw: &str) -> Result<AuthenticatedInference, AuthError> {
         let key = VirtualSecret::parse(raw)?;
         let _gate = self
             .gate
@@ -443,10 +467,10 @@ impl PgIdentityStore {
             if !key.matches(&row.get::<Vec<u8>,_>("secret_hash"))||!row.get::<bool,_>("active"){return Err(AuthError::InvalidCredentials);}
             if row.get::<Option<String>,_>("disabled_reason").is_some()||row.get::<Option<String>,_>("security_fence_ref").is_some(){return Err(AuthError::AccessDenied);}
             if row.get::<String,_>("kind")=="human" {
-                if !active_human(&row,settings){return Err(AuthError::AccessDenied);}
+                if !active_human(&mut tx,&row).await.map_err(|_|AuthError::DatabaseUnavailable)?{return Err(AuthError::AccessDenied);}
             } else {
                 let owner=sqlx::query("SELECT * FROM gw_principals WHERE id=$1").bind(row.get::<Option<Uuid>,_>("owner_principal_id")).fetch_one(&mut *tx).await.map_err(|_|AuthError::DatabaseUnavailable)?;
-                if !active_human(&owner,settings){return Err(AuthError::OwnerInactive);}
+                if !active_human(&mut tx,&owner).await.map_err(|_|AuthError::DatabaseUnavailable)?{return Err(AuthError::OwnerInactive);}
             }
             let bound:Vec<(crate::config::ProviderId,Uuid)>=sqlx::query("SELECT provider,credential_id FROM gw_virtual_key_credentials WHERE key_id=$1").bind(key.id).fetch_all(&mut *tx).await.map_err(|_|AuthError::DatabaseUnavailable)?.iter().filter_map(|r|Some((crate::config::ProviderId::from_name(&r.get::<String,_>("provider"))?,r.get::<Uuid,_>("credential_id")))).collect();
             let allowed=principal_credentials(&mut tx,row.get("principal_id")).await.map_err(|_|AuthError::DatabaseUnavailable)?;

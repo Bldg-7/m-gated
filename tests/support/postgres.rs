@@ -74,6 +74,34 @@ async fn cleanup_failed_pool_initialization(
     }).await;
     matches!(result, Ok(Ok(())))
 }
+/// 시험 schema의 접근 목록(`gw_access`, 결정 0001)을 채운다. migrate 뒤에 부른다.
+///
+/// 설정의 고정 관리자(`admin_email`)는 서버 시작과 같은 `ensure_fixed_admin`으로 넣는다.
+/// 나머지 사람은 `(이메일, 역할)`로 SQL로 넣는다. 예전 설정의 `ALLOWED_EMAILS`에 있던 사람은
+/// `"user"`, 고정 관리자가 아닌 `ADMIN_EMAILS`의 사람은 `"admin"`이다. 이미 목록에 있는 사람
+/// (고정 관리자 포함)은 그대로 둔다. 역할을 바꾸는 시험은 `gw_access`를 직접 고친다.
+#[allow(dead_code)]
+pub async fn grant_access(
+    store: &PgIdentityStore,
+    config: &m_gated::config::ValidatedConfig,
+    entries: &[(&str, &str)],
+) {
+    store
+        .ensure_fixed_admin(&m_gated::auth::AccessSettings::from_config(config))
+        .await
+        .unwrap_or_else(|_| panic!("fixed admin seed failed"));
+    for (email, role) in entries {
+        sqlx::query(
+            "INSERT INTO gw_access(id,email,role) VALUES($1,$2,$3) ON CONFLICT(email) DO NOTHING",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(email)
+        .bind(role)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+}
 pub struct TestDb {
     pub store: Arc<PgIdentityStore>,
     pub schema: String,

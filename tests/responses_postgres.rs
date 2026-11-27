@@ -11,7 +11,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use m_gated::{
-    auth::AccessSettings,
     config::{self, ConfigInputs},
     ledger::PgLedger,
 };
@@ -26,8 +25,8 @@ fn configuration() -> config::ValidatedConfig {
 }
 fn configuration_yaml(yaml: &str) -> config::ValidatedConfig {
     let mut env = support::environment();
-    env.insert("ALLOWED_EMAILS".into(), "alice@example.test".into());
-    env.insert("ADMIN_EMAILS".into(), "alice@example.test".into());
+    // alice가 고정 관리자다. 시험은 store를 직접 만들므로 `postgres::grant_access`로 넣는다.
+    env.insert("ADMIN_EMAIL".into(), "alice@example.test".into());
     config::load(ConfigInputs {
         yaml,
         file_environment: None,
@@ -81,6 +80,7 @@ impl Harness {
             runtime::Dependency,
         };
         let db = postgres::TestDb::new().await;
+        postgres::grant_access(&db.store, &cfg, &[]).await;
         let database = if clock {
             db.clock_store(None).await
         } else {
@@ -97,21 +97,14 @@ impl Harness {
             .verify(&sso::credential(token.clone()), 1900000000)
             .await
             .unwrap();
-        let current = database
-            .current_human(&identity, &AccessSettings::from_config(&cfg))
-            .await
-            .unwrap();
+        let current = database.current_human(&identity).await.unwrap();
         let principal = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"openai","model":"synthetic-text","capabilities":["responses"]}])).execute(database.pool()).await.unwrap();
         let key = finance::virtual_key(&database, &cfg, principal).await;
         let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
-            PgLedger::new(
-                database.clone(),
-                AccessSettings::from_config(&cfg),
-                m_gated::gateway::auth_config_digest(&cfg),
-            )
-            .with_ceiling(cfg.execution_ceiling().clone()),
+            PgLedger::new(database.clone(), m_gated::gateway::auth_config_digest(&cfg))
+                .with_ceiling(cfg.execution_ceiling().clone()),
         );
         let provider = provider::Provider::new();
         let provider_server = if reset {
@@ -1555,13 +1548,14 @@ async fn responses_uncertain_dispatch_original_id_expires_unknown_without_reissu
     };
     use std::sync::atomic::Ordering;
     let db = postgres::TestDb::new().await;
+    postgres::grant_access(&db.store, &configuration(), &[]).await;
     let principal = finance::human(db.store.pool()).await;
     sqlx::query("UPDATE gw_policies SET allow_rules=$2,budget_limit_usd=1,tpm_limit=100000 WHERE principal_id=$1 AND key_id IS NULL").bind(principal).bind(grants()).execute(db.store.pool()).await.unwrap();
     let current = finance::current(db.store.pool(), principal).await;
     let proxy = pg_proxy::CommitProxy::new().await;
     let store = db.clock_store(Some(proxy.port)).await;
     let cfg = feature_configuration();
-    let ledger = PgLedger::new(store.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+    let ledger = PgLedger::new(store.clone(), [1; 32]);
     let spec = RequestSpec::from_profile(
         ProviderId::Openai,
         &cfg.providers()[0].profiles[0],
@@ -1605,7 +1599,7 @@ async fn responses_uncertain_dispatch_original_id_expires_unknown_without_reissu
     .await
     .unwrap();
     let healthy = db.clock_store(None).await;
-    let second = PgLedger::new(healthy.clone(), AccessSettings::from_config(&cfg), [1; 32]);
+    let second = PgLedger::new(healthy.clone(), [1; 32]);
     assert!(matches!(
         second.authorize_dispatch(spec.id).await,
         Err(LedgerError::Conflict)

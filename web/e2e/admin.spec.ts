@@ -132,11 +132,11 @@ test('admin_direct_ids_role_demotion403_purges_forms_cache_and_late_payload', as
   try {
     await detail.getByRole('button', { name: '서버 다시 조회', exact: true }).click(); await entered.promise;
     // 상세를 다시 읽는 중에 목록으로 돌아가면, 목록 조회가 강등된 권한으로 403을 받는다. 늦게 온 상세 응답은 그리지 않는다.
-    await page.route(`${origin}/api/admin/principals`, async route => route.fulfill({ response: await forward(route, process.env.E2E_DEMOTED_URL!) }));
-    await page.route(`${origin}/api/me`, async route => route.fulfill({ response: await forward(route, process.env.E2E_DEMOTED_URL!) }));
+    // 관리자 권한은 요청마다 접근 목록에서 읽으므로, alice를 실제로 강등한다. 끝나면 되돌린다.
+    await page.request.post(`${process.env.E2E_CONTROL_URL}/role/user`);
     await page.getByRole('link', { name: '사용자 목록으로 돌아가기', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('관리자 권한이 없습니다'); release.release();
     await expect(page.getByRole('region', { name: '사용자 상세', exact: true })).toHaveCount(0); expect(await page.locator('main').textContent()).not.toContain('비공개 관리자 폼'); await expect(page.getByRole('link', { name: '사용자·정책·키 관리', exact: true })).toHaveCount(0);
-  } finally { release.release(); }
+  } finally { release.release(); await page.request.post(`${process.env.E2E_CONTROL_URL}/role/admin`); }
   const regular = await context.newPage(); await auth(context, process.env.E2E_USER_TOKEN!); await regular.goto(`${origin}/dashboard/admin/requests?request_id=${process.env.E2E_RUNTIME_REQUEST}`); await expect(regular.getByRole('alert')).toContainText('관리자 권한이 없습니다'); expect((await json(regular, `/api/admin/requests/${process.env.E2E_RUNTIME_REQUEST}`)).status).toBe(403); expect((await json(regular, `/api/admin/principals/${service}`)).status).toBe(403); await regular.close();
 });
 

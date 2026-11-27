@@ -226,7 +226,7 @@ mod tests {
 
 pub mod jwks;
 use serde::Deserialize;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 /// 서명과 claim 검증 성공 경로만 생성할 수 있는 identity다. 이메일은 lookup 키가 아니다.
 pub struct VerifiedIdentity {
@@ -371,26 +371,21 @@ impl SsoVerifier {
         })
     }
 }
+/// 접근 설정. 누가 쓸 수 있고 누가 관리자인지는 DB의 접근 목록(`gw_access`)이 정한다(결정 0001).
+/// 설정에는 고정 관리자 한 명만 있다.
 #[derive(Clone)]
 pub struct AccessSettings {
-    allowed: BTreeSet<String>,
-    admins: BTreeSet<String>,
+    fixed_admin: String,
 }
 impl AccessSettings {
     pub fn from_config(config: &crate::config::ValidatedConfig) -> Self {
         Self {
-            allowed: config.allowed_emails().clone(),
-            admins: config.admin_emails().clone(),
+            fixed_admin: config.admin_email().to_owned(),
         }
     }
-    pub fn allows(&self, email: &str) -> bool {
-        self.allowed.contains(email) || self.admins.contains(email)
-    }
-    pub(crate) fn admin_emails(&self) -> &BTreeSet<String> {
-        &self.admins
-    }
-    pub fn is_admin(&self, email: &str) -> bool {
-        self.admins.contains(email)
+    /// 고정 관리자의 이메일. 이 사람의 관리자 역할은 대시보드에서 바꾸거나 지울 수 없다.
+    pub fn fixed_admin(&self) -> &str {
+        &self.fixed_admin
     }
 }
 
@@ -465,10 +460,7 @@ impl SsoAuthenticator {
                 .operations
                 .try_acquire()
                 .map_err(|_| AuthError::DependencyUnavailable)?;
-            let result = self
-                .store
-                .authenticate_key(&credential.token, &self.settings)
-                .await;
+            let result = self.store.authenticate_key(&credential.token).await;
             if result.is_ok() {
                 metric.success();
             }
@@ -505,9 +497,7 @@ impl SsoAuthenticator {
     ) -> Result<AuthenticatedHuman, AuthError> {
         let credential = extract_credential(headers, route, &self.cookie_name)?;
         if credential.token.starts_with("mgw_") {
-            self.store
-                .authenticate_key(&credential.token, &self.settings)
-                .await?;
+            self.store.authenticate_key(&credential.token).await?;
             return Err(AuthError::AuthSourceForbidden);
         }
         if credential.token.len() > self.token_bytes {
@@ -523,7 +513,7 @@ impl SsoAuthenticator {
             if route == AuthRoute::CookieOnly && credential.source != CredentialSource::Cookie {
                 return Err(AuthError::AuthSourceForbidden);
             }
-            let current = self.store.current_human(&identity, &self.settings).await?;
+            let current = self.store.current_human(&identity).await?;
             Ok(AuthenticatedHuman {
                 identity,
                 current,

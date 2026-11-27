@@ -7,10 +7,7 @@ auth:
   login_url: https://auth.example.test/sso/login
   refresh_url: https://auth.example.test/sso/refresh
   logout_url: https://auth.example.test/sso/logout
-allowed_emails:
-  - user@example.invalid
-admin_emails:
-  - admin@example.invalid
+admin_email: admin@example.invalid
 database:
   host: 127.0.0.1
   port: 64603

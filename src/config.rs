@@ -151,10 +151,8 @@ struct RawConfig {
     #[serde(default)]
     auth: RawAuth,
     public_origin: Option<String>,
-    #[serde(default)]
-    allowed_emails: Vec<String>,
-    #[serde(default)]
-    admin_emails: Vec<String>,
+    /// 고정 관리자의 이메일(결정 0001). 다른 사람은 대시보드에서 접근 목록에 더한다.
+    admin_email: Option<String>,
     #[serde(default)]
     database: RawDatabase,
     providers: Vec<RawProvider>,
@@ -458,8 +456,7 @@ pub struct DatabaseConfig {
 pub struct ValidatedConfig {
     pub(crate) auth: AuthConfig,
     pub(crate) public_origin: Url,
-    pub(crate) allowed_emails: BTreeSet<String>,
-    pub(crate) admin_emails: BTreeSet<String>,
+    pub(crate) admin_email: String,
     pub(crate) database: DatabaseConfig,
     pub(crate) csrf_signing_key: Secret,
     pub(crate) credential_encryption_key: Secret,
@@ -477,11 +474,9 @@ impl ValidatedConfig {
     pub fn public_origin(&self) -> &Url {
         &self.public_origin
     }
-    pub fn allowed_emails(&self) -> &BTreeSet<String> {
-        &self.allowed_emails
-    }
-    pub fn admin_emails(&self) -> &BTreeSet<String> {
-        &self.admin_emails
+    /// 고정 관리자의 이메일. 시작할 때마다 접근 목록에 관리자로 넣는다.
+    pub fn admin_email(&self) -> &str {
+        &self.admin_email
     }
     pub fn database(&self) -> &DatabaseConfig {
         &self.database
@@ -696,8 +691,7 @@ fn validate(
                 .or(raw.auth.return_param),
         },
         public_origin: parse("PUBLIC_ORIGIN", raw.public_origin)?,
-        allowed_emails: raw.allowed_emails.into_iter().collect(),
-        admin_emails: raw.admin_emails.into_iter().collect(),
+        admin_email: read("ADMIN_EMAIL", raw.admin_email)?,
         database: DatabaseConfig {
             ca_certificate,
             host: read("DB_HOST", raw.database.host)?,
@@ -732,7 +726,7 @@ fn validate(
         retention: raw.retention,
         execution_ceiling: raw.execution_ceiling,
     };
-    config.validate(env)?;
+    config.validate()?;
     Ok(config)
 }
 fn secret(env: &BTreeMap<String, String>, name: &str) -> Result<Secret, StartupError> {
@@ -791,8 +785,7 @@ pub const ENV_KEYS: &[&str] = &[
     "SSO_LOGOUT_URL",
     "SSO_RETURN_PARAM",
     "PUBLIC_ORIGIN",
-    "ALLOWED_EMAILS",
-    "ADMIN_EMAILS",
+    "ADMIN_EMAIL",
     "DB_HOST",
     "DB_PORT",
     "DB_NAME",
@@ -807,7 +800,7 @@ pub const ENV_KEYS: &[&str] = &[
 pub const REMOVED_ENV_KEYS: &[&str] = &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"];
 
 impl ValidatedConfig {
-    fn validate(&mut self, env: &BTreeMap<String, String>) -> Result<(), StartupError> {
+    fn validate(&mut self) -> Result<(), StartupError> {
         let auth = &self.auth;
         for url in [
             &auth.issuer,
@@ -852,10 +845,7 @@ impl ValidatedConfig {
                 return Err(StartupError::InvalidAuth);
             }
         }
-        self.admin_emails = email_set(env.get("ADMIN_EMAILS"), &self.admin_emails)?;
-        self.allowed_emails = email_set(env.get("ALLOWED_EMAILS"), &self.allowed_emails)?;
-        self.allowed_emails
-            .extend(self.admin_emails.iter().cloned());
+        self.admin_email = email_value(&self.admin_email)?;
         let db = &self.database;
         if db.port == 0
             || url::Host::parse(&db.host).is_err()
@@ -956,20 +946,10 @@ fn secure_url(url: &Url) -> Result<(), StartupError> {
     }
     Ok(())
 }
-fn email_set(
-    injected: Option<&String>,
-    file: &BTreeSet<String>,
-) -> Result<BTreeSet<String>, StartupError> {
-    let values: Vec<&str> = match injected {
-        Some(v) if v.is_empty() => Vec::new(),
-        Some(v) => v.split(',').map(str::trim).collect(),
-        None => file.iter().map(String::as_str).collect(),
-    };
-    if values.len() > 10000 {
-        return Err(StartupError::InvalidIdentity);
-    }
-    let mut result = BTreeSet::new();
-    for value in values {
+/// 이메일 주소 하나를 검사하고 소문자로 바꾼다. 설정과 접근 목록이 같은 규칙을 쓴다.
+pub(crate) fn email_value(value: &str) -> Result<String, StartupError> {
+    {
+        let value = value.trim();
         let Some((local, domain)) = value.split_once('@') else {
             return Err(StartupError::InvalidIdentity);
         };
@@ -984,9 +964,8 @@ fn email_set(
         {
             return Err(StartupError::InvalidIdentity);
         }
-        result.insert(value.to_lowercase());
+        Ok(value.to_lowercase())
     }
-    Ok(result)
 }
 impl ModelProfile {
     pub(crate) fn validate(

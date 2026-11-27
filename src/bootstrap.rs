@@ -76,17 +76,17 @@ impl Dependencies {
             .migrate()
             .await
             .map_err(|_| StartupError::SchemaUnavailable)?;
+        store
+            .ensure_fixed_admin(&crate::auth::AccessSettings::from_config(config))
+            .await
+            .map_err(|_| StartupError::SchemaUnavailable)?;
         let auth = Arc::new(
             crate::auth::SsoAuthenticator::from_config(config, store.clone())
                 .map_err(|_| StartupError::AuthenticationUnavailable)?,
         );
         let ledger = Arc::new(
-            crate::ledger::PgLedger::new(
-                store.clone(),
-                crate::auth::AccessSettings::from_config(config),
-                crate::gateway::auth_config_digest(config),
-            )
-            .with_ceiling(config.execution_ceiling().clone()),
+            crate::ledger::PgLedger::new(store.clone(), crate::gateway::auth_config_digest(config))
+                .with_ceiling(config.execution_ceiling().clone()),
         );
         let credentials = crate::credentials::CredentialService::new(config, store.clone())?;
         // 키가 하나도 없어도 기동한다(관리자가 대시보드에서 등록해야 하므로). DB 조회 실패만 기동 실패다.
