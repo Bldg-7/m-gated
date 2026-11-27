@@ -1,7 +1,9 @@
 import { createElement, useSyncExternalStore, type AnchorHTMLAttributes, type MouseEvent } from 'react';
 
 /** 서버(src/dashboard.rs SCREENS)가 HTML을 내주는 경로와 같아야 한다. 여기 없는 경로로는 이동하지 않는다. */
-export const SCREENS = ['/dashboard/', '/dashboard/keys', '/dashboard/keys/new', '/dashboard/admin/members', '/dashboard/admin/principals', '/dashboard/admin/principals/detail', '/dashboard/admin/principals/key', '/dashboard/admin/keys', '/dashboard/admin/usage', '/dashboard/admin/requests', '/dashboard/admin/credentials', '/dashboard/admin/models', '/dashboard/admin/token-check', '/dashboard/admin/settings'] as const;
+export const SCREENS = ['/dashboard/', '/dashboard/keys', '/dashboard/keys/new', '/dashboard/admin/members', '/dashboard/admin/principals', '/dashboard/admin/principals/detail', '/dashboard/admin/principals/key', '/dashboard/admin/keys', '/dashboard/admin/usage', '/dashboard/admin/requests', '/dashboard/admin/credentials', '/dashboard/admin/models', '/dashboard/admin/token-check', '/dashboard/admin/settings', '/dashboard/signin', '/dashboard/password'] as const;
+/** 로그인 없이 보이는 화면(비밀번호 방식의 로그인·비밀번호 설정). App은 이 화면에서 로그인 상태를 확인하지 않는다. */
+export const PUBLIC_SCREENS = ['/dashboard/signin', '/dashboard/password'] as const;
 export type Screen = (typeof SCREENS)[number];
 export type Route = { path: string; search: string; href: string };
 

@@ -20,8 +20,12 @@
 # Env override: PUBLIC_ORIGIN
 public_origin: https://gateway.example.com
 
-# External SSO that issues RS256 access JWTs.
+# Sign-in: "sso" (an external SSO that issues RS256 access JWTs) or "password"
+# (e-mail and password, with invitations sent by SMTP). Required.
+# Env override: AUTH_MODE
 auth:
+  mode: sso
+  # The keys below are for "sso" mode only. In "password" mode they are refused.
   # Must equal the JWT "iss" claim byte for byte: lowercase host, no path,
   # no trailing slash. Env override: AUTH_ISSUER
   issuer: https://sso.example.com
@@ -42,6 +46,16 @@ auth:
   # Optional: query parameter your SSO reads to return the user after login
   # and logout. Without it, the SSO decides where users land after login.
   # return_param: return_to
+
+# SMTP server for invitations and reset links. "password" mode only; refused
+# in "sso" mode. Port 465 uses TLS from the start; any other port requires
+# STARTTLS. The password comes from SMTP_PASSWORD.
+# Env overrides: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_FROM
+# smtp:
+#   host: smtp.example.com
+#   port: 587
+#   username: gateway
+#   from: gateway@example.com
 
 # The fixed admin. At each start the gateway adds this address to the access
 # list as an admin. Admins add other people on the dashboard

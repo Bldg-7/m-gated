@@ -2,7 +2,7 @@ import { expect, test, vi } from 'vitest';
 import { Session, StaleResponse } from './api';
 import type { Me } from './types';
 
-const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', sso: { refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
+const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const oldMe: Me = { ...me, principal: { ...me.principal, id: 'stale-human' } };
 const newMe: Me = { ...me, principal: { ...me.principal, id: 'new-human' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -101,7 +101,7 @@ test.each((['initial', 'retry'] as const).flatMap(path => [401, 403].flatMap(sta
       return boundary === 'auth-change' && meReads === (path === 'retry' ? 3 : 2)
         ? replacement.promise : Promise.resolve(response(me));
     }
-    if (url === me.sso.refresh_url) return Promise.resolve(response({}));
+    if (url === me.auth.refresh_url) return Promise.resolve(response({}));
     reads++;
     if (path === 'retry' && reads === 1) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
     return Promise.resolve(reads === (path === 'retry' ? 2 : 1) ? held : response({ private: 'stale' }));
@@ -124,9 +124,9 @@ test.each((['initial', 'retry'] as const).flatMap(path => [401, 403].flatMap(sta
     expect.soft(session.snapshot().me).toBeNull();
     expect.soft(ready).toEqual([]);
     expect.soft(sent).toEqual(boundary === 'local-logout' ? [{ type: 'logout' }] : []);
-    expect.soft(nav.mock.calls).toEqual(boundary === 'local-logout' ? [[me.sso.logout_url]] : []);
+    expect.soft(nav.mock.calls).toEqual(boundary === 'local-logout' ? [[me.auth.logout_url]] : []);
     expect.soft(reads).toBe(path === 'retry' ? 2 : 1);
-    expect.soft(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(path === 'retry' ? 1 : 0);
+    expect.soft(fetcher.mock.calls.filter(c => c[0] === me.auth.refresh_url)).toHaveLength(path === 'retry' ? 1 : 0);
     if (boundary === 'auth-change') {
       expect.soft(session.snapshot().status).toBe('checking');
       replacement.resolve(response(newMe));
@@ -161,7 +161,7 @@ test.each(['remote-logout', 'auth-change'] as const)('superseded_refresh_cannot_
     const url = String(input);
     if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
     if (url === '/api/me') return Promise.resolve(response(++meReads === 1 ? me : newMe));
-    if (url === me.sso.refresh_url) { enteredRefresh.resolve(); return refresh.promise; }
+    if (url === me.auth.refresh_url) { enteredRefresh.resolve(); return refresh.promise; }
     return ++reads === 1 ? Promise.resolve(response({ error: { code: 'expired' } }, 401)) : late.promise;
   });
   const nav = vi.fn(), session = new Session(fetcher, nav);
@@ -178,7 +178,7 @@ test.each(['remote-logout', 'auth-change'] as const)('superseded_refresh_cannot_
     expect(await second).toBeInstanceOf(StaleResponse);
     expect(nav).not.toHaveBeenCalled();
     expect(reads).toBe(2);
-    expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(c => c[0] === me.auth.refresh_url)).toHaveLength(1);
     if (boundary === 'remote-logout') expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '로그아웃되었습니다.' });
     else expect(session.snapshot()).toMatchObject({ me: { principal: { id: 'new-human' } }, status: 'ready' });
   } finally { detach(); vi.unstubAllGlobals(); }
@@ -191,7 +191,7 @@ test('current_refresh_owns_concurrent_reads_and_each_retries_only_once', async (
     const url = String(input);
     if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
     if (url === '/api/me') return Promise.resolve(response(me));
-    if (url === me.sso.refresh_url) { enteredRefresh.resolve(); return refresh.promise; }
+    if (url === me.auth.refresh_url) { enteredRefresh.resolve(); return refresh.promise; }
     const count = (counts.get(url) ?? 0) + 1; counts.set(url, count);
     return count === 1 ? (url.endsWith('?a') ? a.promise : b.promise) : Promise.resolve(response({ value: url }));
   });
@@ -204,7 +204,7 @@ test('current_refresh_owns_concurrent_reads_and_each_retries_only_once', async (
   refresh.resolve(response({}));
   expect(await Promise.all([first, second])).toEqual([{ value: '/api/usage?a' }, { value: '/api/usage?b' }]);
   expect([...counts.values()]).toEqual([2, 2]);
-  expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(c => c[0] === me.auth.refresh_url)).toHaveLength(1);
 });
 
 test('new_epoch_refresh_does_not_join_or_get_cleared_by_superseded_flight', async () => {
@@ -216,7 +216,7 @@ test('new_epoch_refresh_does_not_join_or_get_cleared_by_superseded_flight', asyn
     const url = String(input);
     if (url === '/api/csrf') return Promise.resolve(response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' }));
     if (url === '/api/me') return Promise.resolve(response(me));
-    if (url === me.sso.refresh_url) {
+    if (url === me.auth.refresh_url) {
       if (++refreshes === 1) { oldEntered.resolve(); return oldRefresh.promise; }
       newEntered.resolve(); return newRefresh.promise;
     }
@@ -263,7 +263,7 @@ test.each((['initial', 'retry'] as const).flatMap(path =>
       return boundary === 'auth-change' && meReads === (path === 'retry' ? 3 : 2)
         ? replacement.promise : Promise.resolve(response(me));
     }
-    if (url === me.sso.refresh_url) return Promise.resolve(response({}));
+    if (url === me.auth.refresh_url) return Promise.resolve(response({}));
     reads++;
     if (path === 'retry' && reads === 1) return Promise.resolve(response({ error: { code: 'expired' } }, 401));
     return Promise.resolve(held);
@@ -286,9 +286,9 @@ test.each((['initial', 'retry'] as const).flatMap(path =>
     expect.soft(session.snapshot().me).toBeNull();
     expect.soft(ready).toEqual([]);
     expect.soft(sent).toEqual(boundary === 'local-logout' ? [{ type: 'logout' }] : []);
-    expect.soft(nav.mock.calls).toEqual(boundary === 'local-logout' ? [[me.sso.logout_url]] : []);
+    expect.soft(nav.mock.calls).toEqual(boundary === 'local-logout' ? [[me.auth.logout_url]] : []);
     expect.soft(reads).toBe(path === 'retry' ? 2 : 1);
-    expect.soft(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(path === 'retry' ? 1 : 0);
+    expect.soft(fetcher.mock.calls.filter(c => c[0] === me.auth.refresh_url)).toHaveLength(path === 'retry' ? 1 : 0);
     if (boundary === 'auth-change') {
       expect.soft(session.snapshot().status).toBe('checking');
       replacement.resolve(response(newMe));

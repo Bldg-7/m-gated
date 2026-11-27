@@ -3,7 +3,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
 import { pickOption, selectedValue } from '../../test-select';
 import { session } from '../../lib/api';
-const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'cred1', label: 'team-a', hint: '0001' }] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], provider_credentials: [{ provider: 'anthropic', credentials: [{ id: 'cred1', label: 'team-a', hint: '0001' }] }], auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const key = { id: '00000000-0000-4000-8000-000000000001', name: '현재 키', version: '7', created_command_id: 'original', validity: 'unlimited', expires_at: null, revoked_at: null, grants: [], limits: {} };
 const response = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
@@ -108,7 +108,7 @@ test('same_human_key_refresh_preserves_filter_and_has_one_read_retry', async () 
   const fetcher = vi.fn((input: RequestInfo | URL) => {
     const path = String(input);
     if (path === '/api/me') return Promise.resolve(response(me));
-    if (path === me.sso.refresh_url) return refresh.promise;
+    if (path === me.auth.refresh_url) return refresh.promise;
     if (path === '/api/keys?status=revoked' && ++reads === 1) return Promise.resolve(response({ error: { code: 'invalid_credentials' } }, 401));
     return Promise.resolve(response({ items: [], next_cursor: null, as_of: '2026-01-01T00:00:00Z' }));
   });
@@ -121,7 +121,7 @@ test('same_human_key_refresh_preserves_filter_and_has_one_read_retry', async () 
   expect(selectedValue(screen.getByLabelText('키 상태'))).toBe('revoked');
   expect(reads).toBe(2);
   expect(fetcher.mock.calls.filter(c => c[0] === '/api/keys')).toHaveLength(1);
-  expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(c => c[0] === me.auth.refresh_url)).toHaveLength(1);
 });
 
 test('definite_cookie_rejection_keeps_error_but_allows_a_new_user_confirmation', async () => {

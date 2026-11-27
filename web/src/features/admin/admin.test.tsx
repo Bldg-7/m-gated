@@ -4,7 +4,7 @@ import { App } from '../../app';
 import { pickOption } from '../../test-select';
 import { session } from '../../lib/api';
 const principal = { id: 'service1', kind: 'service', display_name: '서비스', email: null, management_owner_id: 'owner1', version: '7', policy: { id: 'policy1', version: '13', disabled: false, grants: [], limits: { budget: null, rpm: null, tpm: null, count_rpm: null } }, inference_safety: { paused: true, version: '29', reason: 'cost_bound_violation', paused_at: '2026-01-01Z', trigger_request_id: 'request1' }, block_state: { blocked: true, reasons: ['inference_paused'], global_unknown_count: '0', expired_dispatch_count: '0' } };
-const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [], auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 afterEach(() => { cleanup(); session.clear(); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); });
 test('admin_direct_route_uses_separate_principal_policy_safety_cas_and_ack_get', async () => {

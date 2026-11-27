@@ -6,7 +6,7 @@ import type { Page } from '../../lib/types';
 import type { CommandAck, PrincipalSummary } from './types';
 import { formatTime } from '../../lib/time';
 import { Modal, RefreshIcon, SearchSelect, Time } from '../../ui/ui';
-const messages: Record<string, string> = { version_conflict: msgid('버전이 변경되었습니다. 서버를 다시 조회했습니다. 새 상태를 확인하고 다시 선택하세요.'), execution_not_final: msgid('실행 종료를 확인할 수 없거나 알려진 sender가 실행 중입니다. 정산하지 않았습니다.'), settlement_conflict: msgid('다른 수동 처리와 상충합니다. 서버 처리 내역을 확인하세요.'), access_exists: msgid('이 이메일은 이미 접근 목록에 있습니다.'), access_protected: msgid('설정 파일의 고정 관리자와 자기 자신의 항목은 바꾸거나 지울 수 없습니다.'), security_fence_conflict: msgid('자기 자신과 마지막 활성 관리자는 정지할 수 없습니다. 이관 중 잠긴 계정은 이 화면에서 바꿀 수 없습니다.'), policy_period_conflict: msgid('기존 장부·예약이 있어 예산 기간 또는 모드를 변경할 수 없습니다.'), resource_not_found: msgid('대상이 없거나 현재 권한으로 조회할 수 없습니다.'), invalid_request: msgid('입력이 올바르지 않습니다.'), access_denied: msgid('현재 관리자 권한이 없습니다.'), invalid_filter: msgid('조회 필터가 올바르지 않습니다.'), invalid_cursor: msgid('페이지가 만료되었거나 조회 조건이 다릅니다. 처음부터 조회하세요.') };
+const messages: Record<string, string> = { version_conflict: msgid('버전이 변경되었습니다. 서버를 다시 조회했습니다. 새 상태를 확인하고 다시 선택하세요.'), execution_not_final: msgid('실행 종료를 확인할 수 없거나 알려진 sender가 실행 중입니다. 정산하지 않았습니다.'), settlement_conflict: msgid('다른 수동 처리와 상충합니다. 서버 처리 내역을 확인하세요.'), access_exists: msgid('이 이메일은 이미 접근 목록에 있습니다.'), access_protected: msgid('설정 파일의 고정 관리자와 자기 자신의 항목은 바꾸거나 지울 수 없습니다.'), security_fence_conflict: msgid('자기 자신과 마지막 활성 관리자는 정지할 수 없습니다. 이관 중 잠긴 계정은 이 화면에서 바꿀 수 없습니다.'), policy_period_conflict: msgid('기존 장부·예약이 있어 예산 기간 또는 모드를 변경할 수 없습니다.'), resource_not_found: msgid('대상이 없거나 현재 권한으로 조회할 수 없습니다.'), invalid_request: msgid('입력이 올바르지 않습니다.'), access_denied: msgid('현재 관리자 권한이 없습니다.'), invalid_filter: msgid('조회 필터가 올바르지 않습니다.'), invalid_cursor: msgid('페이지가 만료되었거나 조회 조건이 다릅니다. 처음부터 조회하세요.'), mail_failed: msgid('메일을 보내지 못했습니다. 잠시 뒤 다시 보내세요.') };
 export function failure(error: unknown) {
   const t = (key: string, values?: Record<string, string>) => i18n.t(key, values);
   if (!(error instanceof ApiError)) return t('서버에 연결할 수 없습니다. 자동 재전송하지 않았습니다.');
@@ -41,8 +41,11 @@ export function ReadState({ loading, error, reload, asOf }: { loading: boolean; 
     <div className="row row-between">{asOf ? <span className="meta">{t('조회 시각')}: <Time value={asOf} /></span> : <span />}<button className="btn-sm" disabled={loading} aria-busy={loading || undefined} onClick={() => void Promise.resolve(reload()).catch(() => {})}><RefreshIcon />{t('서버 다시 조회')}</button></div>
   </div>;
 }
-/** label은 msgid로 표시한 한국어 원문(화면에서 번역). danger: 되돌릴 수 없는 명령. 확인 창의 실행 버튼을 위험 색으로 그린다. */
-export type Action = { label: string; url: string; method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'; body: Record<string, unknown>; danger?: boolean };
+/**
+ * label은 msgid로 표시한 한국어 원문(화면에서 번역). danger: 되돌릴 수 없는 명령. 확인 창의 실행 버튼을 위험 색으로 그린다.
+ * noBody: 본문 없이 보낸다(DELETE와 같음). body는 확인 창에 보여 줄 내용으로만 쓴다.
+ */
+export type Action = { label: string; url: string; method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'; body: Record<string, unknown>; danger?: boolean; noBody?: true };
 export function useCommand(onRead: (ack?: CommandAck) => Promise<void>) {
   const { t } = useTranslation();
   const [pending, setPending] = useState<Action | null>(null), [busy, setBusy] = useState(false), [message, setMessage] = useState<string | null>(null);
@@ -58,8 +61,8 @@ export function useCommand(onRead: (ack?: CommandAck) => Promise<void>) {
     let ack: CommandAck | undefined;
     let outcome = '';
     try {
-      // DELETE는 본문 없이 보낸다. 확인 창에는 body를 그대로 보여 준다.
-      ack = await session.write<CommandAck>(pending.url, pending.method, commandId, pending.method === 'DELETE' ? undefined : pending.body);
+      // DELETE와 noBody 명령은 본문 없이 보낸다. 확인 창에는 body를 그대로 보여 준다.
+      ack = await session.write<CommandAck>(pending.url, pending.method, commandId, pending.method === 'DELETE' || pending.noBody ? undefined : pending.body);
       if (!current()) return;
       if (!ack) throw new Error('missing_ack');
       outcome = i18n.t('명령 {{id}} · {{effect}} · 결과 버전 {{version}}.', { id: commandId, effect: ack.effect, version: ack.result_version ?? i18n.t('없음') });

@@ -27,6 +27,8 @@ export class Session {
   private channel: BroadcastChannel | null = null;
   private logoutLatched = false;
   private verifiedPrincipal: string | null = null;
+  // 마지막으로 확인한 로그인 방식. 로그아웃·인증 오류로 me가 비어도 로그인 안내와 로그아웃 방법을 고르는 데 쓴다.
+  private lastMode: 'sso' | 'password' | null = null;
 
   constructor(
     private request: Fetch = (...args) => fetch(...args),
@@ -34,6 +36,8 @@ export class Session {
   ) {}
 
   snapshot = () => this.state;
+  /** 마지막으로 확인한 로그인 방식. 아직 모르면 null. */
+  mode = () => this.state.me?.auth.mode ?? this.lastMode;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -73,6 +77,7 @@ export class Session {
     if (epoch !== this.state.epoch) throw new StaleResponse();
     const changed = this.verifiedPrincipal !== null && this.verifiedPrincipal !== me.principal.id;
     this.verifiedPrincipal = me.principal.id;
+    this.lastMode = me.auth.mode;
     this.state = { ...this.state, me, status: 'ready', error: null, refreshing: false };
     this.emit();
     if (changed && notifyIdentityChange) this.channel?.postMessage({ type: 'auth-change' });
@@ -114,7 +119,7 @@ export class Session {
     const job = (async () => {
       let refreshed = false;
       try {
-        const url = new URL(previous.sso.refresh_url);
+        const url = new URL(previous.auth.refresh_url ?? '');
         if (url.protocol !== 'https:') throw new Error('고정 SSO HTTPS만 허용');
         const controller = new AbortController();
         this.controllers.add(controller);
@@ -193,7 +198,9 @@ export class Session {
       const joining = this.ownsRefresh(epoch);
       // refresh에 의한 epoch 전환만 합류하며 logout/새 검증이 대체한 오류는 버린다.
       if (!joining && (epoch !== this.state.epoch || this.logoutLatched)) throw new StaleResponse();
-      if (joining || (error instanceof ApiError && error.status === 401)) {
+      // 토큰 갱신은 SSO 방식에서만 한다. 비밀번호 방식의 401은 아래 invalidateRejectedRead가 /auth/login으로 보낸다.
+      const refreshable = previous.auth.mode === 'sso' && !!previous.auth.refresh_url;
+      if (joining || (refreshable && error instanceof ApiError && error.status === 401)) {
         if (!isCurrent()) throw new StaleResponse();
         const retryEpoch = await this.refreshOnce(previous, epoch);
         if (!isCurrent() || retryEpoch !== this.state.epoch || this.logoutLatched
@@ -258,12 +265,32 @@ export class Session {
     this.state = { ...this.state, status: 'error', error: '로그아웃되었습니다.' };
     this.emit();
   }
-  logout() {
-    const url = this.state.me?.sso.logout_url;
+  /**
+   * 로그아웃. SSO 방식은 SSO의 로그아웃 주소로 간다.
+   * 비밀번호 방식은 POST /auth/logout으로 세션을 끝내고 쿠키를 지운 뒤 로그인 화면으로 간다.
+   * 세션 끝내기에 실패해도 로그인 화면으로 간다. 돌려주는 Promise는 이동을 부른 뒤 끝난다.
+   */
+  logout(): Promise<void> {
+    const auth = this.state.me?.auth, mode = auth?.mode ?? this.lastMode;
     this.latchLogout();
     this.channel?.postMessage({ type: 'logout' });
+    if (mode === 'password') {
+      return this.request('/auth/logout', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } })
+        .then(() => undefined, () => undefined)
+        .then(() => this.navigate('/dashboard/signin'));
+    }
+    const url = auth?.logout_url;
     if (url && new URL(url).protocol === 'https:') this.navigate(url);
     else this.navigate('/auth/login');
+    return Promise.resolve();
+  }
+  /**
+   * 자기 비밀번호를 바꾼 뒤. 서버가 이 사람의 세션을 모두 끝냈으므로 다른 탭에도 로그아웃을 알린다.
+   * 화면 이동은 부른 쪽이 한다.
+   */
+  endedByPasswordChange() {
+    this.latchLogout();
+    this.channel?.postMessage({ type: 'logout' });
   }
   attach() {
     if (typeof BroadcastChannel !== 'undefined') {

@@ -12,7 +12,7 @@ use axum::{
     http::Request,
 };
 use m_gated::{
-    auth::{AccessSettings, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{AccessSettings, Authenticator, SsoVerifier, jwks::JwksCache},
     config::{self, ConfigInputs},
     http::{self, AppState},
     ledger::{
@@ -617,7 +617,7 @@ impl Harness {
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
         let token = sso::Signer::shared().sign(&sso::claims(), "key1");
@@ -634,7 +634,7 @@ impl Harness {
             .await
             .unwrap();
         finance::allow(db.store.pool(), actor).await;
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
         let api = Arc::new(m_gated::admin::DashboardApi::new(
             &cfg,
             auth.clone(),
@@ -1559,10 +1559,10 @@ async fn every_admin_route_uses_current_sso_role_and_command_ack_not_resource_sn
     .unwrap();
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
-    let auth = Arc::new(SsoAuthenticator::new(
+    let auth = Arc::new(Authenticator::new(
         &user_cfg,
         SsoVerifier::new(
-            user_cfg.auth(),
+            user_cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
         ),
         h.db.store.clone(),
@@ -2318,10 +2318,10 @@ async fn foreign_key_ownership_precedes_new_command_schema_and_replay() {
     .unwrap();
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
-    let auth = Arc::new(SsoAuthenticator::new(
+    let auth = Arc::new(Authenticator::new(
         &cfg,
         SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
         ),
         h.db.store.clone(),
@@ -2884,10 +2884,10 @@ async fn old_and_new_configuration_servers_keep_fence_until_explicit_stop_confir
     .unwrap();
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks = fake.serve().await;
-    let auth = Arc::new(SsoAuthenticator::new(
+    let auth = Arc::new(Authenticator::new(
         &cfg,
         SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         ),
         h.db.store.clone(),

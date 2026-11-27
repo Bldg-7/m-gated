@@ -1,7 +1,8 @@
 mod guard;
 mod management;
+mod password;
 use crate::{
-    auth::{AuthRoute, SsoAuthenticator},
+    auth::{AuthRoute, Authenticator},
     config::ValidatedConfig,
     ledger::{
         PgIdentityStore,
@@ -19,7 +20,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub struct DashboardApi {
-    auth: Arc<SsoAuthenticator>,
+    auth: Arc<Authenticator>,
     store: Arc<PgIdentityStore>,
     static_grants: Vec<Value>,
     catalog: Option<Arc<crate::catalog::CatalogService>>,
@@ -28,7 +29,9 @@ pub struct DashboardApi {
     signing_key: Vec<u8>,
     ceiling: crate::ledger::policy::PolicyLimits,
     login: String,
-    refresh: String,
+    /// SSO 토큰 갱신 주소. 비밀번호 방식에는 없다.
+    refresh: Option<String>,
+    mode: crate::config::AuthMode,
     logout: String,
     origin: String,
     ledger: Arc<crate::ledger::PgLedger>,
@@ -37,6 +40,10 @@ pub struct DashboardApi {
     token_check_enabled: bool,
     /// 설정 파일 profile의 Anthropic 모델 가격. 토큰 대조의 차이 금액에 쓴다.
     static_prices: crate::ledger::token_check::Prices,
+    /// 초대·재설정 메일을 보낸다. 비밀번호 방식에서만 있다.
+    mailer: Option<Arc<dyn crate::auth::password::Mailer>>,
+    /// 없는 이메일로 로그인할 때 비교할 가짜 해시. 처음 쓸 때 한 번 만든다.
+    dummy: tokio::sync::OnceCell<String>,
 }
 /// 사용량 보고서는 Provider가 응답에 알린 모델 이름을 쓴다. profile 이름과 그 이름들 모두에 같은 가격을 둔다.
 fn model_prices(
@@ -75,13 +82,31 @@ impl DashboardApi {
         }
         Value::Array(grants)
     }
+    /// 초대·재설정 메일을 보낼 전송기를 붙인다. 비밀번호 방식에서만 쓴다.
+    pub fn with_mailer(mut self, mailer: Arc<dyn crate::auth::password::Mailer>) -> Self {
+        self.mailer = Some(mailer);
+        self
+    }
+    /// 없는 이메일의 로그인 시도가 같은 시간이 걸리도록 비교하는 가짜 argon2id 해시.
+    async fn dummy_hash(&self) -> String {
+        self.dummy
+            .get_or_init(|| async {
+                let mut seed = [0u8; 16];
+                let _ = getrandom::getrandom(&mut seed);
+                crate::auth::password::hash_password(format!("{seed:?}"))
+                    .await
+                    .unwrap_or_default()
+            })
+            .await
+            .clone()
+    }
     pub fn with_credentials(mut self, service: Arc<crate::credentials::CredentialService>) -> Self {
         self.credentials = Some(service);
         self
     }
     pub fn new(
         config: &ValidatedConfig,
-        auth: Arc<SsoAuthenticator>,
+        auth: Arc<Authenticator>,
         store: Arc<PgIdentityStore>,
     ) -> Self {
         let grants:Vec<Value>=config.providers().iter().flat_map(|p|p.profiles.iter().map(|profile|json!({"provider":crate::ledger::finance::provider_name(p.provider),"model":profile.model,"capabilities":[crate::ledger::finance::api_name(profile.api)]}))).collect();
@@ -100,6 +125,8 @@ impl DashboardApi {
             auth,
             store,
             credentials: None,
+            mailer: None,
+            dummy: tokio::sync::OnceCell::new(),
             // 조회 서비스와 같은 조건이다: Admin API 키와 Anthropic Provider가 모두 있어야 한다.
             token_check_enabled: config.anthropic_admin_api_key().is_some()
                 && config
@@ -121,7 +148,8 @@ impl DashboardApi {
             signing_key: config.csrf_signing_key_bytes().to_vec(),
             ceiling: config.execution_ceiling().clone(),
             login: config.login_redirect(),
-            refresh: config.auth().refresh_url.to_string(),
+            refresh: config.sso().map(|a| a.refresh_url.to_string()),
+            mode: config.auth_mode(),
             logout: config.logout_redirect(),
             origin: config
                 .public_origin()
@@ -148,7 +176,7 @@ impl DashboardApi {
             admin: false,
             key_owner: true,
         };
-        Router::new()
+        let router = Router::new()
             .route("/auth/login", route(&s, Checks::Login, "GET", get(login)))
             .route("/api/me", route(&s, Checks::Dashboard, "GET", get(me)))
             .route(
@@ -296,8 +324,37 @@ impl DashboardApi {
             .route(
                 "/api/admin/requests/{id}/settlement",
                 route(&s, admin, "PUT", put(m::settle)),
-            )
-            .with_state(s)
+            );
+        // 비밀번호 방식의 경로(결정 0011). SSO 방식에는 없다.
+        let router = if s.api.mode == crate::config::AuthMode::Password {
+            use password as pw;
+            let open = |allow: &'static str, handler: axum::routing::MethodRouter<ApiState>| {
+                handler.fallback(move || async move {
+                    let mut response = crate::http::method_not_allowed();
+                    response.headers_mut().insert(
+                        axum::http::header::ALLOW,
+                        axum::http::HeaderValue::from_static(allow),
+                    );
+                    response
+                })
+            };
+            router
+                .route("/auth/password", open("POST", post(pw::sign_in)))
+                .route("/auth/password/link", open("POST", post(pw::link_info)))
+                .route("/auth/password/set", open("POST", post(pw::set_password)))
+                .route("/auth/logout", open("POST", post(pw::sign_out)))
+                .route(
+                    "/api/me/password",
+                    route(&s, user, "POST", post(pw::change_password)),
+                )
+                .route(
+                    "/api/admin/access/{id}/link",
+                    route(&s, admin, "POST", post(pw::send_link)),
+                )
+        } else {
+            router
+        };
+        router.with_state(s)
     }
 }
 #[derive(Clone)]
@@ -342,7 +399,7 @@ async fn me(State(state): State<ApiState>, actor: guard::Actor, request: Request
                 &state.api.ceiling,
             );
             success(
-                json!({"key_limit_maximum":key_limit_maximum,"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"sso":{"refresh_url":state.api.refresh,"logout_url":state.api.logout}}),
+                json!({"key_limit_maximum":key_limit_maximum,"principal":principal,"role":if human.current.admin{"admin"}else{"user"},"grants":grants,"budget_timezone":budget_timezone,"provider_credentials":provider_credentials,"auth_expires_at":expires,"auth":{"mode":match state.api.mode{crate::config::AuthMode::Sso=>"sso",crate::config::AuthMode::Password=>"password"},"refresh_url":state.api.refresh,"logout_url":state.api.logout}}),
             )
         }
         Err(error) => query_error(error),

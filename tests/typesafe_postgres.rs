@@ -56,7 +56,7 @@ struct Harness {
 impl Harness {
     async fn new() -> Self {
         use m_gated::{
-            auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+            auth::{Authenticator, SsoVerifier, jwks::JwksCache},
             bootstrap::{self, Dependencies},
             config::ProviderId,
             gateway::InferenceGateway,
@@ -70,7 +70,7 @@ impl Harness {
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
         let token = sso::Signer::shared().sign(&sso::claims(), "key1");
@@ -86,7 +86,7 @@ impl Harness {
             .await
             .unwrap();
         let key = finance::virtual_key(&db.store, &cfg, current.id).await;
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
             PgLedger::new(database.clone(), m_gated::gateway::auth_config_digest(&cfg))
                 .with_ceiling(cfg.execution_ceiling().clone()),

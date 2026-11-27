@@ -65,7 +65,11 @@ async fn start() -> Result<(), StartupError> {
     }
     let ui = std::sync::Arc::new(m_gated::dashboard::UiBundle::load(
         std::path::Path::new("web/dist"),
-        &config.auth().issuer.origin().ascii_serialization(),
+        // CSP connect-src에 더할 SSO origin. 비밀번호 방식에는 없다.
+        &config
+            .sso()
+            .map(|s| s.issuer.origin().ascii_serialization())
+            .unwrap_or_default(),
     )?);
     let dependencies = Dependencies::assemble_backend(&config).await?.with_ui(ui);
     let app = bootstrap::build(config, dependencies)?;

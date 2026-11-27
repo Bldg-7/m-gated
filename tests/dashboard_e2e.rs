@@ -13,7 +13,7 @@ mod provider;
 mod sso;
 mod support;
 use m_gated::{
-    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{Authenticator, SsoVerifier, jwks::JwksCache},
     bootstrap::{self, Dependencies},
     config::{self, ConfigInputs},
     ledger::{
@@ -40,7 +40,7 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks = fake.serve().await;
     let verifier = SsoVerifier::new(
-        cfg.auth(),
+        cfg.sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
     );
     let mut claims = sso::claims();
@@ -111,7 +111,7 @@ async fn rust_bundle_postgres_and_signed_sso_browser_contract() {
         )
         .await
         .unwrap();
-    let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+    let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
     let provider = provider::Provider::new();
     let upstream = provider.serve().await;
     let client = m_gated::providers::anthropic::AnthropicClient::loopback_for_test(

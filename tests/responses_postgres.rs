@@ -73,7 +73,7 @@ impl Harness {
     }
     async fn assemble(cfg: config::ValidatedConfig, reset: bool, clock: bool) -> Self {
         use m_gated::{
-            auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+            auth::{Authenticator, SsoVerifier, jwks::JwksCache},
             bootstrap::{self, Dependencies},
             gateway::InferenceGateway,
             providers::anthropic::AnthropicClient,
@@ -89,7 +89,7 @@ impl Harness {
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
         let token = sso::Signer::shared().sign(&sso::claims(), "key1");
@@ -101,7 +101,7 @@ impl Harness {
         let principal = current.id;
         sqlx::query("UPDATE gw_policies SET allow_rules=$2 WHERE id=$1").bind(current.policy_id).bind(serde_json::json!([{"provider":"openai","model":"synthetic-text","capabilities":["responses"]}])).execute(database.pool()).await.unwrap();
         let key = finance::virtual_key(&database, &cfg, principal).await;
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, database.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, database.clone()));
         let ledger = Arc::new(
             PgLedger::new(database.clone(), m_gated::gateway::auth_config_digest(&cfg))
                 .with_ceiling(cfg.execution_ceiling().clone()),

@@ -17,7 +17,7 @@ enum RequiredComponent {
 /// 환경변수나 테스트 플래그로 이 목록을 지우는 경로는 없다.
 pub struct Dependencies {
     missing: Vec<RequiredComponent>,
-    authentication: Option<Arc<crate::auth::SsoAuthenticator>>,
+    authentication: Option<Arc<crate::auth::Authenticator>>,
     inference: Option<Arc<crate::gateway::InferenceGateway>>,
     dashboard: Option<Arc<crate::admin::DashboardApi>>,
     ui: Option<Arc<crate::dashboard::UiBundle>>,
@@ -80,8 +80,11 @@ impl Dependencies {
             .ensure_fixed_admin(&crate::auth::AccessSettings::from_config(config))
             .await
             .map_err(|_| StartupError::SchemaUnavailable)?;
+        if config.auth_mode() == crate::config::AuthMode::Password {
+            setup_link(config, &store).await?;
+        }
         let auth = Arc::new(
-            crate::auth::SsoAuthenticator::from_config(config, store.clone())
+            crate::auth::Authenticator::from_config(config, store.clone())
                 .map_err(|_| StartupError::AuthenticationUnavailable)?,
         );
         let ledger = Arc::new(
@@ -111,11 +114,17 @@ impl Dependencies {
             .map_err(|_| StartupError::InvalidProfile)?
             .with_catalog(catalog.cache()),
         );
-        let dashboard = Arc::new(
-            crate::admin::DashboardApi::new(config, auth.clone(), store)
+        let dashboard = Arc::new({
+            let api = crate::admin::DashboardApi::new(config, auth.clone(), store)
                 .with_credentials(credentials.clone())
-                .with_catalog(catalog.clone()),
-        );
+                .with_catalog(catalog.clone());
+            match config.smtp() {
+                Some(smtp) => api.with_mailer(Arc::new(
+                    crate::auth::password::SmtpMailer::from_config(smtp, config.ca_certificate())?,
+                )),
+                None => api,
+            }
+        });
         let assembled = Self::unassembled()
             .with_dashboard(dashboard)
             .with_authentication(auth)
@@ -137,10 +146,7 @@ impl Dependencies {
         self.dashboard = Some(dashboard);
         self
     }
-    pub fn with_authentication(
-        mut self,
-        authentication: Arc<crate::auth::SsoAuthenticator>,
-    ) -> Self {
+    pub fn with_authentication(mut self, authentication: Arc<crate::auth::Authenticator>) -> Self {
         self.authentication = Some(authentication);
         self.missing
             .retain(|component| !matches!(component, RequiredComponent::Authentication));
@@ -179,7 +185,7 @@ impl RunningApp {
     pub fn router(&self) -> Router {
         self.router.clone()
     }
-    pub fn authentication(&self) -> Option<&Arc<crate::auth::SsoAuthenticator>> {
+    pub fn authentication(&self) -> Option<&Arc<crate::auth::Authenticator>> {
         self.dependencies.authentication.as_ref()
     }
     pub fn config(&self) -> &ValidatedConfig {
@@ -276,4 +282,42 @@ impl RunningApp {
         }
         Ok(())
     }
+}
+
+/// 비밀번호 방식에서 고정 관리자에게 비밀번호가 없으면, 첫 관리자 설정 링크를 만들어 시작 로그에
+/// 남긴다(결정 0011 규칙 8). 시작할 때마다 새 링크를 만들고, 예전 설정 링크는 만료될 때까지 유효하다.
+async fn setup_link(
+    config: &ValidatedConfig,
+    store: &crate::ledger::PgIdentityStore,
+) -> Result<(), StartupError> {
+    use crate::auth::password;
+    let email = config.admin_email();
+    if store
+        .password_hash(email)
+        .await
+        .map_err(|_| StartupError::SchemaUnavailable)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let token = password::link_token().map_err(|_| StartupError::RuntimeFailure)?;
+    store
+        .create_link(
+            email,
+            password::LinkKind::Setup,
+            &password::token_hash(&token),
+            None,
+        )
+        .await
+        .map_err(|_| StartupError::SchemaUnavailable)?;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "warning": "first_admin_setup_link",
+            "email": email,
+            "valid_hours": 24,
+            "url": password::link_url(config.public_origin().as_str(), &token),
+        })
+    );
+    Ok(())
 }

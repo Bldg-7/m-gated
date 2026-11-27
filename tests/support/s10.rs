@@ -5,7 +5,7 @@ use std::time::Duration;
 #[ignore = "requires explicit dedicated TEST_DATABASE_URL"]
 async fn running_app_reaps_expiry_and_confirms_family_latch_without_claiming_stopped() {
     use m_gated::{
-        auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+        auth::{Authenticator, SsoVerifier, jwks::JwksCache},
         bootstrap::{self, Dependencies},
         gateway::InferenceGateway,
         runtime::Lifecycle,
@@ -27,10 +27,10 @@ async fn running_app_reaps_expiry_and_confirms_family_latch_without_claiming_sto
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks = fake.serve().await;
     let verifier = SsoVerifier::new(
-        cfg.auth(),
+        cfg.sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
     );
-    let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+    let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
     let gateway = Arc::new(
         InferenceGateway::new(
             &cfg,
@@ -43,7 +43,7 @@ async fn running_app_reaps_expiry_and_confirms_family_latch_without_claiming_sto
     let ui = Arc::new(
         m_gated::dashboard::UiBundle::load(
             std::path::Path::new("web/dist"),
-            &cfg.auth().issuer.origin().ascii_serialization(),
+            &cfg.sso().unwrap().issuer.origin().ascii_serialization(),
         )
         .unwrap(),
     );
@@ -778,7 +778,7 @@ async fn usage_http(
     query: &str,
 ) -> (u16, serde_json::Value) {
     use m_gated::{
-        auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+        auth::{Authenticator, SsoVerifier, jwks::JwksCache},
         http::{self, AppState},
         runtime::{Dependency, Runtime},
     };
@@ -786,10 +786,10 @@ async fn usage_http(
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
     let verifier = SsoVerifier::new(
-        cfg.auth(),
+        cfg.sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
     );
-    let auth = Arc::new(SsoAuthenticator::new(cfg, verifier, store.clone()));
+    let auth = Arc::new(Authenticator::new(cfg, verifier, store.clone()));
     let api = Arc::new(m_gated::admin::DashboardApi::new(cfg, auth, store));
     let runtime = Runtime::new(cfg.limits().clone()).unwrap();
     runtime.start_http().unwrap();

@@ -1,5 +1,6 @@
 pub mod csrf;
 pub mod key;
+pub mod password;
 use axum::http::HeaderMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +238,18 @@ pub struct VerifiedIdentity {
     expires_at: i64,
 }
 impl VerifiedIdentity {
+    /// 비밀번호 방식의 신원. issuer는 게이트웨이 주소, subject는 소문자 이메일이다(결정 0011 규칙 3).
+    /// 비밀번호를 확인했거나 유효한 세션을 찾은 경로만 만든다.
+    pub(crate) fn for_password(issuer: String, email: String, display_name: String) -> Self {
+        Self {
+            issuer,
+            subject: email.clone(),
+            email,
+            display_name,
+            expires_at: time::OffsetDateTime::now_utc().unix_timestamp()
+                + crate::auth::password::SESSION_SECONDS,
+        }
+    }
     pub fn issuer(&self) -> &str {
         &self.issuer
     }
@@ -394,42 +407,93 @@ pub struct AuthenticatedHuman {
     pub current: crate::ledger::CurrentHuman,
     pub source: CredentialSource,
 }
-pub struct SsoAuthenticator {
-    verifier: SsoVerifier,
+/// 사람의 자격 증명을 확인하는 방법(결정 0011). 게이트웨이마다 하나만 쓴다.
+enum Method {
+    /// 외부 SSO의 JWT.
+    Sso(SsoVerifier),
+    /// 게이트웨이가 발급한 세션. issuer는 게이트웨이의 public origin이다.
+    Password { issuer: String },
+}
+pub struct Authenticator {
+    method: Method,
     store: Arc<crate::ledger::PgIdentityStore>,
     settings: AccessSettings,
     cookie_name: String,
     token_bytes: usize,
     operations: tokio::sync::Semaphore,
 }
-impl SsoAuthenticator {
+impl Authenticator {
+    /// 설정의 로그인 방식에 맞는 인증기를 만든다.
     pub fn from_config(
         config: &crate::config::ValidatedConfig,
         store: Arc<crate::ledger::PgIdentityStore>,
     ) -> Result<Self, AuthError> {
-        let jwks = Arc::new(jwks::JwksCache::with_ca(
-            config.auth().jwks_uri.clone(),
-            config.auth().ca_certificate.as_deref(),
-        )?);
-        Ok(Self::new(
-            config,
-            SsoVerifier::new(config.auth(), jwks),
-            store,
-        ))
+        match config.sso() {
+            Some(sso) => {
+                let jwks = Arc::new(jwks::JwksCache::with_ca(
+                    sso.jwks_uri.clone(),
+                    config.ca_certificate(),
+                )?);
+                Ok(Self::new(config, SsoVerifier::new(sso, jwks), store))
+            }
+            None => Ok(Self::password(config, store)),
+        }
     }
+    /// SSO 방식 인증기.
     pub fn new(
         config: &crate::config::ValidatedConfig,
         verifier: SsoVerifier,
         store: Arc<crate::ledger::PgIdentityStore>,
     ) -> Self {
+        let cookie_name = config
+            .sso()
+            .map(|s| s.access_cookie_name.clone())
+            .unwrap_or_else(|| password::SESSION_COOKIE.to_owned());
+        Self::with_method(config, Method::Sso(verifier), cookie_name, store)
+    }
+    /// 비밀번호 방식 인증기. 세션 쿠키 이름은 고정이다.
+    pub fn password(
+        config: &crate::config::ValidatedConfig,
+        store: Arc<crate::ledger::PgIdentityStore>,
+    ) -> Self {
+        let issuer = config
+            .public_origin()
+            .as_str()
+            .trim_end_matches('/')
+            .to_owned();
+        Self::with_method(
+            config,
+            Method::Password { issuer },
+            password::SESSION_COOKIE.to_owned(),
+            store,
+        )
+    }
+    fn with_method(
+        config: &crate::config::ValidatedConfig,
+        method: Method,
+        cookie_name: String,
+        store: Arc<crate::ledger::PgIdentityStore>,
+    ) -> Self {
         Self {
-            verifier,
+            method,
             store,
             settings: AccessSettings::from_config(config),
-            cookie_name: config.auth().access_cookie_name.clone(),
+            cookie_name,
             token_bytes: config.limits().token_bytes,
             operations: tokio::sync::Semaphore::new(config.limits().authentication),
         }
+    }
+    pub fn mode(&self) -> crate::config::AuthMode {
+        match self.method {
+            Method::Sso(_) => crate::config::AuthMode::Sso,
+            Method::Password { .. } => crate::config::AuthMode::Password,
+        }
+    }
+    pub fn cookie_name(&self) -> &str {
+        &self.cookie_name
+    }
+    pub fn store(&self) -> &Arc<crate::ledger::PgIdentityStore> {
+        &self.store
     }
     pub fn settings(&self) -> &AccessSettings {
         &self.settings
@@ -508,7 +572,28 @@ impl SsoAuthenticator {
             .try_acquire()
             .map_err(|_| AuthError::DependencyUnavailable)?;
         tokio::time::timeout(Duration::from_secs(3), async {
-            let identity = self.verifier.verify(&credential, now).await?;
+            let identity = match &self.method {
+                Method::Sso(verifier) => verifier.verify(&credential, now).await?,
+                Method::Password { issuer } => {
+                    if !password::is_session_token(&credential.token)
+                        || !password::plausible_token(&credential.token)
+                    {
+                        return Err(AuthError::InvalidCredentials);
+                    }
+                    let session = self
+                        .store
+                        .session(&password::token_hash(&credential.token))
+                        .await?
+                        .ok_or(AuthError::InvalidCredentials)?;
+                    VerifiedIdentity {
+                        issuer: issuer.clone(),
+                        subject: session.email.clone(),
+                        email: session.email,
+                        display_name: session.display_name,
+                        expires_at: session.expires_at,
+                    }
+                }
+            };
             // 유효 헤더도 cookie-only 경로에서 cookie로 대체하지 않는다.
             if route == AuthRoute::CookieOnly && credential.source != CredentialSource::Cookie {
                 return Err(AuthError::AuthSourceForbidden);
@@ -523,8 +608,12 @@ impl SsoAuthenticator {
         .await
         .map_err(|_| AuthError::DependencyUnavailable)?
     }
+    /// SSO 방식은 JWKS를 다시 확인한다. 비밀번호 방식은 JWKS가 없으므로 늘 건강하다.
     pub async fn refresh_health(&self, runtime: &crate::runtime::Runtime) -> bool {
-        let healthy = self.verifier.jwks.refresh_health().await;
+        let healthy = match &self.method {
+            Method::Sso(verifier) => verifier.jwks.refresh_health().await,
+            Method::Password { .. } => true,
+        };
         runtime.record_health(
             crate::runtime::Dependency::Jwks,
             healthy,

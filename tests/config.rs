@@ -855,8 +855,11 @@ fn only_declared_provider_api_profiles_are_configurable_and_free_count_is_explic
 #[test]
 fn jwt_identifiers_preserve_canonical_literal_not_url_normalization() {
     let cfg = load(support::YAML).unwrap();
-    assert_eq!(cfg.auth().issuer_literal, "https://auth.example.test");
-    assert_eq!(cfg.auth().audience_literal, "https://example.test");
+    assert_eq!(
+        cfg.sso().unwrap().issuer_literal,
+        "https://auth.example.test"
+    );
+    assert_eq!(cfg.sso().unwrap().audience_literal, "https://example.test");
     for (from, to) in [
         (
             "issuer: https://auth.example.test",
@@ -1172,4 +1175,91 @@ fn claude_code_sized_beta_allowlist_is_bounded_at_32() {
     load(&with(9)).unwrap();
     load(&with(32)).unwrap();
     reject(&with(33), StartupError::InvalidProfile);
+}
+
+/// 결정 0011 규칙 1: 로그인 방식은 하나이고, 다른 방식의 값이나 빠진 값은 이름과 함께 거절한다.
+#[test]
+fn auth_mode_is_required_and_values_of_the_other_mode_are_refused() {
+    let load_with = |yaml: &str, extra: &[(&str, &str)]| {
+        let mut env = support::environment();
+        for (k, v) in extra {
+            env.insert((*k).into(), (*v).into());
+        }
+        config::load(ConfigInputs {
+            yaml,
+            file_environment: None,
+            environment: &env,
+        })
+    };
+    let password = support::password_yaml();
+    let smtp = [("SMTP_PASSWORD", "synthetic-smtp-secret")];
+    // 방식이 없으면 시작하지 않는다. 오류에 값의 이름이 있다.
+    let no_mode = support::YAML.replace("  mode: sso\n", "");
+    let error = load_with(&no_mode, &[]).unwrap_err();
+    assert_eq!(error, StartupError::MissingValue("AUTH_MODE"));
+    assert_eq!(error.to_string(), "config_value_missing: AUTH_MODE");
+    assert_eq!(
+        load_with(&support::YAML.replace("mode: sso", "mode: both"), &[]).unwrap_err(),
+        StartupError::InvalidAuth
+    );
+    // 비밀번호 방식: SMTP 값이 모두 있어야 하고, SSO 값은 받지 않는다.
+    let ok = load_with(&password, &smtp).unwrap();
+    assert_eq!(ok.auth_mode(), config::AuthMode::Password);
+    assert!(ok.sso().is_none());
+    let smtp_config = ok.smtp().unwrap();
+    assert_eq!(
+        (
+            smtp_config.host.as_str(),
+            smtp_config.port,
+            smtp_config.from.as_str()
+        ),
+        ("smtp.example.test", 587, "gateway@example.test")
+    );
+    assert_eq!(ok.login_redirect(), "/dashboard/signin");
+    assert_eq!(
+        load_with(&password, &[]).unwrap_err(),
+        StartupError::MissingValue("SMTP_PASSWORD")
+    );
+    assert_eq!(
+        load_with(&password.replace("  username: gateway\n", ""), &smtp).unwrap_err(),
+        StartupError::MissingValue("SMTP_USERNAME")
+    );
+    let refused = load_with(
+        &password,
+        &[smtp[0], ("AUTH_ISSUER", "https://auth.example.test")],
+    )
+    .unwrap_err();
+    assert_eq!(refused, StartupError::RefusedValue("AUTH_ISSUER"));
+    assert_eq!(refused.to_string(), "config_value_refused: AUTH_ISSUER");
+    assert_eq!(
+        load_with(
+            &password.replace(
+                "  mode: password\n",
+                "  mode: password\n  login_url: https://x.example.test/l\n"
+            ),
+            &smtp
+        )
+        .unwrap_err(),
+        StartupError::RefusedValue("SSO_LOGIN_URL")
+    );
+    assert_eq!(
+        load_with(
+            &password.replace("Gateway@Example.test", "not-an-address"),
+            &smtp
+        )
+        .unwrap_err(),
+        StartupError::InvalidSmtp
+    );
+    // SSO 방식: SMTP 값은 받지 않는다.
+    assert_eq!(
+        load_with(support::YAML, &[("SMTP_HOST", "smtp.example.test")]).unwrap_err(),
+        StartupError::RefusedValue("SMTP_HOST")
+    );
+    assert_eq!(
+        load_with(support::YAML, &smtp).unwrap_err(),
+        StartupError::RefusedValue("SMTP_PASSWORD")
+    );
+    let sso = load_with(support::YAML, &[]).unwrap();
+    assert_eq!(sso.auth_mode(), config::AuthMode::Sso);
+    assert!(sso.smtp().is_none() && sso.sso().is_some());
 }

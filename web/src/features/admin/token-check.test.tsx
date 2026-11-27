@@ -7,7 +7,7 @@ import type { TokenCheckView } from './types';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const budgetTimezone = { timezone: 'UTC', period_start: '2026-11-01T00:00:00Z', period_end: '2026-12-01T00:00:00Z', pending: null, version: '3' };
-const admin = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'admin', grants: [], budget_timezone: budgetTimezone, provider_credentials: [], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const admin = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'admin', grants: [], budget_timezone: budgetTimezone, provider_credentials: [], auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const platform = { id: 'cred1', label: 'team-platform', hint: 'a1f3' };
 const zero = '0.000000000000';
 const view: TokenCheckView = {

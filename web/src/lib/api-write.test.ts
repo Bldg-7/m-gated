@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest';
 import { ApiError, Session, StaleResponse } from './api';
 import type { Me } from './types';
-const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', sso: { refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
+const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const response = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const csrf = () => response({ token: 'synthetic-csrf', expires_at: '2030-01-01T00:00:00Z' });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
@@ -50,7 +50,7 @@ for (const step of ['csrf', 'write'] as const) for (const change of ['logout', '
     await entered.promise; if (change === 'logout') session.logout(); else await session.validate();
     late.resolve(step === 'csrf' ? csrf() : response({ key: 'old-secret' }, 201)); await rejected;
     expect(fetcher.mock.calls.filter(c => c[0] === '/api/keys')).toHaveLength(step === 'csrf' ? 0 : 1);
-    expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(0);
+    expect(fetcher.mock.calls.filter(c => c[0] === me.auth.refresh_url)).toHaveLength(0);
   });
 }
 
@@ -88,12 +88,12 @@ test('read_refresh_validates_new_me_and_csrf_before_its_only_retry', async () =>
     const path = String(input); paths.push(path);
     if (path === '/api/me') return Promise.resolve(response(me));
     if (path === '/api/csrf') return Promise.resolve(csrf());
-    if (path === me.sso.refresh_url) return Promise.resolve(response({}));
+    if (path === me.auth.refresh_url) return Promise.resolve(response({}));
     return Promise.resolve(++reads === 1 ? response({ error: { code: 'invalid_credentials' } }, 401) : response({ value: 1 }));
   });
   const session = new Session(fetcher, vi.fn()); await session.validate();
   expect(await session.read('/api/keys')).toEqual({ value: 1 });
-  expect(paths).toEqual(['/api/me', '/api/keys', me.sso.refresh_url, '/api/me', '/api/csrf', '/api/keys']);
+  expect(paths).toEqual(['/api/me', '/api/keys', me.auth.refresh_url, '/api/me', '/api/csrf', '/api/keys']);
 });
 
 for (const boundary of ['logout', 'validate'] as const) test(`refresh_csrf_completion_is_epoch_bound_${boundary}`, async () => {
@@ -103,7 +103,7 @@ for (const boundary of ['logout', 'validate'] as const) test(`refresh_csrf_compl
     const path = String(input); paths.push(path);
     if (path === '/api/me') return Promise.resolve(response(me));
     if (path === '/api/csrf') { entered.resolve(); return late.promise; }
-    if (path === me.sso.refresh_url) return Promise.resolve(response({}));
+    if (path === me.auth.refresh_url) return Promise.resolve(response({}));
     return Promise.resolve(response({ error: { code: 'invalid_credentials' } }, 401));
   });
   const session = new Session(fetcher, vi.fn()); await session.validate();
@@ -120,11 +120,11 @@ test.each([401, 403, 503])('refresh_csrf_failure_%s_never_retries_read_or_any_wr
     const path = String(input); paths.push(path);
     if (path === '/api/me') return Promise.resolve(response(me));
     if (path === '/api/csrf') return Promise.resolve(response({ error: { code: 'synthetic' } }, status));
-    if (path === me.sso.refresh_url) return Promise.resolve(response({}));
+    if (path === me.auth.refresh_url) return Promise.resolve(response({}));
     return Promise.resolve(response({ error: { code: 'invalid_credentials' } }, 401));
   });
   const nav = vi.fn(), session = new Session(fetcher, nav); await session.validate();
   await expect(session.read('/api/keys')).rejects.toMatchObject({ status });
-  expect(paths).toEqual(['/api/me', '/api/keys', me.sso.refresh_url, '/api/me', '/api/csrf']);
+  expect(paths).toEqual(['/api/me', '/api/keys', me.auth.refresh_url, '/api/me', '/api/csrf']);
   expect(session.snapshot().me).toBeNull(); expect(nav).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
 });

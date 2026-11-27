@@ -353,7 +353,7 @@ struct Check {
 impl Check {
     async fn new(admin_key: bool) -> Self {
         use m_gated::{
-            auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+            auth::{Authenticator, SsoVerifier, jwks::JwksCache},
             bootstrap::{self, Dependencies},
             gateway::InferenceGateway,
         };
@@ -364,7 +364,7 @@ impl Check {
             .serve()
             .await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
         let alice = sso::Signer::shared().sign(&sso::claims(), "key1");
@@ -383,7 +383,7 @@ impl Check {
             .execute(db.store.pool())
             .await
             .unwrap();
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
         // Provider 키 등록 확인과 Admin API는 같은 합성 서버로 간다(제품에서는 둘 다 Anthropic 주소다).
         let admin_api = Arc::new(FakeAdmin::default());
         let admin_server = admin_api.serve().await;

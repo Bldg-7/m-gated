@@ -1,6 +1,6 @@
 //! 유지보수는 명시 SSO 헤더 인증과 현재 admin을 사용하며 HTTP listener를 열지 않는다.
 use crate::{
-    auth::{AccessSettings, AuthRoute, SsoAuthenticator},
+    auth::{AccessSettings, AuthRoute, Authenticator},
     config::{StartupError, ValidatedConfig},
     ledger::{
         PgIdentityStore, PgLedger, commands::CommandContext, credentials::CredentialCommand,
@@ -79,7 +79,7 @@ pub async fn execute(config: &ValidatedConfig, input: &[u8]) -> Result<Value, St
         .ensure_fixed_admin(&AccessSettings::from_config(config))
         .await
         .map_err(|_| StartupError::SchemaUnavailable)?;
-    let auth = SsoAuthenticator::from_config(config, database.clone())
+    let auth = Authenticator::from_config(config, database.clone())
         .map_err(|_| StartupError::AuthenticationUnavailable)?;
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(

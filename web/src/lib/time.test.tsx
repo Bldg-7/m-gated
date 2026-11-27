@@ -4,7 +4,7 @@ import { App } from '../app';
 import { session } from './api';
 import { formatTime, parseInstant, timeBasis } from './time';
 
-const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const usage = { currency: 'USD', from: '2026-10-31T15:00:00.000000Z', to: '2026-11-30T15:00:00.000000Z', as_of: '2026-11-18T03:04:59.999999Z', detail_available_from: null, aggregation: 'detail', settled_usd: '0.000000000001', period_unknown_count: '0', global_unknown_count: '0', global_expired_dispatch_count: '0', block_state: null, balance_context: 'current_principal', budget_balances: [], buckets: { items: [], next_cursor: null, as_of: '2026-11-18T03:04:59Z' } };
 const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 afterEach(() => { cleanup(); session.clear(); act(() => timeBasis.set('browser')); history.replaceState(null, '', '/dashboard/'); vi.unstubAllGlobals(); });

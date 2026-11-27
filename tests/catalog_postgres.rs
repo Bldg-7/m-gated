@@ -15,7 +15,7 @@ use axum::{
     http::Request,
 };
 use m_gated::{
-    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{Authenticator, SsoVerifier, jwks::JwksCache},
     catalog::CatalogService,
     config::{self, ConfigInputs},
     http::{self, AppState},
@@ -99,7 +99,7 @@ impl Harness {
         let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
         let jwks = fake.serve().await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
         let alice = sso::Signer::shared().sign(&sso::claims(), "key1");
@@ -107,7 +107,7 @@ impl Harness {
         bob_claims["sub"] = json!("human-2");
         bob_claims["email"] = json!("bob@example.test");
         let bob = sso::Signer::shared().sign(&bob_claims, "key1");
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
         let sources = Arc::new(Sources::default());
         *sources.models_dev.lock().unwrap() = Some(models_dev(1.0));
         let (urls, task) = serve(sources.clone()).await;

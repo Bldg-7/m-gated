@@ -409,7 +409,7 @@ struct Http {
 impl Http {
     async fn new() -> Self {
         use m_gated::{
-            auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+            auth::{Authenticator, SsoVerifier, jwks::JwksCache},
             http::{self, AppState},
             ledger::PgLedger,
             runtime::{Dependency, Runtime},
@@ -421,7 +421,7 @@ impl Http {
             .serve()
             .await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
         let alice = sso::Signer::shared().sign(&sso::claims(), "key1");
@@ -429,7 +429,7 @@ impl Http {
         bob_claims["sub"] = json!("human-2");
         bob_claims["email"] = json!("bob@example.test");
         let bob = sso::Signer::shared().sign(&bob_claims, "key1");
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
         let fake = fake_models().await;
         let service = service(&ROOT, &db, &fake);
         let api = Arc::new(

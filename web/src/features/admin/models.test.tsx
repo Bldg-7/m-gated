@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
 import { session } from '../../lib/api';
-const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [], auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const rates = (input: string) => ({ input, output: '20.000000000000', cache_read: '0.200000000000', cache_write_5m: '5.000000000000' });
 const opusOld = { provider: 'anthropic', model: 'claude-opus-5-5', rates: rates('5.000000000000'), max_input_tokens: 1000000, max_output_tokens: 128000, source: 'models_dev', note: null };

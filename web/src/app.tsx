@@ -13,7 +13,10 @@ import { ModelsScreen } from './features/admin/models';
 import { SettingsScreen } from './features/admin/settings';
 import { MembersScreen } from './features/admin/members';
 import { TokenCheckScreen } from './features/admin/token-check';
-import { isScreen, Link, useRoute, type Screen } from './lib/router';
+import { SignInScreen } from './features/auth/sign-in';
+import { SetPasswordScreen } from './features/auth/set-password';
+import { ChangePasswordButton } from './features/auth/change-password';
+import { isScreen, Link, PUBLIC_SCREENS, useRoute, type Screen } from './lib/router';
 import { changeLanguage, languages, msgid } from './lib/i18n';
 import { browserTimeZone, formatTime, timeBasis, useTimeBasis } from './lib/time';
 import { Pill, SearchSelect, Select } from './ui/ui';
@@ -71,6 +74,9 @@ const pages: Record<Screen, { nav: string; title: string; lead?: string; back?: 
   '/dashboard/admin/token-check': { nav: msgid('토큰 대조'), title: msgid('토큰 대조'), lead: msgid('Anthropic 사용량 보고서와 게이트웨이가 정산한 토큰을 비교합니다. 차이는 알림을 보내지 않고 이 화면에만 보입니다.') },
   '/dashboard/admin/settings': { nav: msgid('설정'), title: msgid('게이트웨이 설정'), lead: msgid('게이트웨이 전체에 한 번 정하는 설정입니다. 월 예산의 기준 시간대와 끊긴 요청의 정산 규칙을 정합니다.') },
   '/dashboard/admin/credentials': { nav: msgid('Provider 키'), title: msgid('Provider 키'), lead: msgid('Provider마다 키를 등록하고 관리합니다. 사용자는 관리자가 인가한 키만 쓸 수 있습니다.') },
+  // 로그인 없이 보이는 화면. 사이드바가 없으므로 nav는 쓰지 않는다.
+  '/dashboard/signin': { nav: msgid('로그인'), title: msgid('로그인') },
+  '/dashboard/password': { nav: msgid('비밀번호 정하기'), title: msgid('비밀번호 정하기') },
 };
 /** 서버가 내준 경로를 화면으로. 등록되지 않은 /dashboard/admin/* 는 전체 사용량, 그 밖은 내 사용량(기존 동작과 같음). */
 function screenOf(path: string): Screen {
@@ -95,7 +101,30 @@ function TimeSwitch() {
     <span>{basis === 'utc' ? 'UTC' : t('브라우저 시간({{zone}})', { zone: browserTimeZone() })}</span>
   </div>;
 }
+type PublicScreen = (typeof PUBLIC_SCREENS)[number];
+const isPublic = (path: string): path is PublicScreen => (PUBLIC_SCREENS as readonly string[]).includes(path);
+/**
+ * 로그인 없이 보이는 화면(비밀번호 방식의 로그인·비밀번호 설정). 사이드바 없이 가운데 카드 하나다.
+ * /api/me 확인과 /auth/login 이동을 하지 않는다.
+ */
+function PublicPage({ path }: { path: PublicScreen }) {
+  const { t } = useTranslation();
+  const title = t(pages[path].title);
+  useEffect(() => { document.title = `${title} · m-gated`; }, [title]);
+  return <div className="app auth-page">
+    <main className="card auth-card">
+      <div className="brand"><span className="brand-mark" aria-hidden="true">mg</span>m-gated</div>
+      {path === '/dashboard/signin' ? <SignInScreen /> : <SetPasswordScreen />}
+      <div className="auth-foot"><LanguageSwitch /></div>
+    </main>
+  </div>;
+}
+/** 로그인·비밀번호 설정 화면은 로그인 확인 없이 따로 그린다. 그 밖의 화면은 로그인을 확인하는 대시보드다. */
 export function App() {
+  const route = useRoute();
+  return isPublic(route.path) ? <PublicPage path={route.path} /> : <Dashboard />;
+}
+function Dashboard() {
   const { t } = useTranslation();
   const auth = useSyncExternalStore(session.subscribe, session.snapshot);
   const principal = useRef<string | null>(null);
@@ -104,6 +133,9 @@ export function App() {
   if (auth.status === 'ready') { wasReady.current = true; if (auth.me?.role === 'admin') wasAdmin.current = true; }
   // 스스로 로그아웃한 경우는 알릴 것이 없다.
   const cleared = wasReady.current && auth.error !== '로그아웃되었습니다.';
+  // 다시 로그인 안내의 글. 비밀번호 방식이면 /auth/login이 로그인 화면으로 보낸다.
+  const password = session.mode() === 'password';
+  const signInAgain = password ? t('다시 로그인') : t('SSO 다시 로그인');
   if (auth.me) principal.current = auth.me.principal.id; else if (!auth.refreshing) principal.current = null;
   useEffect(() => {
     const detach = session.attach();
@@ -124,14 +156,14 @@ export function App() {
   }, [route.href]);
   // 하위 페이지(사용자 상세)에 있을 때도 상위 메뉴를 현재 위치로 표시한다.
   const link = (path: Screen) => <Link href={path} aria-current={screen === path || screen.startsWith(`${path}/`) ? 'page' : undefined}>{t(pages[path].nav)}</Link>;
-  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? (wasAdmin.current && auth.status === 'ready' ? <div className="stack-sm"><p role="alert">{t('현재 관리자 권한이 없습니다.')} {t('입력 중이던 내용과 원문은 지웠습니다.')}</p><p><a href="/auth/login">{t('SSO 다시 로그인')}</a></p></div> : <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p>) : screen === '/dashboard/admin/members' ? <MembersScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/principals/key' ? <PrincipalKeyIssueScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/keys' ? <KeysScreen adminAll key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/token-check' ? <TokenCheckScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : screen === '/dashboard/keys/new' ? <KeysScreen key={`${principal.current}:new`} view="issue" /> : <UsageScreen key={principal.current} />;
+  const content = screen.startsWith('/dashboard/admin/') ? (auth.me?.role !== 'admin' ? (wasAdmin.current && auth.status === 'ready' ? <div className="stack-sm"><p role="alert">{t('현재 관리자 권한이 없습니다.')} {t('입력 중이던 내용과 원문은 지웠습니다.')}</p><p><a href="/auth/login">{signInAgain}</a></p></div> : <p role="alert">{t('현재 관리자 권한이 없습니다.')}</p>) : screen === '/dashboard/admin/members' ? <MembersScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals' ? <PrincipalsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/principals/detail' ? <PrincipalDetailScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/principals/key' ? <PrincipalKeyIssueScreen key={`${principal.current}:${auth.epoch}:${route.search}`} /> : screen === '/dashboard/admin/keys' ? <KeysScreen adminAll key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/requests' ? <RequestsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/credentials' ? <CredentialsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/settings' ? <SettingsScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/token-check' ? <TokenCheckScreen key={`${principal.current}:${auth.epoch}`} /> : screen === '/dashboard/admin/models' ? <ModelsScreen key={`${principal.current}:${auth.epoch}`} /> : <UsageScreen admin key={principal.current} />) : screen === '/dashboard/keys' ? <KeysScreen key={principal.current} /> : screen === '/dashboard/keys/new' ? <KeysScreen key={`${principal.current}:new`} view="issue" /> : <UsageScreen key={principal.current} />;
   return <div className="app">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark" aria-hidden="true">mg</span>m-gated</div>
       {auth.status === 'ready' && auth.me && <section className="identity" aria-label={t('로그인 사용자')}>
         <div className="identity-top"><span className="identity-name">{auth.me.principal.display_name}</span><Pill accent={auth.me.role === 'admin'}>{auth.me.role === 'admin' ? t('관리자') : t('사용자')}</Pill></div>
         <span className="identity-email">{auth.me.principal.email}</span>
-        <div className="actions"><button className="btn-sm" onClick={() => session.logout()}>{t('로그아웃')}</button></div>
+        <div className="actions"><button className="btn-sm" onClick={() => void session.logout()}>{t('로그아웃')}</button>{auth.me.auth.mode === 'password' && <ChangePasswordButton />}</div>
       </section>}
       <nav aria-label={t('기본')} className="nav">
         <div className="nav-group"><span className="nav-label">{t('내 계정')}</span>{link('/dashboard/')}{link('/dashboard/keys')}</div>
@@ -144,7 +176,7 @@ export function App() {
         {back && <Link className="back-link" href={back.href} aria-label={t(back.name)}><svg className="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" /></svg>{t(back.label)}</Link>}
         <h1 className="page-title" tabIndex={-1} ref={title}>{pageTitle}</h1>{page.lead && <p className="lead">{t(page.lead)}</p>}</header>
       {auth.status === 'checking' && <p role="status">{t('인증 확인 중…')}</p>}
-      {auth.status === 'error' && <div className="auth-state"><p role="alert">{auth.error && t(auth.error)}{cleared && <> {t('입력 중이던 내용과 원문은 지웠습니다.')}</>}</p><div className="actions"><a className="btn btn-primary" href="/auth/login">{cleared ? t('SSO 다시 로그인') : t('SSO 로그인')}</a><button onClick={() => void session.validate()}>{t('다시 확인')}</button></div></div>}
+      {auth.status === 'error' && <div className="auth-state"><p role="alert">{auth.error && t(auth.error)}{cleared && <> {t('입력 중이던 내용과 원문은 지웠습니다.')}</>}</p><div className="actions"><a className="btn btn-primary" href="/auth/login">{cleared ? signInAgain : password ? t('로그인') : t('SSO 로그인')}</a><button onClick={() => void session.validate()}>{t('다시 확인')}</button></div></div>}
       {(auth.status === 'ready' || auth.refreshing) && <div key={route.href} className="stack-lg">{content}</div>}
     </div></main>
   </div>;

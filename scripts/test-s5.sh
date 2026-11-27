@@ -9,5 +9,6 @@ test "$TEST_DATABASE_URL" = 'postgres://m_gated_test@127.0.0.1:64603/m_gated_tes
 cargo test --locked --test management_postgres -- --ignored
 cargo test --locked --test management_routes_postgres -- --ignored
 cargo test --locked --test access_postgres -- --ignored
+cargo test --locked --test password_postgres -- --ignored
 ./scripts/test-s4.sh
 printf 'S5_CUMULATIVE_KEYS_ADMIN_ATOMICITY_AND_ACTUAL_MAIN_OK\n'

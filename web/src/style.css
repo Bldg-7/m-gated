@@ -320,3 +320,9 @@ details > :not(summary) { margin: 16px; }
 .grant-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--gray-200); border-radius: var(--radius-md); padding: 4px 12px; }
 .grant-list li { padding: 6px 0; }
 .grant-all { padding: 6px 0; border-bottom: 1px solid var(--gray-200); font-weight: 600; position: sticky; top: -4px; background: var(--gray-0); }
+
+/* ── 로그인 전 화면(로그인·비밀번호 설정, 결정 0011) ─────────────────────────────── */
+.auth-page { justify-content: center; align-items: center; padding: 32px 16px; }
+.auth-card { width: 100%; max-width: 420px; }
+.auth-title { font-size: 20px; line-height: 28px; font-weight: 600; }
+.auth-foot { display: flex; justify-content: flex-end; }

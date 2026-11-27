@@ -7,6 +7,15 @@
  * - Provider 키 추가·교체에서 API 키에 `reject` 가 들어 있으면 422 provider_credential_rejected
  * - Provider 키 추가·교체에서 API 키에 `unverified` 가 들어 있으면 502 provider_credential_unverified
  * - 가상 키 발급에서 키 이름이 `quota` 로 시작하면 409 key_quota_exceeded
+ *
+ * 로그인 방식: 기본은 SSO 방식이다. 환경 변수 `MOCK_AUTH_MODE=password` 로 띄우면 비밀번호 방식(결정 0011)으로 답한다.
+ * 비밀번호 방식에서 대시보드는 항상 관리자(admin@example.test)로 로그인되며, 로그아웃하면 다시 로그인할 때까지 /api/* 가 401 이다.
+ * - 로그인(`POST /auth/password`): 접근 목록에 있고 비밀번호를 정한 이메일과 12자 이상 비밀번호면 성공한다.
+ *   비밀번호가 `locked` 로 시작하면 429 sign_in_locked, 이메일에 `blocked` 가 들어 있으면 403 access_denied.
+ * - 비밀번호 설정 링크: `/dashboard/password#token=invitation`(초대), `#token=reset`(재설정), `#token=setup`(첫 관리자).
+ *   링크 보내기로 만든 링크는 개발 서버 로그에 주소를 적는다. 링크는 한 번 쓰면 끝난다.
+ * - 비밀번호 바꾸기(`POST /api/me/password`): 지금 비밀번호가 `wrong` 으로 시작하면 400 current_password_invalid.
+ * - 링크 보내기·사람 추가: 이메일에 `mailfail` 이 들어 있으면 메일을 보내지 못한다(502 mail_failed, invitation "failed").
  */
 import type { Plugin } from 'vite';
 import type { AuthorizedCredentials, Balance, BlockState, BudgetTimezone, Bucket, Grant, KeyMetadata, Limits, Me, Usage, Validity } from '../src/lib/types';
@@ -16,7 +25,10 @@ import { ADMIN_ID, capabilities, catalogProviders, createState, iso, monthStart,
 /** Node 타입 패키지 없이도 타입 검사가 되도록, 쓰는 부분만 적은 요청·응답 모양. */
 type Req = { method?: string; url?: string; headers: Record<string, string | string[] | undefined>; setEncoding(encoding: string): void; on(event: string, listener: (chunk: string) => void): unknown };
 type Res = { statusCode: number; setHeader(name: string, value: string): void; end(body?: string): void };
-type Reply = { status: number; body?: unknown };
+type Reply = { status: number; body?: unknown; headers?: Record<string, string> };
+type AuthMode = 'sso' | 'password';
+/** 비밀번호 설정 링크 하나. 토큰 → 이메일·종류. */
+type MockLink = { email: string; kind: 'invitation' | 'reset' | 'setup' };
 type Json = Record<string, unknown>;
 
 class HttpError extends Error { constructor(public status: number, public code: string, public details: Json = {}) { super(code); } }
@@ -24,8 +36,11 @@ const fail = (status: number, code: string, details: Json = {}): never => { thro
 const text = (value: unknown) => typeof value === 'string' ? value : '';
 const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every(x => b.includes(x));
 
-function api(state: MockState) {
+function api(state: MockState, mode: AuthMode, log: (line: string) => void) {
   const now = () => new Date().toISOString();
+  // 비밀번호 방식의 로그인 상태와 링크. SSO 방식에서는 쓰지 않는다.
+  const login = { signedIn: true };
+  const links = new Map<string, MockLink>([['invitation', { email: 'new-hire@example.test', kind: 'invitation' }], ['reset', { email: 'admin@example.test', kind: 'reset' }], ['setup', { email: 'admin@example.test', kind: 'setup' }]]);
   const principal = (id: string): MockPrincipal => state.principals.find(p => p.id === id) ?? fail(404, 'resource_not_found');
   const credential = (id: string) => state.credentials.find(c => c.id === id);
   const activeCredential = (provider: string, id: string): MockCredential => state.credentials.find(c => c.id === id && c.provider === provider && c.state === 'active') ?? fail(404, 'resource_not_found');
@@ -86,9 +101,10 @@ function api(state: MockState) {
   };
   const me = (): Me => {
     const p = principal(ADMIN_ID);
-    // refresh_url 은 https 여야 화면이 받아들인다. 가짜 API 는 401 을 내지 않으므로 실제로 불리지는 않는다.
+    // SSO 방식: refresh_url 은 https 여야 화면이 받아들인다. 가짜 API 는 SSO 방식에서 401 을 내지 않으므로 실제로 불리지는 않는다.
     // logout_url 은 일부러 https 가 아닌 주소로 둔다. 그러면 로그아웃할 때 화면이 이 주소 대신 /auth/login(아래 안내 페이지)으로 간다.
-    return { principal: { id: p.id, display_name: p.display_name, email: p.email ?? '', block_state: block(p) }, role: 'admin', grants: p.policy.grants, key_limit_maximum: keyMaximum(p), budget_timezone: timezoneView(), provider_credentials: authorizedView(p.id), auth_expires_at: iso(Date.now() + 8 * 3600000), sso: { refresh_url: 'https://sso.example.test/refresh', logout_url: 'http://localhost/auth/logout' } };
+    const auth = mode === 'password' ? { mode, refresh_url: null, logout_url: '/dashboard/signin' } : { mode, refresh_url: 'https://sso.example.test/refresh', logout_url: 'http://localhost/auth/logout' };
+    return { principal: { id: p.id, display_name: p.display_name, email: p.email ?? '', block_state: block(p) }, role: 'admin', grants: p.policy.grants, key_limit_maximum: keyMaximum(p), budget_timezone: timezoneView(), provider_credentials: authorizedView(p.id), auth_expires_at: iso(Date.now() + 8 * 3600000), auth };
   };
 
   // ── 가상 키 ──
@@ -420,9 +436,68 @@ function api(state: MockState) {
     const email = text(body.email).trim().toLowerCase(), role = text(body.role);
     if (!email.includes('@') || (role !== 'user' && role !== 'admin')) fail(400, 'invalid_request');
     if (state.access.some(a => a.email === email)) fail(409, 'access_exists');
-    const a = { id: `acc-${Date.now()}`, email, role: role as 'user' | 'admin', added_by_email: FIXED, added_at: now(), version: 1 };
+    const a = { id: `acc-${Date.now()}`, email, role: role as 'user' | 'admin', added_by_email: FIXED, added_at: now(), version: 1, password_set: false };
     state.access.push(a); state.access.sort((x, y) => x.email.localeCompare(y.email));
-    return { status: 201, body: ack(commandId, 'add_access', 'access', a.id, 1, true, { access: accessView(a) }) };
+    // 비밀번호 방식에서는 추가한 사람에게 초대 메일을 보낸다.
+    const invitation = mode === 'password' ? { invitation: sendLink(email, 'invitation') ? 'sent' : 'failed' } : {};
+    return { status: 201, body: ack(commandId, 'add_access', 'access', a.id, 1, true, { access: accessView(a), ...invitation }) };
+  };
+  /** 링크를 만들고 "메일을 보낸다". 이메일에 mailfail 이 있으면 보내지 못한다. 보낸 링크 주소는 개발 서버 로그에 적는다. */
+  const sendLink = (email: string, kind: MockLink['kind']) => {
+    if (email.includes('mailfail')) return false;
+    for (const [token, link] of links) if (link.email === email && link.kind !== 'setup') links.delete(token);
+    const token = crypto.randomUUID().replace(/-/g, '');
+    links.set(token, { email, kind });
+    log(`  [mock] ${email} 에게 보낸 ${kind === 'invitation' ? '초대' : '재설정'} 링크: /dashboard/password#token=${token}`);
+    return true;
+  };
+  const accessLink = (id: string, commandId: string): Reply => {
+    if (mode !== 'password') fail(404, 'resource_not_found');
+    const a = accessEntry(id), kind = a.password_set ? 'reset' : 'invitation';
+    if (!sendLink(a.email, kind)) fail(502, 'mail_failed');
+    return { status: 200, body: ack(commandId, 'send_access_link', 'access', a.id, a.version, true, { link: { email: a.email, kind } }) };
+  };
+  const passwordOk = (value: unknown) => { const n = [...text(value)].length; return n >= 12 && n <= 128; };
+  const changePassword = (body: Json): Reply => {
+    if (mode !== 'password') fail(404, 'resource_not_found');
+    if (!passwordOk(body.new_password)) fail(400, 'password_invalid');
+    if (text(body.current_password).startsWith('wrong')) fail(400, 'current_password_invalid');
+    // 바꾸면 이 사람의 세션이 모두 끝난다.
+    login.signedIn = false;
+    return { status: 204 };
+  };
+  /** 비밀번호 방식의 /auth/* (로그인·링크·비밀번호 설정·로그아웃). */
+  const auth = (method: string, path: string, body: Json): Reply | null => {
+    if (mode !== 'password' || method !== 'POST') return null;
+    const entry = (email: string) => state.access.find(a => a.email === email);
+    switch (path) {
+      case '/auth/password': {
+        const email = text(body.email).trim().toLowerCase(), password = text(body.password);
+        if (password.startsWith('locked')) return { status: 429, body: { error: { code: 'sign_in_locked' } }, headers: { 'Retry-After': '840' } };
+        if (email.includes('blocked')) fail(403, 'access_denied');
+        if (!entry(email)?.password_set || !passwordOk(password)) fail(401, 'invalid_credentials');
+        login.signedIn = true;
+        return { status: 204 };
+      }
+      case '/auth/password/link': {
+        const link = links.get(text(body.token)) ?? fail(404, 'link_invalid');
+        const hasPassword = link.kind === 'setup' ? false : Boolean(entry(link.email)?.password_set);
+        return { status: 200, body: { email: link.email, kind: link.kind, password_set: hasPassword, expires_at: iso(Date.now() + (link.kind === 'invitation' ? 7 : 1) * 86400000) } };
+      }
+      case '/auth/password/set': {
+        const token = text(body.token), link = links.get(token) ?? fail(404, 'link_invalid');
+        if (!passwordOk(body.password)) fail(400, 'password_invalid');
+        const a = entry(link.email), hasPassword = link.kind === 'setup' ? false : Boolean(a?.password_set);
+        if (!hasPassword && !text(body.display_name).trim()) fail(400, 'invalid_request');
+        if (a) a.password_set = true;
+        // 그 사람의 링크는 모두 끝난다.
+        for (const [t, l] of links) if (l.email === link.email) links.delete(t);
+        login.signedIn = true;
+        return { status: 204 };
+      }
+      case '/auth/logout': login.signedIn = false; return { status: 204 };
+    }
+    return null;
   };
   const updateAccess = (id: string, body: Json, commandId: string): Reply => {
     const a = changeable(id, body.expected_version), role = text(body.role);
@@ -437,10 +512,13 @@ function api(state: MockState) {
   };
 
   /** 경로와 메서드로 처리기를 고른다. 모르는 경로는 404 resource_not_found. */
-  return (method: string, path: string, query: URLSearchParams, body: Json, commandId: string): Reply => {
+  const route = (method: string, path: string, query: URLSearchParams, body: Json, commandId: string): Reply => {
     const s = path.split('/').filter(Boolean).map(decodeURIComponent), ok = (value: unknown): Reply => ({ status: 200, body: value }), at = `${method} /${s.slice(0, 3).join('/')}`;
+    // 비밀번호 방식에서 로그아웃했으면 다시 로그인할 때까지 401 이다.
+    if (mode === 'password' && !login.signedIn) fail(401, 'unauthenticated');
     if (s[1] !== 'admin') {
       if (method === 'GET' && path === '/api/me') return ok(me());
+      if (method === 'POST' && path === '/api/me/password') return changePassword(body);
       if (method === 'GET' && path === '/api/csrf') return ok({ token: 'mock-csrf-token', expires_at: iso(Date.now() + 600000) });
       if (method === 'GET' && path === '/api/usage') return ok(usage(query, ADMIN_ID));
       if (method === 'GET' && path === '/api/usage/models') return ok({ items: [...new Map(state.requests.filter(r => r.principal_id === ADMIN_ID).map(r => [`${r.provider}/${r.model}`, { provider: r.provider, model: r.model }])).values()] });
@@ -469,7 +547,7 @@ function api(state: MockState) {
       case 'GET /api/admin/model-catalog': if (s.length === 3) return ok(catalogView()); break;
       case 'POST /api/admin/model-catalog': if (s[3] === 'sync') return syncCatalog(commandId); if (s[3] === 'approve') return approveCatalog(body, commandId); break;
       case 'GET /api/admin/access': if (s.length === 3) return ok({ items: state.access.map(accessView) }); break;
-      case 'POST /api/admin/access': if (s.length === 3) return addAccess(body, commandId); break;
+      case 'POST /api/admin/access': if (s.length === 3) return addAccess(body, commandId); if (s.length === 5 && s[4] === 'link') return accessLink(s[3], commandId); break;
       case 'PATCH /api/admin/access': if (s.length === 4) return updateAccess(s[3], body, commandId); break;
       case 'DELETE /api/admin/access': if (s.length === 4) return removeAccess(s[3], query, commandId); break;
       case 'GET /api/admin/settings': if (s.length === 3) return ok({ budget_timezone: timezoneView(), cutoff_rule: cutoffRuleView() }); break;
@@ -478,6 +556,7 @@ function api(state: MockState) {
     }
     return fail(404, 'resource_not_found');
   };
+  return { route, auth, signedIn: () => login.signedIn };
 }
 
 const loginPage = '<!doctype html><html lang="ko"><head><meta charset="UTF-8"><title>m-gated 개발용 미리보기</title></head><body style="font-family:system-ui;margin:3rem"><h1>개발용 미리보기</h1><p>실제 SSO 가 없는 가짜 로그인 화면입니다. 대시보드는 항상 관리자(admin@example.test)로 로그인된 상태로 열립니다.</p><p><a href="/dashboard/">대시보드로 돌아가기</a></p></body></html>';
@@ -488,22 +567,37 @@ export function mockApi(): Plugin {
     name: 'm-gated-mock-api',
     apply: 'serve',
     configureServer(server) {
-      const route = api(createState());
-      const send = (res: Res, status: number, body?: unknown, type = 'application/json') => {
+      const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+      const mode: AuthMode = env.MOCK_AUTH_MODE === 'password' ? 'password' : 'sso';
+      const mock = api(createState(), mode, line => server.config.logger.info(line));
+      const send = (res: Res, status: number, body?: unknown, type = 'application/json', headers: Record<string, string> = {}) => {
         res.statusCode = status; res.setHeader('Cache-Control', 'no-store');
+        for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
         if (body === undefined) { res.end(); return; }
         res.setHeader('Content-Type', `${type}; charset=utf-8`); res.end(typeof body === 'string' ? body : JSON.stringify(body));
       };
       const read = (req: Req) => new Promise<string>((resolve, reject) => { let raw = ''; req.setEncoding('utf8'); req.on('data', chunk => { raw += chunk; }); req.on('end', () => resolve(raw)); req.on('error', () => reject(new Error('body'))); });
       const handle = async (req: Req, res: Res, next: () => void) => {
         const url = new URL(req.url ?? '/', 'http://mock.local'), method = req.method ?? 'GET', path = url.pathname;
+        const failure = (status: number, code: string, details: Json = {}) => send(res, status, { error: { code, message: '관리 요청을 처리할 수 없습니다.', request_id: crypto.randomUUID(), details } });
         if (path.startsWith('/auth/')) {
+          if (mode === 'password') {
+            // 비밀번호 방식: /auth/login 은 로그인하지 않았으면 로그인 화면으로, 했으면 대시보드로 보낸다.
+            if (method === 'GET' && path === '/auth/login') { send(res, 302, undefined, 'application/json', { Location: mock.signedIn() ? '/dashboard/' : '/dashboard/signin' }); return; }
+            try {
+              const raw = method === 'POST' ? await read(req) : '';
+              const reply = mock.auth(method, path, raw ? JSON.parse(raw) as Json : {});
+              if (reply) send(res, reply.status, reply.body, 'application/json', reply.headers); else failure(404, 'resource_not_found');
+            } catch (error) {
+              if (error instanceof HttpError) failure(error.status, error.code, error.details); else failure(400, 'invalid_request');
+            }
+            return;
+          }
           // 실제 SSO 대신 안내 페이지를 보여 준다. refresh 는 성공한 것으로 답한다.
           if (path === '/auth/refresh') send(res, 204); else send(res, 200, loginPage, 'text/html');
           return;
         }
         if (!path.startsWith('/api/')) { next(); return; }
-        const failure = (status: number, code: string, details: Json = {}) => send(res, status, { error: { code, message: '관리 요청을 처리할 수 없습니다.', request_id: crypto.randomUUID(), details } });
         try {
           let body: Json = {}, commandId = '';
           if (method !== 'GET') {
@@ -516,8 +610,8 @@ export function mockApi(): Plugin {
           }
           // 조회 중 표시가 잠깐 보이도록 조금 늦게 답한다.
           await new Promise(resolve => setTimeout(resolve, 80));
-          const reply = route(method, path, url.searchParams, body, commandId);
-          send(res, reply.status, reply.body);
+          const reply = mock.route(method, path, url.searchParams, body, commandId);
+          send(res, reply.status, reply.body, 'application/json', reply.headers);
         } catch (error) {
           if (error instanceof HttpError) failure(error.status, error.code, error.details);
           else if (error instanceof SyntaxError) failure(400, 'invalid_request');
@@ -525,7 +619,7 @@ export function mockApi(): Plugin {
         }
       };
       server.middlewares.use((req: unknown, res: unknown, next: () => void) => { void handle(req as Req, res as Res, next); });
-      server.config.logger.info('  [mock] 가짜 API 사용 중: /api/*, /auth/* 는 메모리 안의 가짜 데이터로 응답합니다.');
+      server.config.logger.info(`  [mock] 가짜 API 사용 중(${mode === 'password' ? '비밀번호' : 'SSO'} 방식): /api/*, /auth/* 는 메모리 안의 가짜 데이터로 응답합니다.`);
     },
   };
 }

@@ -20,7 +20,7 @@ async fn fixture() -> (Arc<sso::FakeJwks>, sso::Server, Arc<JwksCache>, SsoVerif
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
     let cache = Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap());
-    let verifier = SsoVerifier::new(config().auth(), cache.clone());
+    let verifier = SsoVerifier::new(config().sso().unwrap(), cache.clone());
     (fake, server, cache, verifier)
 }
 #[tokio::test]
@@ -452,7 +452,7 @@ async fn rsa_size_bounds_are_enforced_with_real_signatures() {
         let fake = sso::FakeJwks::new(vec![signer.jwk.clone()]);
         let server = fake.serve().await;
         let cache = Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap());
-        let verifier = SsoVerifier::new(config().auth(), cache);
+        let verifier = SsoVerifier::new(config().sso().unwrap(), cache);
         assert_eq!(
             verifier
                 .verify(

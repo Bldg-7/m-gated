@@ -11,7 +11,7 @@ use axum::{
     routing::any,
 };
 use m_gated::{
-    auth::{AuthError, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{AuthError, Authenticator, SsoVerifier, jwks::JwksCache},
     config::{self, ConfigInputs},
     http::{self, AppState},
     runtime::{Dependency, Runtime},
@@ -49,7 +49,7 @@ async fn identity_and_admin_are_not_email_inheritance() {
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
     let verifier = SsoVerifier::new(
-        config().auth(),
+        config().sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
     );
     postgres::grant_access(&db.store, &config(), &[]).await;
@@ -111,7 +111,7 @@ async fn identity_and_admin_are_not_email_inheritance() {
         let store = db.store.clone();
         let gate = gate.clone();
         let config = config();
-        let verifier = SsoVerifier::new(config.auth(), verifier.jwks.clone());
+        let verifier = SsoVerifier::new(config.sso().unwrap(), verifier.jwks.clone());
         let token = sso::credential(sso::Signer::shared().sign(&claims, "key1"));
         jobs.push(tokio::spawn(async move {
             let identity = verifier.verify(&token, 1900000000).await.unwrap();
@@ -168,8 +168,8 @@ async fn same_authentication_service_observes_wire_and_current_access() {
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks_server = fake.serve().await;
     let cache = Arc::new(JwksCache::loopback_for_test(jwks_server.uri.clone()).unwrap());
-    let verifier = SsoVerifier::new(cfg.auth(), cache.clone());
-    let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+    let verifier = SsoVerifier::new(cfg.sso().unwrap(), cache.clone());
+    let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
     let runtime = Runtime::new(cfg.limits().clone()).unwrap();
     runtime.start_http().unwrap();
     for dependency in [Dependency::Database, Dependency::Schema, Dependency::Ui] {
@@ -180,7 +180,7 @@ async fn same_authentication_service_observes_wire_and_current_access() {
     assert!(!auth.refresh_health(&runtime).await);
     assert_eq!(runtime.lifecycle(), m_gated::runtime::Lifecycle::NotReady);
     struct AuthHarness {
-        auth: Arc<SsoAuthenticator>,
+        auth: Arc<Authenticator>,
         client: reqwest::Client,
         dispatch_sink: String,
     }
@@ -550,10 +550,10 @@ async fn authentication_waiters_are_bounded_and_release_their_slots() {
     fake.hold.store(true, std::sync::atomic::Ordering::SeqCst);
     let server = fake.serve().await;
     let verifier = SsoVerifier::new(
-        cfg.auth(),
+        cfg.sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
     );
-    let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+    let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
     let token = sso::Signer::shared().sign(&sso::claims(), "key1");
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
@@ -613,10 +613,10 @@ async fn configured_token_limit_rejects_before_jwks_or_identity_persistence() {
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
     let verifier = SsoVerifier::new(
-        cfg.auth(),
+        cfg.sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
     );
-    let auth = SsoAuthenticator::new(&cfg, verifier, db.store.clone());
+    let auth = Authenticator::new(&cfg, verifier, db.store.clone());
     let token = sso::Signer::shared().sign(&sso::claims(), "key1");
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());

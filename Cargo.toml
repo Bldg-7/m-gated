@@ -44,6 +44,8 @@ m-gated-adapter-deepseek = { path = "adapters/deepseek" }
 wasmtime = { version = "=48.0.9", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "std"] }
 ruzstd = "=0.9.1"
 chrono-tz = "=0.10.4"
+argon2 = "=0.6.0"
+lettre = { version = "=0.11.23", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
 socket2 = "=0.6.5"

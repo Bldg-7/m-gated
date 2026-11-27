@@ -1,5 +1,5 @@
 use crate::{
-    auth::{AuthError, SsoAuthenticator},
+    auth::{AuthError, Authenticator},
     config::{ModelProfile, ProviderConfig, ProviderId, ValidatedConfig},
     http,
     ledger::{
@@ -32,7 +32,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 pub struct InferenceGateway {
-    auth: Arc<SsoAuthenticator>,
+    auth: Arc<Authenticator>,
     ledger: Arc<PgLedger>,
     clients: BTreeMap<ProviderId, NativeClient>,
     profiles: Vec<ModelProfile>,
@@ -68,7 +68,7 @@ fn project(format: ErrorFormat, response: Response) -> Response {
 impl InferenceGateway {
     pub fn new(
         config: &ValidatedConfig,
-        auth: Arc<SsoAuthenticator>,
+        auth: Arc<Authenticator>,
         ledger: Arc<PgLedger>,
         credentials: Arc<crate::credentials::CredentialCache>,
     ) -> Result<Self, ApiError> {
@@ -77,7 +77,7 @@ impl InferenceGateway {
         for provider in config.providers() {
             let client = NativeClient::from_config(
                 provider,
-                config.auth().ca_certificate.as_deref(),
+                config.ca_certificate(),
                 clients.values().next(),
                 credentials.clone(),
             )?;
@@ -94,7 +94,7 @@ impl InferenceGateway {
     }
     pub fn assemble(
         provider: &ProviderConfig,
-        auth: Arc<SsoAuthenticator>,
+        auth: Arc<Authenticator>,
         ledger: Arc<PgLedger>,
         client: NativeClient,
     ) -> Self {
@@ -1031,7 +1031,7 @@ pub fn auth_config_digest(config: &ValidatedConfig) -> [u8; 32] {
         let projection=serde_json::json!({"provider":crate::ledger::finance::provider_name(provider.provider),"api":crate::ledger::finance::api_name(p.api),"model":p.model,"profile_version":p.profile_version,"actual_models":p.actual_models.iter().collect::<BTreeSet<_>>(),"features":p.features.iter().collect::<BTreeSet<_>>(),"approved_beta":p.approved_beta.iter().collect::<BTreeSet<_>>(),"count_billing":p.count_billing,"max_input_tokens":p.max_input_tokens,"max_output_tokens":p.max_output_tokens,"max_body_bytes":p.max_body_bytes,"max_response_bytes":p.max_response_bytes});
         serde_json::to_string(&projection).expect("비밀 없는 유한 profile projection")
     })).collect::<BTreeSet<_>>();
-    let projection = serde_json::json!({"issuer":config.auth().issuer_literal,"audience":config.auth().audience_literal,"admin":config.admin_email(),"profiles":profiles,"execution_ceiling":config.execution_ceiling()});
+    let projection = serde_json::json!({"mode":format!("{:?}",config.auth_mode()),"issuer":config.sso().map(|a|&a.issuer_literal),"audience":config.sso().map(|a|&a.audience_literal),"admin":config.admin_email(),"profiles":profiles,"execution_ceiling":config.execution_ceiling()});
     Sha256::digest(serde_json::to_vec(&projection).expect("비밀 없는 유한 접근 설정 projection"))
         .into()
 }

@@ -13,7 +13,7 @@ mod provider;
 mod sso;
 mod support;
 use m_gated::{
-    auth::{AccessSettings, SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{AccessSettings, Authenticator, SsoVerifier, jwks::JwksCache},
     bootstrap::{self, Dependencies, RunningApp},
     config::{self, ConfigInputs},
     ledger::{
@@ -42,10 +42,10 @@ const ACCESS: &[(&str, &str)] = &[
 ];
 async fn app(db: &postgres::TestDb, uri: &url::Url, upstream: &url::Url) -> Arc<RunningApp> {
     let cfg = config();
-    let auth = Arc::new(SsoAuthenticator::new(
+    let auth = Arc::new(Authenticator::new(
         &cfg,
         SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(uri.clone()).unwrap()),
         ),
         db.store.clone(),
@@ -135,7 +135,7 @@ async fn administrator_browser_commands_queries_and_current_authority() {
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let jwks = fake.serve().await;
     let verifier = SsoVerifier::new(
-        cfg.auth(),
+        cfg.sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
     );
     let mut tokens = Vec::new();

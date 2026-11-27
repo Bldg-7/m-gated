@@ -1,5 +1,6 @@
 public_origin: https://m-gated.example.test
 auth:
+  mode: sso
   issuer: https://auth.example.test
   jwks_uri: https://auth.example.test/.well-known/jwks.json
   audience: https://example.test

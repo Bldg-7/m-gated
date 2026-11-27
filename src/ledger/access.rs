@@ -37,7 +37,7 @@ impl Role {
 
 fn select_sql(filter: &str) -> String {
     format!(
-        "SELECT a.id,a.email,a.role,a.version,{} AS added_at,b.email AS added_by_email,p.id AS principal_id,p.disabled_at IS NOT NULL AS disabled FROM gw_access a LEFT JOIN gw_principals b ON b.id=a.added_by LEFT JOIN gw_principals p ON p.kind='human' AND p.email=a.email {filter}",
+        "SELECT a.id,a.email,a.role,a.version,{} AS added_at,b.email AS added_by_email,p.id AS principal_id,p.disabled_at IS NOT NULL AS disabled,EXISTS(SELECT 1 FROM gw_passwords w WHERE w.email=a.email) AS password_set FROM gw_access a LEFT JOIN gw_principals b ON b.id=a.added_by LEFT JOIN gw_principals p ON p.kind='human' AND p.email=a.email {filter}",
         stamp("a.added_at")
     )
 }
@@ -52,6 +52,8 @@ fn view(row: &PgRow, fixed_admin: &str) -> Value {
         "added_by_email": row.get::<Option<String>, _>("added_by_email"),
         "added_at": row.get::<String, _>("added_at"),
         "version": row.get::<i64, _>("version").to_string(),
+        // 비밀번호 방식에서 이 사람이 비밀번호를 정했는지. SSO 방식에서는 늘 false다.
+        "password_set": row.get::<bool, _>("password_set"),
         "principal": row.get::<Option<Uuid>, _>("principal_id").map(|id| json!({
             "id": id,
             "disabled": row.get::<bool, _>("disabled"),
@@ -278,10 +280,15 @@ impl PgIdentityStore {
                 Begin::Replayed(result) => return Ok(result),
             };
             let before = lock_changeable(&mut tx, ctx, id, expected).await?;
-            sqlx::query("DELETE FROM gw_access WHERE id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            // 비밀번호 방식의 비밀번호·링크·세션도 함께 지운다. 다시 더하면 새로 초대받아야 한다.
+            for sql in [
+                "DELETE FROM gw_passwords WHERE email=(SELECT email FROM gw_access WHERE id=$1)",
+                "DELETE FROM gw_auth_links WHERE email=(SELECT email FROM gw_access WHERE id=$1)",
+                "DELETE FROM gw_sessions WHERE email=(SELECT email FROM gw_access WHERE id=$1)",
+                "DELETE FROM gw_access WHERE id=$1",
+            ] {
+                sqlx::query(sql).bind(id).execute(&mut *tx).await?;
+            }
             let result = record(
                 &mut tx,
                 ctx,
@@ -296,6 +303,94 @@ impl PgIdentityStore {
             .await?;
             tx.commit().await?;
             Ok(result)
+        })
+        .await
+        .map_err(|_| ManagementError::Busy)?
+    }
+
+    /// `POST /api/admin/access/{id}/link`의 앞부분. 비밀번호가 없는 사람에게는 초대 링크,
+    /// 있는 사람에게는 재설정 링크를 저장한다. 같은 명령 ID를 다시 보냈으면 이전 결과를 돌려준다.
+    /// 메일을 보낸 뒤 `finish_access_link`가 명령을 기록한다(결정 0011 규칙 6).
+    pub async fn start_access_link(
+        &self,
+        ctx: &CommandContext<'_>,
+        id: Uuid,
+        token_hash: &[u8; 32],
+    ) -> Result<LinkStart, ManagementError> {
+        use crate::auth::password::LinkKind;
+        let digest = management::input_digest(ctx.method, ctx.path, &json!({}));
+        let _gate = self.access_gate()?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut tx = match self.begin_access(ctx, &digest).await? {
+                Begin::Run(tx) => tx,
+                Begin::Replayed(result) => return Ok(LinkStart::Replayed(result)),
+            };
+            let row = sqlx::query("SELECT a.email,EXISTS(SELECT 1 FROM gw_passwords w WHERE w.email=a.email) AS password_set FROM gw_access a WHERE a.id=$1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(ManagementError::NotFound)?;
+            let email: String = row.get("email");
+            let kind = if row.get::<bool, _>("password_set") {
+                LinkKind::Reset
+            } else {
+                LinkKind::Invitation
+            };
+            sqlx::query("DELETE FROM gw_auth_links WHERE email=$1 AND kind<>'setup'")
+                .bind(&email)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO gw_auth_links(token_hash,email,kind,created_by,expires_at) VALUES($1,$2,$3,$4,clock_timestamp()+make_interval(secs=>$5))")
+                .bind(token_hash.as_slice())
+                .bind(&email)
+                .bind(kind.name())
+                .bind(ctx.actor)
+                .bind(kind.seconds() as f64)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(LinkStart::Ready { email, kind })
+        })
+        .await
+        .map_err(|_| ManagementError::Busy)?
+    }
+
+    /// 메일을 보낸 뒤 명령 기록과 감사 기록을 남긴다.
+    pub async fn finish_access_link(
+        &self,
+        ctx: &CommandContext<'_>,
+        id: Uuid,
+        email: &str,
+        kind: crate::auth::password::LinkKind,
+    ) -> Result<CommandResult, ManagementError> {
+        let digest = management::input_digest(ctx.method, ctx.path, &json!({}));
+        let _gate = self.access_gate()?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut tx = self.begin_transaction().await?;
+            let link = json!({"email":email,"kind":kind.name()});
+            let ack = json!({"command_id":ctx.command_id,"operation":"send_access_link","target":{"kind":"access","id":id},"result_version":null,"effect":"changed","link":link});
+            sqlx::query("INSERT INTO gw_commands(actor_principal_id,command_id,input_digest,operation,target_kind,target_id,result_status,result_projection,created_at) VALUES($1,$2,$3,'send_access_link','access',$4,200,$5,clock_timestamp())")
+                .bind(ctx.actor)
+                .bind(ctx.command_id)
+                .bind(digest.as_slice())
+                .bind(id)
+                .bind(&ack)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO gw_audit_events(actor_kind,actor_principal_id,command_id,actor_auth_config_digest,operation,target_kind,target_id,before_snapshot,after_snapshot) VALUES('human',$1,$2,$3,'send_access_link','access',$4,'{}',$5)")
+                .bind(ctx.actor)
+                .bind(ctx.command_id)
+                .bind(ctx.digest.as_slice())
+                .bind(id)
+                .bind(&link)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(CommandResult {
+                status: 200,
+                body: Some(ack),
+                replayed: false,
+            })
         })
         .await
         .map_err(|_| ManagementError::Busy)?
@@ -326,4 +421,15 @@ impl PgIdentityStore {
 enum Begin<'c> {
     Run(sqlx::Transaction<'c, sqlx::Postgres>),
     Replayed(CommandResult),
+}
+
+/// 링크 보내기 명령의 앞부분 결과.
+pub enum LinkStart {
+    /// 같은 명령 ID를 이미 처리했다. 메일을 다시 보내지 않는다.
+    Replayed(CommandResult),
+    /// 링크를 저장했다. 이 사람에게 메일을 보낸다.
+    Ready {
+        email: String,
+        kind: crate::auth::password::LinkKind,
+    },
 }

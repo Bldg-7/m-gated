@@ -6,7 +6,7 @@ import { session } from '../../lib/api';
 
 const policy = [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages', 'count_tokens'] }, { provider: 'openai', model: 'synthetic-gpt', capabilities: ['responses'] }];
 const authorized = [{ provider: 'anthropic', credentials: [{ id: 'cred1', label: 'team-a', hint: '0001' }, { id: 'cred2', label: 'team-b', hint: '0002' }] }, { provider: 'openai', credentials: [{ id: 'cred3', label: 'oa', hint: '0003' }] }];
-const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: policy, provider_credentials: authorized, sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'a@example.test' }, role: 'user', grants: policy, provider_credentials: authorized, auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const adminMe = { ...me, principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [], provider_credentials: [] };
 const id = '00000000-0000-4000-8000-000000000001';
 const bound = (credential_id: string, label: string, hint: string, isAuthorized = true) => ({ provider: 'anthropic', credential_id, label, hint, state: 'active', authorized: isAuthorized });

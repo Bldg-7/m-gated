@@ -1,18 +1,18 @@
 import { expect, test, vi } from 'vitest';
 import { Session, StaleResponse } from './api';
 import type { Me } from './types';
-const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', sso: { refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
+const me: Me = { principal: { id: 'human1', display_name: 'Synthetic', email: 'synthetic@example.invalid', block_state: { blocked: false, reasons: [], global_unknown_count: '0', expired_dispatch_count: '0' } }, role: 'user', grants: [], auth_expires_at: '2030-01-01T00:00:00Z', auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 test('auth_epoch_drops_stale_responses_and_logout_removes_identity', async () => {
   const late = deferred<Response>(); const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockReturnValueOnce(late.promise); const nav = vi.fn(); const session = new Session(fetcher, nav); await session.validate();
-  const pending = session.read('/api/usage'); session.logout(); late.resolve(response({ settled_usd: '999.000000000000' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse); expect(session.snapshot().me).toBeNull(); expect(nav).toHaveBeenCalledWith(me.sso.logout_url);
+  const pending = session.read('/api/usage'); session.logout(); late.resolve(response({ settled_usd: '999.000000000000' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse); expect(session.snapshot().me).toBeNull(); expect(nav).toHaveBeenCalledWith(me.auth.logout_url);
 });
 test('initial_401_redirects_without_refresh_and_403_never_loops', async () => {
   for (const status of [401, 403]) { const fetcher = vi.fn().mockResolvedValue(response({ error: { code: 'auth' } }, status)); const nav = vi.fn(); const session = new Session(fetcher, nav); await session.validate(); expect(fetcher).toHaveBeenCalledTimes(1); expect(nav).toHaveBeenCalledTimes(status === 401 ? 1 : 0); expect(session.snapshot().me).toBeNull(); }
 });
 test('refresh_reads_once_never_replays_writes', async () => {
-  const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ error: { code: 'invalid_credentials' } }, 401)).mockResolvedValueOnce(response({})).mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ token: 'synthetic-csrf' })).mockResolvedValueOnce(response({ value: 1 })); const session = new Session(fetcher, vi.fn()); await session.validate(); expect(await session.read('/api/usage')).toEqual({ value: 1 }); expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/api/me', '/api/usage', me.sso.refresh_url, '/api/me', '/api/csrf', '/api/usage']); expect(fetcher.mock.calls[2][1].method).toBe('POST');
+  const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ error: { code: 'invalid_credentials' } }, 401)).mockResolvedValueOnce(response({})).mockResolvedValueOnce(response(me)).mockResolvedValueOnce(response({ token: 'synthetic-csrf' })).mockResolvedValueOnce(response({ value: 1 })); const session = new Session(fetcher, vi.fn()); await session.validate(); expect(await session.read('/api/usage')).toEqual({ value: 1 }); expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/api/me', '/api/usage', me.auth.refresh_url, '/api/me', '/api/csrf', '/api/usage']); expect(fetcher.mock.calls[2][1].method).toBe('POST');
 });
 test('visible_revalidation_supersedes_an_old_pending_me', async () => {
   const old = deferred<Response>(); const fetcher = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValueOnce(response(me)); const session = new Session(fetcher, vi.fn()); const first = session.validate(); session.clear(); const second = session.validate(); old.resolve(response({ ...me, principal: { ...me.principal, id: 'old-human' } })); await Promise.all([first, second]); expect(session.snapshot().me?.principal.id).toBe('human1'); expect(fetcher).toHaveBeenCalledTimes(2);
@@ -22,7 +22,7 @@ test('concurrent_401_reads_join_one_refresh_and_retry_once', async () => {
   const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise).mockReturnValueOnce(refresh.promise).mockResolvedValueOnce(response(me)).mockImplementation(() => Promise.resolve(response({ value: 1 })));
   const session = new Session(fetcher, vi.fn()); await session.validate(); const first = session.read('/api/usage'); const second = session.read('/api/me');
   a.resolve(response({ error: { code: 'expired' } }, 401)); await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4)); b.resolve(response({ error: { code: 'expired' } }, 401)); refresh.resolve(response({}));
-  const result = await Promise.allSettled([first, second]); expect(result.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']); expect(fetcher.mock.calls.filter(c => c[0] === me.sso.refresh_url)).toHaveLength(1);
+  const result = await Promise.allSettled([first, second]); expect(result.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']); expect(fetcher.mock.calls.filter(c => c[0] === me.auth.refresh_url)).toHaveLength(1);
 });
 test('self_403_discards_identity_and_other_late_reads_without_login_loop', async () => {
   const late = deferred<Response>(); const fetcher = vi.fn().mockResolvedValueOnce(response(me)).mockReturnValueOnce(late.promise).mockResolvedValueOnce(response({ error: { code: 'access_denied' } }, 403)).mockResolvedValueOnce(response({ error: { code: 'access_denied' } }, 403));
@@ -75,7 +75,7 @@ test('refresh_new_me_403_stays_permission_error_without_login', async () => {
   await expect(session.read('/api/usage')).rejects.toMatchObject({ status: 403 });
   late.resolve(response({ private: 'old' })); await expect(pending).rejects.toBeInstanceOf(StaleResponse);
   expect(nav).not.toHaveBeenCalled(); expect(session.snapshot()).toMatchObject({ me: null, status: 'error', error: '접근 권한이 없습니다.' });
-  expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/api/me', '/api/usage?model=old', '/api/usage', me.sso.refresh_url, '/api/me']);
+  expect(fetcher.mock.calls.map(c => String(c[0]))).toEqual(['/api/me', '/api/usage?model=old', '/api/usage', me.auth.refresh_url, '/api/me']);
 });
 
 test('verified_identity_change_notifies_other_session_once_without_echo', async () => {

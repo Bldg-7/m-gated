@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 pub const YAML: &str = "public_origin: https://m-gated.example.test
 auth:
+  mode: sso
   issuer: https://auth.example.test
   jwks_uri: https://auth.example.test/.well-known/jwks.json
   audience: https://example.test
@@ -35,6 +36,17 @@ providers:
           output: '2.000000000000'
 ";
 
+/// 비밀번호 방식(결정 0011) 설정. SSO 값을 빼고 SMTP 값을 넣는다. 비밀번호는 `SMTP_PASSWORD`로 준다.
+#[allow(dead_code)]
+pub fn password_yaml() -> String {
+    let start = YAML.find("auth:\n").unwrap();
+    let end = YAML.find("admin_email:").unwrap();
+    format!(
+        "{}auth:\n  mode: password\nsmtp:\n  host: smtp.example.test\n  port: 587\n  username: gateway\n  from: Gateway@Example.test\n{}",
+        &YAML[..start],
+        &YAML[end..]
+    )
+}
 pub fn environment() -> BTreeMap<String, String> {
     [
         ("DB_PASSWORD", "synthetic-db-secret"),

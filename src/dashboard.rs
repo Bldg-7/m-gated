@@ -27,6 +27,8 @@ pub const SCREENS: &[&str] = &[
     "/dashboard/admin/models",
     "/dashboard/admin/token-check",
     "/dashboard/admin/members",
+    "/dashboard/signin",
+    "/dashboard/password",
     "/dashboard/admin/settings",
 ];
 #[derive(Deserialize)]
@@ -100,7 +102,12 @@ impl UiBundle {
         {
             return Err(invalid());
         }
-        let csp = HeaderValue::from_str(&format!("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' {sso_origin}; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")).map_err(|_| invalid())?;
+        let connect = if sso_origin.is_empty() {
+            "'self'".to_owned()
+        } else {
+            format!("'self' {sso_origin}")
+        };
+        let csp = HeaderValue::from_str(&format!("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src {}; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'", connect)).map_err(|_| invalid())?;
         Ok(Self { html, assets, csp })
     }
     pub fn routes(self: Arc<Self>, runtime: Arc<Runtime>) -> Router {

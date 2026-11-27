@@ -13,7 +13,7 @@ use axum::{
     http::Request,
 };
 use m_gated::{
-    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{Authenticator, SsoVerifier, jwks::JwksCache},
     catalog::CatalogService,
     config::{self, ConfigInputs},
     credentials::CredentialService,
@@ -184,7 +184,7 @@ impl Harness {
             .serve()
             .await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
         let admin = sso::Signer::shared().sign(&sso::claims(), "key1");
@@ -192,7 +192,7 @@ impl Harness {
         bob["sub"] = json!("human-2");
         bob["email"] = json!("bob@example.test");
         let user = sso::Signer::shared().sign(&bob, "key1");
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
         // 쓰이지 않는 주소. 어떤 조합도 카탈로그 동기화까지 가지 않는다.
         let source = url::Url::parse("http://127.0.0.1:9/").unwrap();
         let api = Arc::new(

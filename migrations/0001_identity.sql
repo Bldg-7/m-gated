@@ -36,6 +36,39 @@ CREATE TABLE gw_access (
  added_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  version bigint NOT NULL DEFAULT 1 CHECK(version>0)
 );
+-- 비밀번호 로그인(결정 0011). 비밀번호는 argon2id PHC 문자열만 둔다.
+CREATE TABLE gw_passwords (
+ email text PRIMARY KEY CHECK(octet_length(email) BETWEEN 3 AND 320 AND email=lower(email)),
+ hash text NOT NULL CHECK(octet_length(hash) BETWEEN 16 AND 512 AND hash LIKE '$argon2id$%'),
+ display_name text NOT NULL CHECK(char_length(display_name) BETWEEN 1 AND 100 AND octet_length(display_name)<=400 AND display_name !~ '[[:cntrl:]]'),
+ set_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+-- 초대·재설정·첫 관리자 설정 링크. 토큰은 SHA-256만 둔다. 비밀번호를 정하면 그 사람의 링크를 모두 지운다.
+CREATE TABLE gw_auth_links (
+ token_hash bytea PRIMARY KEY CHECK(octet_length(token_hash)=32),
+ email text NOT NULL CHECK(octet_length(email) BETWEEN 3 AND 320 AND email=lower(email)),
+ kind text NOT NULL CHECK(kind IN ('invitation','reset','setup')),
+ created_by uuid REFERENCES gw_principals(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ expires_at timestamptz NOT NULL,
+ CHECK(expires_at>created_at)
+);
+CREATE INDEX gw_auth_links_email ON gw_auth_links(email);
+-- 로그인 세션. 토큰은 SHA-256만 둔다.
+CREATE TABLE gw_sessions (
+ token_hash bytea PRIMARY KEY CHECK(octet_length(token_hash)=32),
+ email text NOT NULL CHECK(octet_length(email) BETWEEN 3 AND 320 AND email=lower(email)),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ expires_at timestamptz NOT NULL,
+ CHECK(expires_at>created_at)
+);
+CREATE INDEX gw_sessions_email ON gw_sessions(email);
+-- 이메일별 연속 로그인 실패. 5번 실패하면 15분 동안 막는다.
+CREATE TABLE gw_sign_in_failures (
+ email text PRIMARY KEY CHECK(octet_length(email) BETWEEN 1 AND 320),
+ failures integer NOT NULL CHECK(failures BETWEEN 0 AND 5),
+ locked_until timestamptz
+);
 CREATE FUNCTION gw_check_principal() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF TG_OP='UPDATE' AND (NEW.kind IS DISTINCT FROM OLD.kind OR NEW.issuer IS DISTINCT FROM OLD.issuer OR NEW.subject IS DISTINCT FROM OLD.subject) THEN

@@ -129,7 +129,7 @@ fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-fn identity_encoding(headers: &HeaderMap) -> bool {
+pub(super) fn identity_encoding(headers: &HeaderMap) -> bool {
     !headers
         .get_all(header::CONTENT_ENCODING)
         .iter()
@@ -138,11 +138,11 @@ fn identity_encoding(headers: &HeaderMap) -> bool {
 fn typed<T: serde::de::DeserializeOwned>(input: &Value) -> Result<T, ManagementError> {
     serde_json::from_value(input.clone()).map_err(|_| ManagementError::Invalid)
 }
-fn unsupported_media_type() -> Response {
+pub(super) fn unsupported_media_type() -> Response {
     failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
 }
 /// 본문을 크기 상한과 5초 안에 읽는다.
-async fn read_body(state: &ApiState, body: Body) -> Result<Bytes, Response> {
+pub(super) async fn read_body(state: &ApiState, body: Body) -> Result<Bytes, Response> {
     match tokio::time::timeout(
         Duration::from_secs(5),
         to_bytes(body, state.runtime.limits().management_body_bytes),
@@ -155,7 +155,7 @@ async fn read_body(state: &ApiState, body: Body) -> Result<Bytes, Response> {
     }
 }
 /// 명령을 처리한 응답. 명령 ID와 재전송 여부를 헤더에 담는다.
-fn acknowledged(result: CommandResult, command_id: Uuid) -> Response {
+pub(super) fn acknowledged(result: CommandResult, command_id: Uuid) -> Response {
     let mut r = match result.body {
         Some(v) => success(v),
         None => StatusCode::NO_CONTENT.into_response(),
@@ -173,7 +173,7 @@ fn acknowledged(result: CommandResult, command_id: Uuid) -> Response {
     );
     r
 }
-fn command_context<'a>(
+pub(super) fn command_context<'a>(
     state: &'a ApiState,
     actor: Uuid,
     command_id: Uuid,
@@ -1190,7 +1190,17 @@ async fn access(
         }
     };
     match result {
-        Ok(result) => acknowledged(result, command_id),
+        Ok(mut result) => {
+            // 비밀번호 방식에서는 사람을 더하면 초대 메일도 보낸다(결정 0011 규칙 2).
+            if route == Access::Add
+                && !result.replayed
+                && state.api.mode == crate::config::AuthMode::Password
+                && let Some(body) = result.body.as_mut()
+            {
+                super::password::invite_added(state, actor.human.current.id, body).await;
+            }
+            acknowledged(result, command_id)
+        }
         Err(e) => error(e),
     }
 }

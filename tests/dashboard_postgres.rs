@@ -12,7 +12,7 @@ use axum::{
     http::Request,
 };
 use m_gated::{
-    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{Authenticator, SsoVerifier, jwks::JwksCache},
     config::{self, ConfigInputs},
     http::{self, AppState},
     ledger::{
@@ -97,10 +97,10 @@ async fn cookie_login_me_usage_and_current_server_access() {
     let fake = sso::FakeJwks::new(vec![sso::Signer::shared().jwk.clone()]);
     let server = fake.serve().await;
     let verifier = SsoVerifier::new(
-        cfg.auth(),
+        cfg.sso().unwrap(),
         Arc::new(JwksCache::loopback_for_test(server.uri.clone()).unwrap()),
     );
-    let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+    let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
     let api = Arc::new(m_gated::admin::DashboardApi::new(
         &cfg,
         auth.clone(),

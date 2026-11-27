@@ -3,7 +3,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../app';
 import { optionNames, pickOption, selectedValue } from '../../test-select';
 import { session } from '../../lib/api';
-const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], sso: { refresh_url: 'https://auth.example.test/sso/refresh' } };
+const me = { principal: { id: 'admin1', display_name: '관리자', email: 'admin@example.test' }, role: 'admin', grants: [{ provider: 'anthropic', model: 'synthetic-text', capabilities: ['messages'] }], auth: { mode: 'sso', refresh_url: 'https://auth.example.test/sso/refresh', logout_url: 'https://auth.example.test/sso/logout' } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const secret = 'sk-ant-synthetic-company-key-9f3a';
 const meta = (id: string, label: string, hint: string, extra: Record<string, unknown> = {}) => ({ id, provider: 'anthropic', label, bound_keys: '0', state: 'active', decryptable: true, hint, version: '1', verified_at: '2026-11-13T00:00:00Z', created_at: '2026-11-13T00:00:00Z', created_by: 'admin1', created_by_email: 'admin@example.test', retired_at: null, retired_by_email: null, ...extra });

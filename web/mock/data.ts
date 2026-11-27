@@ -23,8 +23,8 @@ export type MockState = {
   /** 끊긴 요청의 정산 규칙(Anthropic). */
   cutoffRule: { cutoff_rule: 'received' | 'max_tokens'; correction: boolean; version: number };
   authorizationVersion: number;
-  /** 접근 목록(결정 0001). 고정 관리자는 admin@example.test 다. */
-  access: { id: string; email: string; role: 'user' | 'admin'; added_by_email: string | null; added_at: string; version: number }[];
+  /** 접근 목록(결정 0001). 고정 관리자는 admin@example.test 다. password_set: 비밀번호를 정했는지(결정 0011, 비밀번호 방식에서만 화면에 보인다). */
+  access: { id: string; email: string; role: 'user' | 'admin'; added_by_email: string | null; added_at: string; version: number; password_set: boolean }[];
 };
 
 const DAY = 86400000;
@@ -204,7 +204,7 @@ export function createState(): MockState {
 
   return { principals, credentials, authorizations, keys, requests, usage, catalog: { version: 4, approved_at: ago(12), approved_by_email: 'admin@example.test', entries: approved.map(e => ({ ...e })) }, proposals: new Map(), timezone: { timezone: 'Asia/Seoul', pending: null, version: 3 }, cutoffRule: { cutoff_rule: 'received', correction: false, version: 1 }, authorizationVersion: 20,
     access: [
-      ...principals.filter(p => p.kind === 'human' && p.email).map((p, i) => ({ id: `acc-${i + 1}`, email: p.email!, role: (p.email === 'admin@example.test' ? 'admin' : 'user') as 'user' | 'admin', added_by_email: p.email === 'admin@example.test' ? null : 'admin@example.test', added_at: ago(30), version: 1 })),
-      { id: 'acc-new', email: 'new-hire@example.test', role: 'user' as const, added_by_email: 'admin@example.test', added_at: ago(1), version: 1 },
+      ...principals.filter(p => p.kind === 'human' && p.email).map((p, i) => ({ id: `acc-${i + 1}`, email: p.email!, role: (p.email === 'admin@example.test' ? 'admin' : 'user') as 'user' | 'admin', added_by_email: p.email === 'admin@example.test' ? null : 'admin@example.test', added_at: ago(30), version: 1, password_set: true })),
+      { id: 'acc-new', email: 'new-hire@example.test', role: 'user' as const, added_by_email: 'admin@example.test', added_at: ago(1), version: 1, password_set: false },
     ] };
 }

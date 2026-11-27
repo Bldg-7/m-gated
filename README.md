@@ -25,9 +25,10 @@ Key properties:
   - A request is settled at 0 USD if the provider answered with an HTTP error, or if it was cut off
     before `message_start` in an Anthropic stream, before the first event in another stream, or
     before the full response when not streaming.
-- **SSO identity.** Users authenticate with RS256 JWTs from an external SSO (verified against a
-  JWKS) to use the dashboard. From the dashboard they issue scoped virtual keys, which are the only
-  credentials accepted for inference.
+- **Sign-in: SSO or e-mail and password.** Each gateway uses one of two ways for the dashboard,
+  set by `auth.mode`: RS256 JWTs from an external SSO (verified against a JWKS), or e-mail and
+  password with admin invitations sent by e-mail. From the dashboard users issue scoped virtual keys,
+  which are the only credentials accepted for inference.
 - **Single binary.** Written in Rust (Tokio, axum, reqwest, sqlx). It serves the React dashboard at
   `/dashboard/` and listens on port `4000`.
 
@@ -35,7 +36,7 @@ Key properties:
 
 | Term | Meaning |
 |---|---|
-| Principal | An identity that makes requests: a *human* (an SSO user) or a *service* (a non-human account with a human owner, created by an admin). |
+| Principal | An identity that makes requests: a *human* (a person who signs in through the SSO or with a password) or a *service* (a non-human account with a human owner, created by an admin). |
 | Profile | An operator-declared entry in the config for one model and API, with its exact limits and rates. Requests for anything without a profile are rejected. |
 | Policy | Per-principal (and per-API-key) settings managed by admins: **grants** plus optional **limits**. |
 | Grant | A tuple of provider, model and *capabilities*. A capability is one API family: `messages`, `count_tokens`, `responses`, `chat_completions` or `embeddings`. |
@@ -102,7 +103,7 @@ Any other gateway error carries `x-should-retry: false` instead. Every response 
   to encrypt without verifying the certificate (for example, inside a private network where shipping
   the CA is impractical). Do not set any `PG*` environment variables (`PGHOST`, `PGPASSWORD`,
   `PGSSLMODE`, …). If one is present, even empty, the gateway refuses to connect.
-- **An SSO** that issues RS256 access JWTs and serves a JWKS. See [Authentication](#authentication).
+- In `sso` mode, **an SSO** that issues RS256 access JWTs and serves a JWKS. See [Authentication](#authentication). In `password` mode, an SMTP server instead (see [Password mode](#password-mode)).
 - **A TLS-terminating reverse proxy.** The gateway serves plain HTTP on `0.0.0.0:4000`, but all
   configured URLs must be `https://`.
 - Provider API keys for the providers you enable.
@@ -163,7 +164,9 @@ pass `--config <path>`.
 ### 5. First use
 
 1. The fixed admin (the person named by `admin_email`) opens `https://<gateway>/dashboard/` and
-   signs in through the SSO. Under *Admin → Access list*, the admin adds the people who may use the
+   signs in. In `sso` mode this is the SSO sign-in. In `password` mode the fixed admin first sets a
+   password with the setup link that the gateway writes to its start log (see
+   [Password mode](#password-mode)). Under *Admin → Access list*, the admin adds the people who may use the
    gateway, and chooses who else is an admin (see [Access list](#access-list)). Under *Admin → Provider keys* (`/dashboard/admin/credentials`), the admin registers a provider key
    for each configured provider. Without one, `/readyz` still returns 200 so the admin can reach the
    dashboard, but no request can go out to that provider.
@@ -215,7 +218,8 @@ tags and merge keys. [`config.example.yaml`](config.example.yaml) is an annotate
 | Key | Required | Description |
 |---|---|---|
 | `public_origin` | yes | HTTPS origin of the gateway (no path or port). Cookie-authenticated writes must send exactly this `Origin`. |
-| `auth` | yes | SSO settings, see below. |
+| `auth` | yes | `mode` (`sso` or `password`, required) and the SSO settings, see below. |
+| `smtp` | in `password` mode | The SMTP server for invitations and reset links, see [Password mode](#password-mode). Refused in `sso` mode. |
 | `admin_email` | yes | The fixed admin: one e-mail address. The gateway lowercases it. At each start, the gateway adds it to the [access list](#access-list) as an admin. |
 | `database` | yes | `host`, `port`, `name`, `user`, and optional `ssl_mode` (`verify-full` by default, or `require`). The password comes from `DB_PASSWORD`. |
 | `providers` | yes | 1–4 entries, at most one per provider. |
@@ -224,6 +228,12 @@ tags and merge keys. [`config.example.yaml`](config.example.yaml) is an annotate
 | `execution_ceiling` | – | Server-wide ceiling that applies to every policy. |
 
 ### `auth`
+
+`mode` is required: `sso` or `password` (environment variable `AUTH_MODE`). It has no default.
+The keys below are the SSO settings. They are required in `sso` mode. In `password` mode they are
+refused: if any of them, or its environment variable, is set, the gateway does not start. The error
+names the value, for example `config_value_refused: AUTH_ISSUER`. A missing required value gives
+`config_value_missing: <name>` in the same way.
 
 | Key | Description |
 |---|---|
@@ -356,6 +366,9 @@ The gateway reads only the variables in this table.
 | `SSO_LOGIN_URL`, `SSO_REFRESH_URL`, `SSO_LOGOUT_URL` | `auth.login_url`, `auth.refresh_url`, `auth.logout_url` | |
 | `SSO_RETURN_PARAM` | `auth.return_param` | |
 | `ADMIN_EMAIL` | `admin_email` | |
+| `AUTH_MODE` | `auth.mode` | `sso` or `password`. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_FROM` | `smtp.*` | `password` mode only. |
+| `SMTP_PASSWORD` | – | Secret, environment only. `password` mode only. |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_SSL_MODE` | `database.*` | `DB_SSL_MODE` accepts only `verify-full` or `require`. |
 | `TLS_CA_FILE` | – | Path to an extra PEM trust anchor (≤ 64 KiB) for Postgres, the JWKS and provider connections. |
 | `DB_PASSWORD` | – | **Secret, environment only.** |
@@ -463,6 +476,9 @@ refresh tokens.
 | SSO JWT in the access cookie (browser) | **no** | yes (writes need CSRF) | if admin |
 | Virtual key (starts with `mgw_`) | yes, within the key's grants and limits | no | no |
 
+In `password` mode, the session token from the `mgated_session` cookie (or the same token in
+`Authorization: Bearer`) takes the place of the SSO JWT in this table. See [Password mode](#password-mode).
+
 If a request sends both `Authorization` and `x-api-key`, the two values must be identical. Claude
 Code sends both.
 
@@ -512,6 +528,73 @@ Every management write (`POST`, `PUT`, `PATCH`, `DELETE`) requires an `X-Gateway
 header containing a UUID. Repeating a command with the same ID and the same input replays the
 original result, so retrying is safe.
 
+### Password mode
+
+With `auth.mode: password`, the gateway is its own sign-in service. There is no SSO. People sign in
+with an e-mail address and a password, and an admin invites them by e-mail
+([decision 0011](docs/decisions/0011-password-sign-in.md)).
+
+```yaml
+auth:
+  mode: password
+smtp:
+  host: smtp.example.com
+  port: 587            # 465: TLS from the start. Any other port: STARTTLS is required.
+  username: gateway
+  from: gateway@example.com
+# SMTP_PASSWORD comes from the environment only.
+```
+
+- **Principals.** The gateway finds a person's principal by an issuer and a subject. In `password`
+  mode the issuer is `public_origin` and the subject is the lower-case e-mail address. The principal
+  is made at the first sign-in, right after the person sets a password.
+- **Passwords.** 12 to 128 characters, with no rules about character kinds. Only an argon2id hash is
+  stored (19 MiB of memory, 2 passes, no parallel threads). Only the person can set or change their own password.
+- **Links.** Three kinds of one-use link point to `/dashboard/password#token=<token>`. The token is
+  in the URL fragment, so it does not reach server logs or the `Referer` header, and only its
+  SHA-256 is stored.
+  - An invitation is valid for 7 days. A reset link and a setup link are valid for 24 hours.
+  - When a person sets a password, all open links of that person stop working, and so do all of
+    that person's sessions.
+  - When an admin sends a new invitation or reset link, the earlier invitation and reset links of
+    that person stop working.
+- **Mail.** The gateway sends invitations and reset links through the SMTP server, over TLS. It
+  stores the link first and then sends the mail. If the server refuses the mail or does not answer
+  in 10 seconds, the gateway removes the link.
+- **The first admin.** While the fixed admin (`admin_email`) has no password, the gateway writes a
+  setup link to stderr at each start, as a JSON line with `"warning": "first_admin_setup_link"`.
+  Each start makes a new setup link, and earlier setup links stay valid until they expire or the
+  password is set. Anyone who can read the start log can use the link, so limit log access to
+  operators. If no admin can sign in, change `admin_email` to an address that has no password yet,
+  and restart.
+- **Sessions.** Signing in sets the cookie `mgated_session` (`HttpOnly`, `Secure`, `SameSite=Lax`)
+  with a random token. Only the token's SHA-256 is stored. A session ends in these cases, and the
+  gateway checks them on each request:
+  - 12 hours after sign-in;
+  - at sign-out;
+  - when the person changes or resets the password;
+  - when the person is suspended, or removed from the access list.
+
+  Cookie-authenticated writes need `Origin` and a CSRF token, as in `sso` mode.
+- **Failed sign-ins.** A wrong password and an unknown address get the same answer
+  (`401 invalid_credentials`) and take the same time. After 5 failures for one address, that address
+  cannot sign in for 15 minutes (`429 sign_in_locked` with `Retry-After`). Password hash checks count
+  toward `limits.authentication`, the number of authentication checks that run at the same time.
+- **Dashboard.** `/auth/login` sends a person who is not signed in to `/dashboard/signin`. The
+  sign-in screen has no "forgot password": an admin sends a reset link. Each person can change their
+  own password from the sidebar.
+
+| Method and path | Body | Result |
+|---|---|---|
+| `POST /auth/password` | `{"email": "...", "password": "..."}` | `204` and the session cookie; `401 invalid_credentials`; `429 sign_in_locked`; `403 access_denied` if the account is suspended |
+| `POST /auth/password/link` | `{"token": "..."}` | `200` with `email`, `kind` (`invitation`, `reset` or `setup`), `password_set` and `expires_at`; `404 link_invalid` |
+| `POST /auth/password/set` | `{"token": "...", "password": "...", "display_name"?: "..."}` | `204` and a session cookie (the person is signed in). `display_name` is required when `password_set` is `false`. `400 password_invalid`; `404 link_invalid` |
+| `POST /auth/logout` | – | `204`; the session ends and the cookie is cleared |
+| `POST /api/me/password` | `{"current_password": "...", "new_password": "..."}` | `204`; all sessions of the person end. `400 current_password_invalid` or `password_invalid` |
+| `POST /api/admin/access/{id}/link` | empty; needs `X-Gateway-Command-ID` | `200`; sends an invitation to a person without a password, or a reset link to a person with one. `502 mail_failed` if the mail could not be sent. A failed send is not recorded, so sending the same command ID again tries again; after a success, the same command ID returns the first result and sends no mail |
+
+These routes exist only in `password` mode. `POST /api/me/password` does not use the command ID.
+
 ### Access list
 
 The access list in the database decides who can use the gateway and who is an admin. Each entry of
@@ -524,15 +607,19 @@ principal is made at the first sign-in.
   `admin`. The fixed admin's entry cannot be changed or removed on the dashboard.
 - Admins add, change and remove other people under *Admin → Access list*
   (`/dashboard/admin/members`). An admin cannot change or remove their own entry.
+- In `password` mode, adding a person also sends an invitation. The answer says whether the mail
+  went out (`"invitation": "sent"` or `"failed"`). Removing a person also removes their password,
+  links and sessions, so a person who is added again needs a new invitation.
 - A change applies to the next request. A person who is removed can no longer sign in. Their virtual
   keys stop working (`403 access_denied`), and so do the keys of the service principals that they
   own (`403 owner_inactive`). Their principal, virtual keys and usage stay in the database.
-- Removing a person ends their access for good, until an admin adds them again. To block a person
-  for a while and keep their entry, suspend their principal instead (see **Suspending an account**
-  under [Operations](#operations)).
+- Removing a person ends their access. They get it back only if an admin adds them again. To block
+  a person for a while and keep their entry, suspend their principal instead (see **Suspending an
+  account** under [Operations](#operations)).
 - Every change is written to the audit log.
-- If no admin can sign in, change `admin_email` to a person who can sign in through the SSO, and
-  restart. That person
+- If no admin can sign in, change `admin_email` and restart. In `sso` mode, choose a person who can
+  sign in through the SSO. In `password` mode, choose an address that has no password yet; the
+  gateway then writes a setup link for it (see [Password mode](#password-mode)). That person
   becomes the fixed admin. The earlier fixed admin stays on the list as a normal admin and can then
   be removed on the dashboard.
 
@@ -540,7 +627,7 @@ API (admin only; writes need `X-Gateway-Command-ID`, and cookie writes need `Ori
 
 | Method and path | Body / query | Result |
 |---|---|---|
-| `GET /api/admin/access` | – | `items`, sorted by e-mail address. Each entry has `id`, `email`, `role` (`user` or `admin`), `fixed` (the fixed admin), `added_by_email` (`null` for the fixed admin), `added_at`, `version`, and `principal`: once the person has signed in, the principal's `id` and `disabled` (`true` while the principal is suspended), else `null` |
+| `GET /api/admin/access` | – | `items`, sorted by e-mail address. Each entry has `id`, `email`, `role` (`user` or `admin`), `fixed` (the fixed admin), `added_by_email` (`null` for the fixed admin), `added_at`, `version`, `principal`: once the person has signed in, the principal's `id` and `disabled` (`true` while the principal is suspended), else `null`, and `password_set` (in `password` mode, whether the person has set a password; always `false` in `sso` mode) |
 | `POST /api/admin/access` | `{"email": "...", "role": "user" \| "admin"}` | `201`; `409 access_exists` if the address is already on the list |
 | `PATCH /api/admin/access/{id}` | `{"role": "user" \| "admin", "expected_version": "<n>"}` | `200`; `409 version_conflict` if the entry changed since you read `version`; `409 access_protected` for the fixed admin's entry or your own entry |
 | `DELETE /api/admin/access/{id}` | `?expected_version=<n>` | `200`; the same conflicts as `PATCH` |
@@ -713,6 +800,7 @@ It has no inline scripts and loads nothing from external CDNs.
 | My usage and budget balances | `/dashboard/` | users |
 | My virtual keys (list, edit and revoke) | `/dashboard/keys` | users |
 | Issue a virtual key | `/dashboard/keys/new` | users |
+| Sign-in and setting a password from a link (`password` mode) | `/dashboard/signin`, `/dashboard/password` | everyone |
 | Access list (who may sign in, who is an admin) | `/dashboard/admin/members` | admins |
 | Principals, policies, service principals, safety-pause release | `/dashboard/admin/principals` | admins |
 | Issue a virtual key for a service principal | `/dashboard/admin/principals/key?principal_id=<id>` | admins |
@@ -730,8 +818,8 @@ routes). It is same-origin only, with no CORS. The UI is in Korean by default; a
 ## Operations
 
 - **Health:** `GET /livez` returns `200 ok` once HTTP is up and makes no external calls.
-  `GET /readyz` returns `200 ready` or `503 not_ready`, based on periodic checks of Postgres and the
-  JWKS.
+  `GET /readyz` returns `200 ready` or `503 not_ready`, based on periodic checks of Postgres and, in `sso` mode,
+  the JWKS.
 - **Shutdown:** on `SIGTERM` the gateway stops reporting ready and rejects new inference and management writes.
   Requests in flight then get up to about 25 s to finish and settle, and the process exits within
   about 30 s. Give it a termination grace period of more than 30 s.
@@ -919,7 +1007,8 @@ command id returns the recorded result without running the command or calling th
 `m-gated --maintenance --config gateway.yaml` validates the configuration, connects to the
 database, runs migrations and executes **one** command read from stdin. It does not open a listener.
 stdin and stdout must be pipes or sockets, not regular files or TTYs. The input is a JSON envelope
-that carries a current admin's SSO JWT. API keys are not accepted. Example that deletes settled
+that carries a current admin's SSO JWT (in `password` mode, a session token of a current admin, the
+value of the `mgated_session` cookie). API keys are not accepted. Example that deletes settled
 ledger detail older than `retention.ledger`:
 
 ```sh

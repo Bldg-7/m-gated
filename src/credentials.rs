@@ -259,7 +259,7 @@ impl CredentialService {
         for provider in config.providers() {
             let client = NativeClient::from_config(
                 provider,
-                config.auth().ca_certificate.as_deref(),
+                config.ca_certificate(),
                 verifiers.values().next(),
                 cache.clone(),
             )

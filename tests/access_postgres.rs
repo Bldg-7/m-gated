@@ -10,7 +10,7 @@ use axum::{
     http::Request,
 };
 use m_gated::{
-    auth::{SsoAuthenticator, SsoVerifier, jwks::JwksCache},
+    auth::{Authenticator, SsoVerifier, jwks::JwksCache},
     config::{self, ConfigInputs},
     http::{self, AppState},
     runtime::{Dependency, Runtime},
@@ -43,10 +43,10 @@ impl Harness {
             .serve()
             .await;
         let verifier = SsoVerifier::new(
-            cfg.auth(),
+            cfg.sso().unwrap(),
             Arc::new(JwksCache::loopback_for_test(jwks.uri.clone()).unwrap()),
         );
-        let auth = Arc::new(SsoAuthenticator::new(&cfg, verifier, db.store.clone()));
+        let auth = Arc::new(Authenticator::new(&cfg, verifier, db.store.clone()));
         let api = Arc::new(m_gated::admin::DashboardApi::new(
             &cfg,
             auth,

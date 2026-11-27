@@ -29,6 +29,12 @@ pub enum StartupError {
     RemovedProviderKeyEnv,
     /// WASM 어댑터 파일을 읽지 못했거나, 해시가 다르거나, 규칙에 맞지 않는다.
     InvalidAdapter,
+    /// 이 인증 방식에 필요한 설정값이 없다. 값의 이름(환경 변수 이름)을 담는다.
+    MissingValue(&'static str),
+    /// 다른 인증 방식의 설정값이 있다(결정 0011 규칙 1). 값의 이름을 담는다.
+    RefusedValue(&'static str),
+    /// SMTP 설정이 규칙에 맞지 않는다.
+    InvalidSmtp,
 }
 impl StartupError {
     pub fn code(self) -> &'static str {
@@ -52,12 +58,20 @@ impl StartupError {
             Self::MaintenanceFailure => "maintenance_failed",
             Self::RemovedProviderKeyEnv => "config_provider_key_env_removed",
             Self::InvalidAdapter => "config_adapter_invalid",
+            Self::MissingValue(_) => "config_value_missing",
+            Self::RefusedValue(_) => "config_value_refused",
+            Self::InvalidSmtp => "config_smtp_invalid",
         }
     }
 }
 impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.code())
+        match self {
+            Self::MissingValue(name) | Self::RefusedValue(name) => {
+                write!(f, "{}: {name}", self.code())
+            }
+            _ => f.write_str(self.code()),
+        }
     }
 }
 impl std::error::Error for StartupError {}
@@ -127,6 +141,8 @@ impl Retention {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAuth {
+    /// 로그인 방식(결정 0011). `sso` 또는 `password`.
+    mode: Option<String>,
     issuer: Option<String>,
     jwks_uri: Option<String>,
     audience: Option<String>,
@@ -135,6 +151,15 @@ struct RawAuth {
     refresh_url: Option<String>,
     logout_url: Option<String>,
     return_param: Option<String>,
+}
+/// `password` 방식에서 초대·재설정 메일을 보내는 SMTP 서버. 비밀번호는 `SMTP_PASSWORD`로만 받는다.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSmtp {
+    host: Option<String>,
+    port: Option<u16>,
+    username: Option<String>,
+    from: Option<String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +178,8 @@ struct RawConfig {
     public_origin: Option<String>,
     /// 고정 관리자의 이메일(결정 0001). 다른 사람은 대시보드에서 접근 목록에 더한다.
     admin_email: Option<String>,
+    #[serde(default)]
+    smtp: RawSmtp,
     #[serde(default)]
     database: RawDatabase,
     providers: Vec<RawProvider>,
@@ -398,7 +425,6 @@ impl AdapterFile {
     }
 }
 pub struct AuthConfig {
-    pub ca_certificate: Option<Vec<u8>>,
     pub issuer_literal: String,
     pub audience_literal: String,
     pub issuer: Url,
@@ -422,6 +448,21 @@ impl AuthConfig {
         }
         url.to_string()
     }
+}
+/// 로그인 방식(결정 0011). 게이트웨이마다 하나만 쓴다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    Sso,
+    Password,
+}
+/// 초대·재설정 메일을 보내는 SMTP 서버. 포트 465는 처음부터 TLS, 그 밖의 포트는 STARTTLS가 필수다.
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: Secret,
+    /// 보내는 주소(소문자 이메일).
+    pub from: String,
 }
 /// Postgres TLS 수준. 평문 연결은 선택지에 없다.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -454,7 +495,13 @@ pub struct DatabaseConfig {
     pub password: Secret,
 }
 pub struct ValidatedConfig {
-    pub(crate) auth: AuthConfig,
+    pub(crate) auth_mode: AuthMode,
+    /// SSO 설정. `sso` 방식에서만 있다.
+    pub(crate) auth: Option<AuthConfig>,
+    /// SMTP 설정. `password` 방식에서만 있다.
+    pub(crate) smtp: Option<SmtpConfig>,
+    /// `TLS_CA_FILE`의 추가 신뢰 인증서. Postgres, JWKS, Provider 연결이 함께 쓴다.
+    pub(crate) ca_certificate: Option<Vec<u8>>,
     pub(crate) public_origin: Url,
     pub(crate) admin_email: String,
     pub(crate) database: DatabaseConfig,
@@ -468,8 +515,19 @@ pub struct ValidatedConfig {
     pub(crate) execution_ceiling: crate::ledger::policy::PolicyLimits,
 }
 impl ValidatedConfig {
-    pub fn auth(&self) -> &AuthConfig {
-        &self.auth
+    pub fn auth_mode(&self) -> AuthMode {
+        self.auth_mode
+    }
+    /// SSO 설정. `password` 방식에서는 없다.
+    pub fn sso(&self) -> Option<&AuthConfig> {
+        self.auth.as_ref()
+    }
+    /// SMTP 설정. `sso` 방식에서는 없다.
+    pub fn smtp(&self) -> Option<&SmtpConfig> {
+        self.smtp.as_ref()
+    }
+    pub fn ca_certificate(&self) -> Option<&[u8]> {
+        self.ca_certificate.as_deref()
     }
     pub fn public_origin(&self) -> &Url {
         &self.public_origin
@@ -495,15 +553,20 @@ impl ValidatedConfig {
     pub fn credential_encryption_key_bytes(&self) -> [u8; 32] {
         hex32(self.credential_encryption_key.expose())
     }
-    /// SSO 로그인 화면 주소. `auth.return_param`이 있으면 대시보드로 돌아올 주소를 붙인다.
+    /// 로그인 화면 주소. SSO 방식은 SSO 로그인 화면이고, `auth.return_param`이 있으면 대시보드로
+    /// 돌아올 주소를 붙인다. 비밀번호 방식은 대시보드의 로그인 화면이다.
     pub fn login_redirect(&self) -> String {
-        self.auth
-            .with_return(&self.auth.login_url, &self.public_origin)
+        match &self.auth {
+            Some(auth) => auth.with_return(&auth.login_url, &self.public_origin),
+            None => "/dashboard/signin".to_owned(),
+        }
     }
-    /// SSO 로그아웃 주소. `auth.return_param`이 있으면 대시보드로 돌아올 주소를 붙인다.
+    /// 로그아웃 뒤 갈 주소. SSO 방식은 SSO 로그아웃 주소이고, 비밀번호 방식은 대시보드의 로그인 화면이다.
     pub fn logout_redirect(&self) -> String {
-        self.auth
-            .with_return(&self.auth.logout_url, &self.public_origin)
+        match &self.auth {
+            Some(auth) => auth.with_return(&auth.logout_url, &self.public_origin),
+            None => "/dashboard/signin".to_owned(),
+        }
     }
     pub fn providers(&self) -> &[ProviderConfig] {
         &self.providers
@@ -606,7 +669,7 @@ pub fn parse_non_secret_env(input: &str) -> Result<BTreeMap<String, String>, Sta
         let (key, value) = line.split_once('=').ok_or(StartupError::ConfigSyntax)?;
         if !ENV_KEYS.contains(&key)
             || key.ends_with("API_KEY")
-            || ["DB_PASSWORD", "CSRF_SIGNING_KEY"].contains(&key)
+            || ["DB_PASSWORD", "CSRF_SIGNING_KEY", "SMTP_PASSWORD"].contains(&key)
             || value.contains(['$', '`', '\'', '"'])
             || value.chars().any(char::is_control)
             || value != value.trim()
@@ -648,16 +711,14 @@ fn validate(
     raw: RawConfig,
     env: &BTreeMap<String, String>,
 ) -> Result<ValidatedConfig, StartupError> {
-    let read = |key: &str, value: Option<String>| {
+    // 필수값이 없으면 그 이름을 오류에 담는다.
+    let read = |key: &'static str, value: Option<String>| {
         env.get(key)
             .cloned()
             .or(value)
-            .ok_or(StartupError::ConfigInput)
+            .ok_or(StartupError::MissingValue(key))
     };
     let parse = |key, value| -> Result<Url, StartupError> { parse_url(&read(key, value)?) };
-    let issuer_literal = read("AUTH_ISSUER", raw.auth.issuer)?;
-    let audience_literal = read("SSO_AUDIENCE", raw.auth.audience)?;
-    let issuer = parse_url(&issuer_literal)?;
     let ca_certificate = env
         .get("TLS_CA_FILE")
         .map(|path| {
@@ -673,23 +734,84 @@ fn validate(
             Ok(bytes)
         })
         .transpose()?;
+    // 로그인 방식(결정 0011 규칙 1). 다른 방식의 값이 하나라도 있으면 시작하지 않는다.
+    let auth_mode = match read("AUTH_MODE", raw.auth.mode.clone())?.as_str() {
+        "sso" => AuthMode::Sso,
+        "password" => AuthMode::Password,
+        _ => return Err(StartupError::InvalidAuth),
+    };
+    let sso_values = [
+        ("AUTH_ISSUER", raw.auth.issuer.is_some()),
+        ("AUTH_JWKS_URI", raw.auth.jwks_uri.is_some()),
+        ("SSO_AUDIENCE", raw.auth.audience.is_some()),
+        (
+            "SSO_ACCESS_COOKIE_NAME",
+            raw.auth.access_cookie_name.is_some(),
+        ),
+        ("SSO_LOGIN_URL", raw.auth.login_url.is_some()),
+        ("SSO_REFRESH_URL", raw.auth.refresh_url.is_some()),
+        ("SSO_LOGOUT_URL", raw.auth.logout_url.is_some()),
+        ("SSO_RETURN_PARAM", raw.auth.return_param.is_some()),
+    ];
+    let smtp_values = [
+        ("SMTP_HOST", raw.smtp.host.is_some()),
+        ("SMTP_PORT", raw.smtp.port.is_some()),
+        ("SMTP_USERNAME", raw.smtp.username.is_some()),
+        ("SMTP_FROM", raw.smtp.from.is_some()),
+        ("SMTP_PASSWORD", false),
+    ];
+    let other = match auth_mode {
+        AuthMode::Sso => &smtp_values[..],
+        AuthMode::Password => &sso_values[..],
+    };
+    if let Some((name, _)) = other
+        .iter()
+        .find(|(name, in_file)| *in_file || env.contains_key(*name))
+    {
+        return Err(StartupError::RefusedValue(name));
+    }
+    let auth = match auth_mode {
+        AuthMode::Password => None,
+        AuthMode::Sso => {
+            let issuer_literal = read("AUTH_ISSUER", raw.auth.issuer)?;
+            let audience_literal = read("SSO_AUDIENCE", raw.auth.audience)?;
+            Some(AuthConfig {
+                issuer: parse_url(&issuer_literal)?,
+                issuer_literal,
+                audience: parse_url(&audience_literal)?,
+                audience_literal,
+                jwks_uri: parse("AUTH_JWKS_URI", raw.auth.jwks_uri)?,
+                access_cookie_name: read("SSO_ACCESS_COOKIE_NAME", raw.auth.access_cookie_name)?,
+                login_url: parse("SSO_LOGIN_URL", raw.auth.login_url)?,
+                refresh_url: parse("SSO_REFRESH_URL", raw.auth.refresh_url)?,
+                logout_url: parse("SSO_LOGOUT_URL", raw.auth.logout_url)?,
+                return_param: env
+                    .get("SSO_RETURN_PARAM")
+                    .cloned()
+                    .or(raw.auth.return_param),
+            })
+        }
+    };
+    let smtp = match auth_mode {
+        AuthMode::Sso => None,
+        AuthMode::Password => Some(SmtpConfig {
+            host: read("SMTP_HOST", raw.smtp.host)?,
+            port: read("SMTP_PORT", raw.smtp.port.map(|p| p.to_string()))?
+                .parse()
+                .map_err(|_| StartupError::InvalidSmtp)?,
+            username: read("SMTP_USERNAME", raw.smtp.username)?,
+            password: secret(env, "SMTP_PASSWORD").map_err(|e| match e {
+                StartupError::MissingSecret => StartupError::MissingValue("SMTP_PASSWORD"),
+                e => e,
+            })?,
+            from: read("SMTP_FROM", raw.smtp.from)?,
+        }),
+    };
     let mut config = ValidatedConfig {
-        auth: AuthConfig {
-            ca_certificate: ca_certificate.clone(),
-            issuer,
-            issuer_literal,
-            audience: parse_url(&audience_literal)?,
-            audience_literal,
-            jwks_uri: parse("AUTH_JWKS_URI", raw.auth.jwks_uri)?,
-            access_cookie_name: read("SSO_ACCESS_COOKIE_NAME", raw.auth.access_cookie_name)?,
-            login_url: parse("SSO_LOGIN_URL", raw.auth.login_url)?,
-            refresh_url: parse("SSO_REFRESH_URL", raw.auth.refresh_url)?,
-            logout_url: parse("SSO_LOGOUT_URL", raw.auth.logout_url)?,
-            return_param: env
-                .get("SSO_RETURN_PARAM")
-                .cloned()
-                .or(raw.auth.return_param),
-        },
+        auth_mode,
+        auth,
+        smtp,
+        ca_certificate: ca_certificate.clone(),
         public_origin: parse("PUBLIC_ORIGIN", raw.public_origin)?,
         admin_email: read("ADMIN_EMAIL", raw.admin_email)?,
         database: DatabaseConfig {
@@ -784,6 +906,11 @@ pub const ENV_KEYS: &[&str] = &[
     "SSO_REFRESH_URL",
     "SSO_LOGOUT_URL",
     "SSO_RETURN_PARAM",
+    "AUTH_MODE",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USERNAME",
+    "SMTP_FROM",
     "PUBLIC_ORIGIN",
     "ADMIN_EMAIL",
     "DB_HOST",
@@ -795,13 +922,13 @@ pub const ENV_KEYS: &[&str] = &[
     "CSRF_SIGNING_KEY",
     "CREDENTIAL_ENCRYPTION_KEY",
     "ANTHROPIC_ADMIN_API_KEY",
+    "SMTP_PASSWORD",
 ];
 /// Provider 키는 DB에서만 관리한다. 예전 환경변수가 남아 있으면 조용히 무시하지 않고 기동을 거부한다.
 pub const REMOVED_ENV_KEYS: &[&str] = &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"];
 
 impl ValidatedConfig {
-    fn validate(&mut self) -> Result<(), StartupError> {
-        let auth = &self.auth;
+    fn validate_sso(auth: &AuthConfig) -> Result<(), StartupError> {
         for url in [
             &auth.issuer,
             &auth.jwks_uri,
@@ -809,14 +936,10 @@ impl ValidatedConfig {
             &auth.login_url,
             &auth.refresh_url,
             &auth.logout_url,
-            &self.public_origin,
         ] {
             secure_url(url)?;
         }
-        if self.public_origin.path() != "/"
-            || auth.issuer.path() != "/"
-            || auth.audience.path() != "/"
-        {
+        if auth.issuer.path() != "/" || auth.audience.path() != "/" {
             return Err(StartupError::InvalidUrl);
         }
         // JWT의 iss/aud는 설정 문자열과 그대로 비교한다. URL 정규화로 다른 값이 같아지지 않도록
@@ -844,6 +967,33 @@ impl ValidatedConfig {
             if url.origin() != auth.issuer.origin() {
                 return Err(StartupError::InvalidAuth);
             }
+        }
+        Ok(())
+    }
+    /// SMTP 서버 이름·포트·계정·보내는 주소를 검사한다. 보내는 주소는 소문자로 바꾼다.
+    fn validate_smtp(smtp: &mut SmtpConfig) -> Result<(), StartupError> {
+        if url::Host::parse(&smtp.host).is_err()
+            || smtp.host.len() > 253
+            || smtp.port == 0
+            || smtp.username.is_empty()
+            || smtp.username.len() > 256
+            || smtp.username.chars().any(char::is_control)
+        {
+            return Err(StartupError::InvalidSmtp);
+        }
+        smtp.from = email_value(&smtp.from).map_err(|_| StartupError::InvalidSmtp)?;
+        Ok(())
+    }
+    fn validate(&mut self) -> Result<(), StartupError> {
+        secure_url(&self.public_origin)?;
+        if self.public_origin.path() != "/" {
+            return Err(StartupError::InvalidUrl);
+        }
+        if let Some(auth) = &self.auth {
+            Self::validate_sso(auth)?;
+        }
+        if let Some(smtp) = &mut self.smtp {
+            Self::validate_smtp(smtp)?;
         }
         self.admin_email = email_value(&self.admin_email)?;
         let db = &self.database;
